@@ -32,78 +32,6 @@
       <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x400" is_boot_memory="false"/>
     </flash_regions>
   </device>
-  <device part_number="apm32f403xb" source="builtin">
-    <vendor>Geehy</vendor>
-    <display_name>APM32F403xB</display_name>
-    <core>Cortex-M4</core>
-    <num_cores>1</num_cores>
-    <flash_size>128</flash_size>
-    <ram_size>32</ram_size>
-    <flash_base_address>0x08000000</flash_base_address>
-    <ram_base_address>0x20000000</ram_base_address>
-    <device_id_address>0xE0042000</device_id_address>
-    <flash_regions>
-      <region start="0x08000000" length="0x20000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
-    </flash_regions>
-  </device>
-  <device part_number="apm32f407xg" source="builtin">
-    <vendor>Geehy</vendor>
-    <display_name>APM32F407xG</display_name>
-    <core>Cortex-M4</core>
-    <num_cores>1</num_cores>
-    <flash_size>1024</flash_size>
-    <ram_size>192</ram_size>
-    <flash_base_address>0x08000000</flash_base_address>
-    <ram_base_address>0x20000000</ram_base_address>
-    <device_id_address>0xE0042000</device_id_address>
-    <flash_regions>
-      <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x400" is_boot_memory="true"/>
-      <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x400" is_boot_memory="false"/>
-      <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x400" is_boot_memory="false"/>
-    </flash_regions>
-  </device>
-  <device part_number="g32f002x5" source="builtin">
-    <vendor>Geehy</vendor>
-    <display_name>G32F002x5</display_name>
-    <core>Cortex-M0+</core>
-    <num_cores>1</num_cores>
-    <flash_size>24</flash_size>
-    <ram_size>3</ram_size>
-    <flash_base_address>0x00000000</flash_base_address>
-    <ram_base_address>0x20000000</ram_base_address>
-    <device_id_address>0xE0042000</device_id_address>
-    <flash_regions>
-      <region start="0x00000000" length="0x6000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
-    </flash_regions>
-  </device>
-  <device part_number="g32f031x8" source="builtin">
-    <vendor>Geehy</vendor>
-    <display_name>G32F031x8</display_name>
-    <core>Cortex-M0+</core>
-    <num_cores>1</num_cores>
-    <flash_size>64</flash_size>
-    <ram_size>8</ram_size>
-    <flash_base_address>0x00000000</flash_base_address>
-    <ram_base_address>0x20000000</ram_base_address>
-    <device_id_address>0xE0042000</device_id_address>
-    <flash_regions>
-      <region start="0x00000000" length="0x10000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
-    </flash_regions>
-  </device>
-  <device part_number="g32m3101x8" source="builtin">
-    <vendor>Geehy</vendor>
-    <display_name>G32M3101x8</display_name>
-    <core>Cortex-M0+</core>
-    <num_cores>1</num_cores>
-    <flash_size>64</flash_size>
-    <ram_size>8</ram_size>
-    <flash_base_address>0x00000000</flash_base_address>
-    <ram_base_address>0x20000000</ram_base_address>
-    <device_id_address>0xE0042000</device_id_address>
-    <flash_regions>
-      <region start="0x00000000" length="0x10000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
-    </flash_regions>
-  </device>
   <device part_number="g32f020k8" source="pack" pack="Geehy.G32F020_DFP">
     <vendor>Geehy</vendor>
     <display_name>G32F020K8</display_name>
@@ -116,6 +44,48 @@
     <device_id_address>0xE0042000</device_id_address>
     <flash_regions>
       <region start="0x00000000" length="0x10000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="g32f002f5" source="pack" pack="Geehy.G32F002_DFP">
+    <vendor>Geehy</vendor>
+    <display_name>G32F002F5</display_name>
+    <core>Cortex-M0+</core>
+    <num_cores>1</num_cores>
+    <flash_size>24</flash_size>
+    <ram_size>3</ram_size>
+    <flash_base_address>0x00000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x00000000" length="0x6000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="g32f002w5" source="pack" pack="Geehy.G32F002_DFP">
+    <vendor>Geehy</vendor>
+    <display_name>G32F002W5</display_name>
+    <core>Cortex-M0+</core>
+    <num_cores>1</num_cores>
+    <flash_size>24</flash_size>
+    <ram_size>3</ram_size>
+    <flash_base_address>0x00000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x00000000" length="0x6000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="g32f002s5" source="pack" pack="Geehy.G32F002_DFP">
+    <vendor>Geehy</vendor>
+    <display_name>G32F002S5</display_name>
+    <core>Cortex-M0+</core>
+    <num_cores>1</num_cores>
+    <flash_size>24</flash_size>
+    <ram_size>3</ram_size>
+    <flash_base_address>0x00000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x00000000" length="0x6000" sector_size="0x200" page_size="0x200" is_boot_memory="true"/>
     </flash_regions>
   </device>
 </devices>

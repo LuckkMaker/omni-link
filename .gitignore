@@ -1,36 +1,61 @@
+# ── Node.js ──────────────────────────────
 node_modules/
 out/
 dist/
+
+# ── Python ───────────────────────────────
 .venv/
 __pycache__/
 *.pyc
-.env
-*.log
-*.pack
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# ── 构建产物 ─────────────────────────────
 release/
 python/build/
-
-# SQLite WAL 临时文件
-python/data/devices.db-wal
-python/data/devices.db-shm
-
-# macOS 系统文件
-.DS_Store
-
-# Windows 系统文件
-Thumbs.db
-Desktop.ini
-
-# electron-vite 临时构建配置文件
-electron.vite.config.*.mjs
-
-# PyInstaller 产物
 python/dist/
 
-# IDE 文件
+# ── PyInstaller 临时文件 ─────────────────
+*.spec.bak
+
+# ── 运行时数据（用户生成，不纳入版本控制）──
+# devices.xml 是种子数据，需要追踪
+python/data/devices.db
+python/data/devices.db-wal
+python/data/devices.db-shm
+python/data/packs/installed_packs.json
+
+# ── CMSIS-Pack 文件 ──────────────────────
+*.pack
+
+# ── 环境配置 ─────────────────────────────
+.env
+
+# ── 日志 ─────────────────────────────────
+*.log
+
+# ── 临时/备份文件 ────────────────────────
+*.tmp
+*.bak
+*~
+
+# ── electron-vite 临时构建配置 ───────────
+electron.vite.config.*.mjs
+
+# ── IDE ──────────────────────────────────
 .idea/
 .vscode/
 *.swp
 *.swo
+*.iml
 
-# 打包产物已在 release/ 中，确保覆盖
+# ── macOS ────────────────────────────────
+.DS_Store
+
+# ── Windows ──────────────────────────────
+Thumbs.db
+Desktop.ini
