@@ -420,12 +420,6 @@ export function WatchPanel({ uid, onCollapse }: Props) {
           </tbody>
         </table>
       </div>
-
-      {running && (
-        <div className="border-t border-border bg-muted/20 px-2 py-0.5 text-[10px] text-muted-foreground">
-          双击 Value 单元格修改变量值 · {samples.length} 个采样点
-        </div>
-      )}
     </div>
   )
 }

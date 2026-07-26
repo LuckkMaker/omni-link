@@ -140,8 +140,9 @@ export function WaveformChart({
     }
 
     // 1.5) 暂停时追加虚拟保持点：以最后一个真实采样值，时间按 wall-clock 推进
-    //      这样波形图持续向右绘制水平线，直观反映"采样暂停、值保持"
-    if (pausedRef.current && pauseStartRef.current !== null && pts.length > 0) {
+    //      仅在 Follow 模式下追加 —— Follow 模式需让波形持续向右绘制水平线，
+    //      直观反映"采样暂停、值保持"；非 Follow 模式下完全冻结视图，不追加虚拟点。
+    if (pausedRef.current && followRef.current && pauseStartRef.current !== null && pts.length > 0) {
       const lastPt = pts[pts.length - 1]
       const lastRealTime = lastPt.t_ms / 1000
       const elapsedPause = (Date.now() - pauseStartRef.current) / 1000
@@ -378,18 +379,22 @@ export function WaveformChart({
   useEffect(() => { windowRef.current = windowSec; dirtyRef.current = true; scheduleRender() }, [windowSec, scheduleRender])
   useEffect(() => { fpsRef.current = fps }, [fps])
 
-  // ── 暂停状态：记录起始时间，并持续触发重绘使波形向右推进 ──
+  // ── 暂停状态：记录起始时间 ──
+  // Follow 模式下持续重绘使虚拟保持点随时间推进（波形向右画水平线）；
+  // 非 Follow 模式下完全冻结视图，不持续重绘。
   useEffect(() => {
     pausedRef.current = paused
     if (paused) {
       pauseStartRef.current = Date.now()
-      // 暂停期间持续重绘，使虚拟保持点随时间推进
-      const interval = 1000 / Math.max(1, fpsRef.current)
-      const id = setInterval(() => {
-        dirtyRef.current = true
-        scheduleRender()
-      }, interval)
-      return () => clearInterval(id)
+      // 仅 Follow 模式下持续重绘（虚拟点推进需要重绘）
+      if (followRef.current) {
+        const interval = 1000 / Math.max(1, fpsRef.current)
+        const id = setInterval(() => {
+          dirtyRef.current = true
+          scheduleRender()
+        }, interval)
+        return () => clearInterval(id)
+      }
     } else {
       pauseStartRef.current = null
       dirtyRef.current = true

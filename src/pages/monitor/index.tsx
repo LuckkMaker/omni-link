@@ -164,6 +164,10 @@ export default function MonitorPage() {
       try {
         await monitorService.pause(uid)
         setPaused(true)
+        pushNotification({
+          type: 'info', title: '采样已暂停',
+          message: '', autoClose: true, autoCloseDelay: 2000,
+        })
       } catch (e) {
         pushNotification({
           type: 'error', title: '暂停失败',
@@ -176,6 +180,10 @@ export default function MonitorPage() {
       try {
         await monitorService.resume(uid)
         setPaused(false)
+        pushNotification({
+          type: 'info', title: '采样已恢复',
+          message: '', autoClose: true, autoCloseDelay: 2000,
+        })
       } catch (e) {
         pushNotification({
           type: 'error', title: '恢复失败',
@@ -335,13 +343,6 @@ export default function MonitorPage() {
       <div className="flex min-h-0 flex-1">
         {/* 左：波形/数据流区 */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {/* 状态条 */}
-          {paused && !error && (
-            <div className="flex items-center gap-2 px-3 py-1.5 text-xs bg-amber-500/10 text-amber-600">
-              采样已暂停（Flash/Commander 操作中）
-            </div>
-          )}
-
           {/* 波形显示区 */}
           <div className="min-h-0 flex-1 overflow-hidden bg-muted/20 p-2">
             {!isConnected ? (
@@ -370,31 +371,21 @@ export default function MonitorPage() {
             ) : (
               <div className="flex h-full flex-col">
                 {/* 波形工具条 */}
-                <div className="mb-1 flex items-center justify-between px-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {samples.length} 个采样点
-                    {!running && samples.length > 0 && ' · 已停止'}
-                    {running && paused && ' · 采样暂停'}
-                    {running && follow && ' · Follow'}
-                    {coreState === 'halted' && ' · 内核暂停'}
-                    {cursorMeasure && ' · 游标测量中'}
-                  </span>
-                  <div className="flex items-center gap-3">
-                    <button
-                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                      onClick={handleExportCsv}
-                      title="导出 CSV"
-                    >
-                      <Download className="size-3" />
-                      CSV
-                    </button>
-                    <button
-                      className="text-xs text-primary hover:underline"
-                      onClick={clearSamples}
-                    >
-                      清空
-                    </button>
-                  </div>
+                <div className="mb-1 flex items-center justify-end gap-3 px-1">
+                  <button
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={handleExportCsv}
+                    title="导出 CSV"
+                  >
+                    <Download className="size-3" />
+                    CSV
+                  </button>
+                  <button
+                    className="text-xs text-primary hover:underline"
+                    onClick={clearSamples}
+                  >
+                    清空
+                  </button>
                 </div>
                 {/* uPlot 波形图 */}
                 <div className="min-h-0 flex-1 overflow-hidden rounded border border-border bg-background">
