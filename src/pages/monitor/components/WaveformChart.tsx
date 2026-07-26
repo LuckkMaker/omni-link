@@ -90,10 +90,10 @@ export function WaveformChart({
   const chansRef = useRef(channels)
   const windowRef = useRef(windowSec)
   const fpsRef = useRef(fps)
-  // 暂停起始时间戳（wall-clock），用于计算暂停期间虚拟点的时间推进
-  const pauseStartRef = useRef<number | null>(null)
   // Y 轴 hysteresis：记录上次设置的 Y 范围
   const yRangeRef = useRef<{ min: number; max: number } | null>(null)
+  // Y 轴配置变化检测：yResolution/min/max 变化时重置 yRangeRef，强制重新计算 Y 轴
+  const prevYConfigRef = useRef<Map<string, { yRes: number; min: number | null; max: number | null }>>(new Map())
   // 游标回调 ref（避免重建 uPlot）
   const onCursorRef = useRef(onCursorSelect)
   useEffect(() => { onCursorRef.current = onCursorSelect }, [onCursorSelect])
@@ -124,8 +124,8 @@ export function WaveformChart({
 
   // ── 数据转换：samples -> uPlot data 格式 ──
   // 流程：原始对齐 → min/max 降采样(超上限时) → 滑动平均(按通道)
+  // 暂停/恢复由后端处理时间间隙（resume 时调整 start_time），前端无需补偿。
   // 不做去重：重复采样点是真实数据，反映"采样率 > 信号变化率"的采样保持行为。
-  // 阶梯锯齿通过 stepped 路径渲染（zero-order hold）正确呈现，而非丢弃数据点。
   const buildPlotData = useCallback(() => {
     const series = getVisibleSeries()
     const pts = samplesRef.current
@@ -149,21 +149,22 @@ export function WaveformChart({
       rows[i] = row
     }
 
-    // 1.5) 暂停时追加虚拟保持点：以最后一个真实采样值，时间按 wall-clock 推进
-    //      仅在 Follow 模式下追加 —— Follow 模式需让波形持续向右绘制水平线，
-    //      直观反映"采样暂停、值保持"；非 Follow 模式下完全冻结视图，不追加虚拟点。
-    if (pausedRef.current && followRef.current && pauseStartRef.current !== null && pts.length > 0) {
-      const lastPt = pts[pts.length - 1]
-      const lastRealTime = lastPt.t_ms / 1000
-      const elapsedPause = (Date.now() - pauseStartRef.current) / 1000
-      const virtualTime = lastRealTime + elapsedPause
-      times.push(virtualTime)
-      const row: (number | null)[] = new Array(nSer)
-      for (let si = 0; si < nSer; si++) {
-        const v = lastPt.values.find((x) => x.id === series[si].variable.id)
-        row[si] = v?.value ?? null
+    // 1.5) 确保时间戳单调递增（uPlot 要求 X 轴严格递增）
+    // 安全网：后端已保证单调性，但暂停/恢复时序不精确可能导致微小回退。
+    // uPlot 遇到非递增时间戳会画回头线（如停止后波形横向回到起点）。
+    let needsSort = false
+    for (let i = 1; i < times.length; i++) {
+      if (times[i] < times[i - 1]) { needsSort = true; break }
+    }
+    if (needsSort) {
+      const indices = times.map((_, i) => i)
+      indices.sort((a, b) => times[a] - times[b])
+      const sortedTimes = indices.map((i) => times[i])
+      const sortedRows = indices.map((i) => rows[i])
+      for (let i = 0; i < times.length; i++) {
+        times[i] = sortedTimes[i]
+        rows[i] = sortedRows[i]
       }
-      rows.push(row)
     }
 
     // 2) min/max 降采样：点数超过上限时按桶取 min+max（同一时间戳输出两点，
@@ -258,9 +259,68 @@ export function WaveformChart({
     }
 
     // Y 轴自适应辅助：根据可见 X 范围计算并设置 Y 量程
-    // 优先使用用户设定的固定量程（min/max），否则自适应数据范围
+    // 优先级：yResolution（每格数值）> min/max（固定量程）> 自适应数据范围
     // ratchet=true 时只扩不缩（Follow 模式），防止已渲染波形因 Y 轴变化而跳动
     const autoFitY = (xMin: number, xMax: number, ratchet: boolean = false) => {
+      // yResolution 模式：以每格数值 × GRID_DIVS 作为 Y 轴范围，居中对齐数据
+      const hasYRes = series.some((s) => (s.channel.yResolution ?? 0) > 0)
+      if (hasYRes) {
+        // 取所有启用 yResolution 的通道的最大每格值作为 Y 轴量程基准
+        let yRes = 0
+        for (const s of series) {
+          const r = s.channel.yResolution ?? 0
+          if (r > 0 && r > yRes) yRes = r
+        }
+        if (yRes > 0) {
+          const yRange = yRes * GRID_DIVS
+          // 计算可见数据范围，以数据中心对齐 yRange
+          let yMin = Infinity, yMax = -Infinity
+          for (let i = 0; i < data[0].length; i++) {
+            const t = data[0][i] as number
+            if (t < xMin || t > xMax) continue
+            for (let si = 0; si < series.length; si++) {
+              const v = data[si + 1][i]
+              if (v !== null && typeof v === 'number') {
+                if (v < yMin) yMin = v
+                if (v > yMax) yMax = v
+              }
+            }
+          }
+          if (yMin !== Infinity && yMax !== -Infinity) {
+            const dataCenter = (yMin + yMax) / 2
+            let newMin = dataCenter - yRange / 2
+            let newMax = dataCenter + yRange / 2
+            // 对齐到 yResolution 的整数倍
+            newMin = Math.floor(newMin / yRes) * yRes
+            newMax = newMin + yRange
+            const prev = yRangeRef.current
+            if (prev) {
+              if (ratchet) {
+                // 只扩不缩
+                newMin = Math.min(prev.min, newMin)
+                newMax = Math.max(prev.max, newMax)
+                if (newMin < prev.min || newMax > prev.max) {
+                  yRangeRef.current = { min: newMin, max: newMax }
+                  plot.setScale('y', { min: newMin, max: newMax })
+                }
+              } else {
+                // hysteresis：变化不大时不更新
+                const prevRange = prev.max - prev.min
+                if (newMin < prev.min + prevRange * Y_HYSTERESIS ||
+                    newMax > prev.max - prevRange * Y_HYSTERESIS) {
+                  yRangeRef.current = { min: newMin, max: newMax }
+                  plot.setScale('y', { min: newMin, max: newMax })
+                }
+              }
+            } else {
+              yRangeRef.current = { min: newMin, max: newMax }
+              plot.setScale('y', { min: newMin, max: newMax })
+            }
+          }
+          return
+        }
+      }
+
       const hasFixedRange = series.some((s) => s.channel.min !== null || s.channel.max !== null)
       if (hasFixedRange) {
         // 固定量程模式：取各通道 min/max 的并集
@@ -346,6 +406,8 @@ export function WaveformChart({
     }
 
     // Follow 模式：X 轴自动滚动到最新数据 + Y 轴自适应
+    // 暂停时无新数据到达，Follow 不推进 X 轴，显示自然冻结（JScope 风格）。
+    // Follow 关闭时：X 轴固定不动，用户可自由滚动浏览历史数据。
     if (followRef.current && data[0].length > 0) {
       const lastT = data[0][data[0].length - 1] as number
       // 示波器式时基：窗口宽度 = 时基 × 格数（10 格）
@@ -380,9 +442,13 @@ export function WaveformChart({
     } else {
       // 非 Follow 模式：冻结 X 和 Y 轴，不随新数据自动调整
       // setData 会自动缩放两轴，此处必须恢复保存的范围
-      // Y 轴已在 setData 后恢复，此处只需恢复 X 轴；不再调用 autoFitY —— 完全冻结
+      // Y 轴已在 setData 后恢复，此处只需恢复 X 轴
       if (hasSavedX) {
         plot.setScale('x', { min: savedXMin!, max: savedXMax! })
+        // Y 轴配置变化时重新计算（yRangeRef 被 reset 为 null）
+        if (!yRangeRef.current) {
+          autoFitY(savedXMin!, savedXMax!)
+        }
       } else if (data[0].length > 1) {
         // 首次渲染（无已设 X scale）：自动 fit 全部数据
         yRangeRef.current = null
@@ -409,10 +475,38 @@ export function WaveformChart({
   }, [doRender])
 
   // 同步 ref（避免重建 uPlot）
-  useEffect(() => { followRef.current = follow; dirtyRef.current = true; scheduleRender() }, [follow, scheduleRender])
+  // Follow 关闭时重置 yRangeRef，使非 Follow 模式下 Y 轴按可见数据重新计算，
+  // 而非沿用 Follow 模式的 ratchet 扩展范围（可能过大）。
+  useEffect(() => {
+    const wasFollowing = followRef.current
+    followRef.current = follow
+    if (wasFollowing && !follow) {
+      yRangeRef.current = null
+    }
+    dirtyRef.current = true
+    scheduleRender()
+  }, [follow, scheduleRender])
   useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, scheduleRender])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables, scheduleRender])
-  useEffect(() => { chansRef.current = channels; dirtyRef.current = true; scheduleRender() }, [channels, scheduleRender])
+  useEffect(() => {
+    // 检测 Y 轴配置变化（yResolution/min/max），变化时重置 yRangeRef 强制重新计算
+    const prevMap = prevYConfigRef.current
+    let yConfigChanged = false
+    for (const ch of channels) {
+      const prev = prevMap.get(ch.varId)
+      const curr = { yRes: ch.yResolution ?? 0, min: ch.min, max: ch.max }
+      if (prev && (prev.yRes !== curr.yRes || prev.min !== curr.min || prev.max !== curr.max)) {
+        yConfigChanged = true
+      }
+      prevMap.set(ch.varId, curr)
+    }
+    if (yConfigChanged) {
+      yRangeRef.current = null
+    }
+    chansRef.current = channels
+    dirtyRef.current = true
+    scheduleRender()
+  }, [channels, scheduleRender])
   // 时基变化：更新 windowRef，并在非 Follow 模式下同步更新 X 轴窗口宽度
   // Follow 模式下 doRender 会自动使用 windowRef × GRID_DIVS 作为窗口，无需此处干预
   // 非 Follow 模式下需主动 setScale，否则下拉切换时基不会改变可见窗口
@@ -447,27 +541,13 @@ export function WaveformChart({
   }, [windowSec, scheduleRender])
   useEffect(() => { fpsRef.current = fps }, [fps])
 
-  // ── 暂停状态：记录起始时间 ──
-  // Follow 模式下持续重绘使虚拟保持点随时间推进（波形向右画水平线）；
-  // 非 Follow 模式下完全冻结视图，不持续重绘。
+  // ── 暂停状态：冻结显示（JScope 风格）──
+  // 后端在 resume() 时调整 start_time 消除时间间隙，前端无需任何补偿。
+  // 暂停时无新数据到达，显示自然冻结。恢复后时间戳连续，波形自然衔接。
   useEffect(() => {
     pausedRef.current = paused
-    if (paused) {
-      pauseStartRef.current = Date.now()
-      // 仅 Follow 模式下持续重绘（虚拟点推进需要重绘）
-      if (followRef.current) {
-        const interval = 1000 / Math.max(1, fpsRef.current)
-        const id = setInterval(() => {
-          dirtyRef.current = true
-          scheduleRender()
-        }, interval)
-        return () => clearInterval(id)
-      }
-    } else {
-      pauseStartRef.current = null
-      dirtyRef.current = true
-      scheduleRender()
-    }
+    dirtyRef.current = true
+    scheduleRender()
   }, [paused, scheduleRender])
 
   // ── 创建/重建 uPlot 实例（变量或通道数变化时）──

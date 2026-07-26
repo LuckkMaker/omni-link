@@ -138,6 +138,8 @@ class MonitorBackend:
         self._elf_paths: dict[str, str] = {}
         # uid -> 采样起点（monotonic）
         self._start_time: dict[str, float] = {}
+        # uid -> 暂停起始时间（monotonic），用于恢复时消除时间间隙
+        self._pause_start: dict[str, float] = {}
         # uid -> 传输模式（"swd" 轮询 / "rtt" 同步）
         self._transport: dict[str, str] = {}
         # uid -> RTT 模式下的 RTTControlBlock（直接持有，避免与 rtt_backend 的 poll loop 争抢）
@@ -242,19 +244,30 @@ class MonitorBackend:
         return {"success": True}
 
     def _stop_internal(self, uid: str):
-        """内部停止（不加锁，调用方持有全局锁）"""
-        running = self._running.pop(uid, None)
-        thread = self._threads.pop(uid, None)
+        """内部停止（不加锁，调用方持有全局锁）
+
+        关键：先通知线程退出并等待其结束，再清理共享字典。
+        若先 pop 字典再 clear running，采样线程可能在 _start_time 被 pop 后
+        仍读取到默认值 t0，产生 t_ms=0 的异常样本，导致波形横向回到起点。
+        """
+        # 1) 先通知采样线程退出
+        running = self._running.get(uid)
+        if running:
+            running.clear()
+        # 2) 等待线程退出（此时线程仍能读到正确的 _start_time 等共享状态）
+        thread = self._threads.get(uid)
+        if thread:
+            thread.join(timeout=2)
+        # 3) 线程已退出，安全清理所有共享字典
+        self._running.pop(uid, None)
+        self._threads.pop(uid, None)
         self._paused.pop(uid, None)
         self._locks.pop(uid, None)
         self._rate_hz.pop(uid, None)
         self._start_time.pop(uid, None)
+        self._pause_start.pop(uid, None)
         self._transport.pop(uid, None)
         # 保留 ring_buffer 供回看，直到下次 start 或探针断开
-        if running:
-            running.clear()
-        if thread:
-            thread.join(timeout=2)
         # RTT 模式：线程退出后兜底清理控制块（正常退出时线程已在 finally 清理）
         cb = self._rtt_cbs.pop(uid, None)
         if cb is not None:
@@ -268,18 +281,37 @@ class MonitorBackend:
         """暂停采样（Flash/Commander 操作前调用）
 
         采样线程保持运行但跳过实际读取，保留会话状态。
+        记录暂停起始时间，供 resume() 消除时间间隙。
         """
         paused = self._paused.get(uid)
         if paused and paused.is_set():
             paused.clear()
+            self._pause_start[uid] = time.monotonic()
             event_manager.emit("monitor.info", {
                 "uid": uid, "paused": True, "reason": "flash/commander 操作",
             })
 
     def resume(self, uid: str):
-        """恢复采样"""
+        """恢复采样
+
+        调整 _start_time 以消除暂停期间的时间间隙，使恢复后采样时间戳
+        连续递进（对标 JScope：暂停不推进时间轴）。
+
+        关键：必须先更新 start_time，再解除暂停标志。
+        若先 paused.set() 再更新 start_time，采样线程可能在 start_time
+        更新前读取旧值，产生包含暂停时长的时间戳，导致时间间隙和值畸变。
+        """
         paused = self._paused.get(uid)
         if paused and not paused.is_set():
+            # 1) 先调整 start_time，消除暂停期间的时间间隙
+            #    这样恢复后的 t_ms = (now - start_time) * 1000 不包含暂停时长
+            pause_start = self._pause_start.pop(uid, None)
+            if pause_start is not None:
+                pause_duration = time.monotonic() - pause_start
+                start_time = self._start_time.get(uid)
+                if start_time is not None:
+                    self._start_time[uid] = start_time + pause_duration
+            # 2) 再解除暂停标志，此时 start_time 已更新，采样线程读到的是正确值
             paused.set()
             event_manager.emit("monitor.info", {"uid": uid, "paused": False})
 
@@ -394,6 +426,7 @@ class MonitorBackend:
         interval = 1.0 / rate if rate > 0 else 0.01
         consecutive_errors = 0
         pending_samples: list = []  # 批量推送缓冲
+        last_t_ms = 0.0  # 上一个采样点时间戳，确保严格单调递增（uPlot 要求）
 
         while True:
             running = self._running.get(uid)
@@ -424,6 +457,11 @@ class MonitorBackend:
                 if values:
                     start_t = self._start_time.get(uid, t0)
                     t_ms = (t0 - start_t) * 1000.0
+                    # 确保时间戳严格单调递增（uPlot 要求）
+                    # 防止暂停/恢复时序不精确导致时间戳回退
+                    if t_ms <= last_t_ms:
+                        t_ms = last_t_ms + 0.001  # 向前推进 1μs
+                    last_t_ms = t_ms
                     sample = {"t_ms": t_ms, "values": values}
                     pending_samples.append(sample)
 

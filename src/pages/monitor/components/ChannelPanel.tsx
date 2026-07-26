@@ -506,7 +506,8 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
                 running && !paused
                   ? 'bg-amber-500/15 text-amber-600 hover:bg-amber-500/25'
                   : 'bg-primary text-primary-foreground hover:bg-primary/90',
-                starting && 'opacity-60 cursor-wait',
+                (starting && 'opacity-60 cursor-wait'),
+                (!isConnected && 'opacity-40 cursor-not-allowed'),
               )}
               onClick={onStartPause}
               disabled={!isConnected || starting}
@@ -612,33 +613,42 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
             </button>
           </div>
           {/* 采样率 */}
-          <select
-            className="h-7 w-full rounded border border-border bg-background px-1 text-[11px]"
-            value={rateHz}
-            onChange={(e) => setRateHz(Number(e.target.value))}
-            disabled={running}
-            title="采样率：后端每秒从目标读取变量的次数（数据采集频率）"
-          >
-            {RATE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 w-14 text-[11px] text-muted-foreground">采样率</span>
+            <select
+              className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+              value={rateHz}
+              onChange={(e) => setRateHz(Number(e.target.value))}
+              disabled={running}
+              title="采样率：后端每秒从目标读取变量的次数（数据采集频率）"
+            >
+              {RATE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
           {/* 渲染帧率（独立于采样率，控制波形图刷新频率）*/}
-          <select
-            className="h-7 w-full rounded border border-border bg-background px-1 text-[11px]"
-            value={fps}
-            onChange={(e) => setFps(Number(e.target.value))}
-            title="渲染帧率：波形图每秒重绘次数（与采样率独立，降低可减少 CPU 占用）"
-          >
-            {FPS_OPTIONS.map((f) => <option key={f} value={f}>{f} FPS</option>)}
-          </select>
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 w-14 text-[11px] text-muted-foreground">渲染帧率</span>
+            <select
+              className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+              value={fps}
+              onChange={(e) => setFps(Number(e.target.value))}
+              title="渲染帧率：波形图每秒重绘次数（与采样率独立，降低可减少 CPU 占用）"
+            >
+              {FPS_OPTIONS.map((f) => <option key={f} value={f}>{f} FPS</option>)}
+            </select>
+          </div>
           {/* 时基（div 时间分辨率，控制 X 轴，与鼠标滚轮联动）*/}
-          <select
-            className="h-7 w-full rounded border border-border bg-background px-1 text-[11px]"
-            value={timebase}
-            onChange={(e) => setTimebase(Number(e.target.value))}
-            title="时基（每格代表的时间，决定 Follow 模式时间窗口宽度 = 时基 × 10 格；鼠标滚轮可步进切换）"
-          >
-            {TIMEBASE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 w-14 text-[11px] text-muted-foreground">时基</span>
+            <select
+              className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+              value={timebase}
+              onChange={(e) => setTimebase(Number(e.target.value))}
+              title="时基（每格代表的时间，决定 Follow 模式时间窗口宽度 = 时基 × 10 格；鼠标滚轮可步进切换）"
+            >
+              {TIMEBASE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
           {transport === 'rtt' && (
             <div className="flex items-start gap-1 rounded border border-amber-500/30 bg-amber-500/10 p-1.5 text-[10px] text-amber-600">
               <AlertTriangle className="size-3 shrink-0 mt-0.5" />
