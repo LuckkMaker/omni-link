@@ -3,6 +3,7 @@ import { Cpu, MemoryStick, ChevronRight, Settings } from 'lucide-react'
 import { useProbeStore } from '@/stores/probe.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import { cn } from '@/lib/utils'
+import { formatKb as fmtKb, totalRamKb } from '@/lib/device-utils'
 import { FlashConfigDialog } from './FlashConfigDialog'
 import { DeviceConfigDialog } from './DeviceConfigDialog'
 
@@ -14,11 +15,6 @@ function formatSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
   return `${bytes} B`
-}
-
-function formatKb(kb: number): string {
-  if (kb >= 1024) return `${(kb / 1024).toFixed(0)} MB`
-  return `${kb} KB`
 }
 
 function Row({ label, value }: { label: string; value: string | null | undefined }) {
@@ -127,7 +123,54 @@ export function InfoPanel() {
         <Row label="Core ID" value={target?.core_id} />
         <Row label="Device ID" value={target?.device_id} />
         <Row label="Revision ID" value={target?.revision_id} />
-        <Row label="RAM" value={deviceInfo ? `${formatKb(deviceInfo.ram_size)} (${deviceInfo.ram_base_address})` : null} />
+        {/* RAM：优先用运行时 ram_regions，否则回退 deviceInfo 静态数据 */}
+        {(() => {
+          // 运行时多 RAM 区域
+          if (target?.ram_regions && target.ram_regions.length > 0) {
+            const regions = target.ram_regions
+            const total = regions.reduce((s, r) => s + r.length, 0)
+            if (regions.length === 1) {
+              return <Row label="RAM" value={`${formatSize(total)} (${formatHex(regions[0].start)})`} />
+            }
+            return (
+              <>
+                <Row label="RAM (总计)" value={`${formatSize(total)} · ${regions.length} 区域`} />
+                {regions.map((r, i) => (
+                  <Row
+                    key={i}
+                    label={`  RAM${i + 1}${r.is_default ? ' ·默认' : ''}`}
+                    value={`${formatSize(r.length)} (${formatHex(r.start)})`}
+                  />
+                ))}
+              </>
+            )
+          }
+          // 静态 deviceInfo 多 RAM 区域
+          if (deviceInfo?.ram_regions && deviceInfo.ram_regions.length > 0) {
+            const regions = deviceInfo.ram_regions
+            const totalKb = totalRamKb(regions, deviceInfo.ram_size)
+            if (regions.length === 1) {
+              return <Row label="RAM" value={`${fmtKb(totalKb)} (${regions[0].start})`} />
+            }
+            return (
+              <>
+                <Row label="RAM (总计)" value={`${fmtKb(totalKb)} · ${regions.length} 区域`} />
+                {regions.map((r, i) => {
+                  const bytes = parseInt(r.length, 16) || 0
+                  return (
+                    <Row
+                      key={i}
+                      label={`  RAM${i + 1}${r.is_default ? ' ·默认' : ''}`}
+                      value={`${formatSize(bytes)} (${r.start})`}
+                    />
+                  )
+                })}
+              </>
+            )
+          }
+          // 回退：单 RAM
+          return <Row label="RAM" value={deviceInfo ? `${fmtKb(deviceInfo.ram_size)} (${deviceInfo.ram_base_address})` : null} />
+        })()}
       </CollapsibleSection>
 
       <CollapsibleSection

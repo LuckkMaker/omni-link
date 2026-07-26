@@ -94,6 +94,13 @@ export function WaveformChart({
   const yRangeRef = useRef<{ min: number; max: number } | null>(null)
   // Y 轴配置变化检测：yResolution/min/max 变化时重置 yRangeRef，强制重新计算 Y 轴
   const prevYConfigRef = useRef<Map<string, { yRes: number; min: number | null; max: number | null }>>(new Map())
+  // 逐通道 Y 归一化参数（示波器模式：每通道独立 Y 量程，共享 0..GRID_DIVS 网格）
+  // key = varId, value = { yRes: 每格数值, center: 数据中心 }
+  const normParamsRef = useRef<Map<string, { yRes: number; center: number }>>(new Map())
+  // 是否处于归一化模式（任意通道设了 yResolution > 0）
+  const normalizedRef = useRef(false)
+  // 归一化模式下是否需要重置 Y 轴到 0..GRID_DIVS
+  const normYResetRef = useRef(true)
   // 游标回调 ref（避免重建 uPlot）
   const onCursorRef = useRef(onCursorSelect)
   useEffect(() => { onCursorRef.current = onCursorSelect }, [onCursorSelect])
@@ -227,6 +234,48 @@ export function WaveformChart({
       }
     }
 
+    // 4) 逐通道 Y 归一化（示波器模式）
+    // 当任意通道设置了 yResolution > 0 时，所有通道数据归一化到 0..GRID_DIVS 网格。
+    // 每通道独立缩放：yResolution 决定每格代表的数值，数据中心对齐网格中心。
+    // 改变某通道 Y Res 只影响该通道波形幅度，不影响坐标系 Y 轴范围（始终 0..GRID_DIVS）。
+    // 未设 yResolution 的通道自动按数据范围计算等效 yResolution，填满网格。
+    const anyYRes = series.some((s) => (s.channel.yResolution ?? 0) > 0)
+    normalizedRef.current = anyYRes
+    if (anyYRes) {
+      const normParams = normParamsRef.current
+      const halfGrid = GRID_DIVS / 2
+      for (let si = 0; si < nSer; si++) {
+        const yRes = series[si].channel.yResolution ?? 0
+        const arr = valArrays[si]
+        // 计算通道数据范围（全量数据，保证稳定性）
+        let yMin = Infinity, yMax = -Infinity
+        for (let i = 0; i < arr.length; i++) {
+          const v = arr[i]
+          if (v !== null && typeof v === 'number') {
+            if (v < yMin) yMin = v
+            if (v > yMax) yMax = v
+          }
+        }
+        if (yMin === Infinity) continue // 全 null，跳过
+        // 通道未设 yResolution 时自动计算（按数据范围填满网格）
+        const effectiveRes = yRes > 0 ? yRes : ((yMax - yMin) || 1) / GRID_DIVS
+        const dataCenter = (yMin + yMax) / 2
+        // Hysteresis：数据中心漂移不超过 1 格时保持不变，避免波形上下跳动
+        const varId = series[si].variable.id
+        const prev = normParams.get(varId)
+        let center = dataCenter
+        if (prev && prev.yRes === effectiveRes && Math.abs(dataCenter - prev.center) < effectiveRes) {
+          center = prev.center
+        }
+        normParams.set(varId, { yRes: effectiveRes, center })
+        // 归一化：(value - center) / yRes + GRID_DIVS/2
+        valArrays[si] = arr.map(v => {
+          if (v === null || typeof v !== 'number') return null
+          return (v - center) / effectiveRes + halfGrid
+        })
+      }
+    }
+
     return {
       data: [fTimes, ...valArrays] as uPlot.AlignedData,
       series,
@@ -259,68 +308,10 @@ export function WaveformChart({
     }
 
     // Y 轴自适应辅助：根据可见 X 范围计算并设置 Y 量程
-    // 优先级：yResolution（每格数值）> min/max（固定量程）> 自适应数据范围
+    // 仅在非归一化模式调用（归一化模式由 buildPlotData 逐通道缩放，Y 轴固定 0..GRID_DIVS）
+    // 优先级：min/max（固定量程）> 自适应数据范围
     // ratchet=true 时只扩不缩（Follow 模式），防止已渲染波形因 Y 轴变化而跳动
     const autoFitY = (xMin: number, xMax: number, ratchet: boolean = false) => {
-      // yResolution 模式：以每格数值 × GRID_DIVS 作为 Y 轴范围，居中对齐数据
-      const hasYRes = series.some((s) => (s.channel.yResolution ?? 0) > 0)
-      if (hasYRes) {
-        // 取所有启用 yResolution 的通道的最大每格值作为 Y 轴量程基准
-        let yRes = 0
-        for (const s of series) {
-          const r = s.channel.yResolution ?? 0
-          if (r > 0 && r > yRes) yRes = r
-        }
-        if (yRes > 0) {
-          const yRange = yRes * GRID_DIVS
-          // 计算可见数据范围，以数据中心对齐 yRange
-          let yMin = Infinity, yMax = -Infinity
-          for (let i = 0; i < data[0].length; i++) {
-            const t = data[0][i] as number
-            if (t < xMin || t > xMax) continue
-            for (let si = 0; si < series.length; si++) {
-              const v = data[si + 1][i]
-              if (v !== null && typeof v === 'number') {
-                if (v < yMin) yMin = v
-                if (v > yMax) yMax = v
-              }
-            }
-          }
-          if (yMin !== Infinity && yMax !== -Infinity) {
-            const dataCenter = (yMin + yMax) / 2
-            let newMin = dataCenter - yRange / 2
-            let newMax = dataCenter + yRange / 2
-            // 对齐到 yResolution 的整数倍
-            newMin = Math.floor(newMin / yRes) * yRes
-            newMax = newMin + yRange
-            const prev = yRangeRef.current
-            if (prev) {
-              if (ratchet) {
-                // 只扩不缩
-                newMin = Math.min(prev.min, newMin)
-                newMax = Math.max(prev.max, newMax)
-                if (newMin < prev.min || newMax > prev.max) {
-                  yRangeRef.current = { min: newMin, max: newMax }
-                  plot.setScale('y', { min: newMin, max: newMax })
-                }
-              } else {
-                // hysteresis：变化不大时不更新
-                const prevRange = prev.max - prev.min
-                if (newMin < prev.min + prevRange * Y_HYSTERESIS ||
-                    newMax > prev.max - prevRange * Y_HYSTERESIS) {
-                  yRangeRef.current = { min: newMin, max: newMax }
-                  plot.setScale('y', { min: newMin, max: newMax })
-                }
-              }
-            } else {
-              yRangeRef.current = { min: newMin, max: newMax }
-              plot.setScale('y', { min: newMin, max: newMax })
-            }
-          }
-          return
-        }
-      }
-
       const hasFixedRange = series.some((s) => s.channel.min !== null || s.channel.max !== null)
       if (hasFixedRange) {
         // 固定量程模式：取各通道 min/max 的并集
@@ -437,21 +428,30 @@ export function WaveformChart({
       // 相对时间从 0 起算，xMin 钳位到 0，避免显示负时间
       const xMin = Math.max(0, xMax - win)
       plot.setScale('x', { min: xMin, max: xMax })
-      // ratchet=true：Y 轴只扩不缩，防止已渲染波形因 Y 轴收缩而跳动
-      autoFitY(xMin, xMax, true)
+      // Y 轴：归一化模式固定 0..GRID_DIVS，非归一化模式 autoFitY（ratchet 只扩不缩）
+      if (normalizedRef.current) {
+        plot.setScale('y', { min: 0, max: GRID_DIVS })
+        normYResetRef.current = false
+      } else {
+        autoFitY(xMin, xMax, true)
+      }
     } else {
       // 非 Follow 模式：冻结 X 和 Y 轴，不随新数据自动调整
       // setData 会自动缩放两轴，此处必须恢复保存的范围
       // Y 轴已在 setData 后恢复，此处只需恢复 X 轴
       if (hasSavedX) {
         plot.setScale('x', { min: savedXMin!, max: savedXMax! })
-        // Y 轴配置变化时重新计算（yRangeRef 被 reset 为 null）
-        if (!yRangeRef.current) {
+        if (normalizedRef.current) {
+          // 归一化模式：配置变更时重置 Y 到 0..GRID_DIVS，否则保留用户缩放
+          if (normYResetRef.current) {
+            plot.setScale('y', { min: 0, max: GRID_DIVS })
+            normYResetRef.current = false
+          }
+        } else if (!yRangeRef.current) {
           autoFitY(savedXMin!, savedXMax!)
         }
       } else if (data[0].length > 1) {
         // 首次渲染（无已设 X scale）：自动 fit 全部数据
-        yRangeRef.current = null
         const tMin = data[0][0] as number
         const tMax = data[0][data[0].length - 1] as number
         const tRange = tMax - tMin || 1
@@ -459,7 +459,13 @@ export function WaveformChart({
         const fitMin = Math.max(0, tMin - tPad)
         const fitMax = tMax + tPad
         plot.setScale('x', { min: fitMin, max: fitMax })
-        autoFitY(fitMin, fitMax)
+        if (normalizedRef.current) {
+          plot.setScale('y', { min: 0, max: GRID_DIVS })
+          normYResetRef.current = false
+        } else {
+          yRangeRef.current = null
+          autoFitY(fitMin, fitMax)
+        }
       }
     }
   }, [buildPlotData])
@@ -502,6 +508,10 @@ export function WaveformChart({
     }
     if (yConfigChanged) {
       yRangeRef.current = null
+      // 归一化模式下 Y Res 变化需重置 Y 轴到 0..GRID_DIVS
+      normYResetRef.current = true
+      // 清除旧的归一化参数，强制重新计算数据中心
+      normParamsRef.current.clear()
     }
     chansRef.current = channels
     dirtyRef.current = true
@@ -583,6 +593,19 @@ export function WaveformChart({
         {
           label: 'Value',
           space: 50,
+          // 归一化模式显示格数（0..GRID_DIVS），非归一化模式显示实际数值
+          values: (_self: uPlot, ticks: number[]) => {
+            if (normalizedRef.current) {
+              return ticks.map((v) => v.toFixed(0))
+            }
+            return ticks.map((v) => {
+              const abs = Math.abs(v)
+              if (abs >= 10000) return v.toFixed(0)
+              if (abs >= 100) return v.toFixed(1)
+              if (abs >= 1) return v.toFixed(2)
+              return v.toFixed(3)
+            })
+          },
         },
       ],
       legend: {

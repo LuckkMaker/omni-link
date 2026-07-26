@@ -151,6 +151,17 @@ def _device_dict_to_element(device: dict, parent: ET.Element) -> ET.Element:
             "is_boot_memory": "true" if r.get("is_boot_memory") else "false",
         })
 
+    # 写入 ram_regions（如果有）
+    ram_regions = device.get("ram_regions")
+    if ram_regions:
+        ram_regions_elem = ET.SubElement(dev_elem, "ram_regions")
+        for r in ram_regions:
+            ET.SubElement(ram_regions_elem, "region", {
+                "start": r["start"],
+                "length": r["length"],
+                "is_default": "true" if r.get("is_default") else "false",
+            })
+
     # 写入 overrides（如果有）
     overrides = device.get("overrides")
     if overrides:
@@ -202,6 +213,26 @@ def _element_to_device_dict(elem: ET.Element) -> dict:
                 "page_size": r.get("page_size", "0x400"),
                 "is_boot_memory": r.get("is_boot_memory", "false").lower() == "true",
             })
+
+    # 解析 ram_regions
+    # 若 XML 中存在 <ram_regions>，按其内容加载；
+    # 否则从 ram_base_address + ram_size 向后兼容合成一个默认区域。
+    device["ram_regions"] = []
+    ram_regions_elem = elem.find("ram_regions")
+    if ram_regions_elem is not None:
+        for r in ram_regions_elem.findall("region"):
+            device["ram_regions"].append({
+                "start": r.get("start", device["ram_base_address"]),
+                "length": r.get("length", f"0x{device['ram_size'] * 1024:X}"),
+                "is_default": r.get("is_default", "false").lower() == "true",
+            })
+    elif device["ram_size"] > 0:
+        # 向后兼容：从 ram_base_address + ram_size 合成默认 RAM 区域
+        device["ram_regions"].append({
+            "start": device["ram_base_address"],
+            "length": f"0x{device['ram_size'] * 1024:X}",
+            "is_default": True,
+        })
 
     # 解析 overrides
     overrides_elem = elem.find("overrides")

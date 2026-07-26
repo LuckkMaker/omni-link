@@ -26,6 +26,13 @@ export interface FlashRegionInfo {
   is_boot_memory: boolean
 }
 
+/** RAM 区域信息（一段连续的 RAM；一个设备可能有多个，如 SRAM + CCM） */
+export interface RamRegionInfo {
+  start: number
+  length: number
+  is_default: boolean
+}
+
 /** 单个扇区信息 */
 export interface SectorInfo {
   index: number
@@ -49,10 +56,12 @@ export interface TargetInfo {
   flash_regions: FlashRegionInfo[]
   /** 所有扇区的扁平列表 */
   sectors: SectorInfo[]
-  /** RAM 起始地址 */
+  /** RAM 起始地址（默认/首个 RAM 区域） */
   ram_start: number
-  /** RAM 大小（字节） */
+  /** RAM 大小（字节，所有 RAM 区域总和） */
   ram_size: number
+  /** 完整的 RAM 区域列表（运行时从 pyOCD memory_map 提取） */
+  ram_regions: RamRegionInfo[]
 }
 
 /** 设备目录信息（来自 XML 设备目录，静态元数据） */
@@ -74,6 +83,8 @@ export interface DeviceInfo {
   ram_base_address: string
   /** Flash 区域布局（静态定义，连接前可用） */
   flash_regions?: DeviceFlashRegion[]
+  /** RAM 区域列表（静态定义；一个设备可能有多个，如 SRAM + CCM） */
+  ram_regions?: DeviceRamRegion[]
   /** 设备 ID 寄存器地址 */
   device_id_address?: string
   /** 来源 Pack 名称（source='pack' 时有值） */
@@ -99,6 +110,13 @@ export interface DeviceFlashRegion {
   sector_size: string
   page_size: string
   is_boot_memory: boolean
+}
+
+/** 设备目录中的 RAM 区域（十六进制字符串形式） */
+export interface DeviceRamRegion {
+  start: string
+  length: string
+  is_default: boolean
 }
 
 /** Flash 操作结果 */
@@ -207,6 +225,7 @@ export interface PackDevice {
   flash_base_address: string
   ram_base_address: string
   flash_regions?: DeviceFlashRegion[]
+  ram_regions?: DeviceRamRegion[]
   /** 当前是否已导入（编辑模式用） */
   imported?: boolean
 }
@@ -232,4 +251,5 @@ export interface CustomDeviceCreate {
   ram_size: number
   vendor: string
   display_name: string
+  ram_regions?: DeviceRamRegion[]
 }

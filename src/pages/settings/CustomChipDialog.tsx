@@ -16,10 +16,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Loader2, FileCode, FolderOpen } from 'lucide-react'
+import { Loader2, FileCode, FolderOpen, Plus, Trash2 } from 'lucide-react'
 import { createCustomDevice, extractFlmInfo } from '@/services/device.service'
 import { useNotificationStore } from '@/stores/notification.store'
-import type { CustomDeviceCreate } from '@shared/types'
+import type { CustomDeviceCreate, DeviceRamRegion } from '@shared/types'
 
 interface CustomChipDialogProps {
   open: boolean
@@ -32,7 +32,26 @@ const CORE_OPTIONS = [
   'Cortex-M4', 'Cortex-M7', 'Cortex-M23', 'Cortex-M33', 'Cortex-M55',
 ]
 
-const EMPTY_FORM = {
+interface RamRow {
+  start: string
+  length_kb: string
+  is_default: boolean
+}
+
+interface FormState {
+  flm_path: string
+  part_number: string
+  display_name: string
+  vendor: string
+  core: string
+  flash_base_address: string
+  flash_size: string
+  sector_size: string
+  page_size: string
+  ram_rows: RamRow[]
+}
+
+const EMPTY_FORM: FormState = {
   flm_path: '',
   part_number: '',
   display_name: '',
@@ -40,19 +59,49 @@ const EMPTY_FORM = {
   core: 'Cortex-M4',
   flash_base_address: '0x08000000',
   flash_size: '256',
-  ram_base_address: '0x20000000',
-  ram_size: '64',
   sector_size: '0x400',
   page_size: '0x400',
+  ram_rows: [{ start: '0x20000000', length_kb: '64', is_default: true }],
+}
+
+/** 把表单中的 RAM 行转换为提交用的 ram_regions */
+function ramRowsToRegions(rows: RamRow[]): { ram_regions: DeviceRamRegion[]; ram_base: string; ram_size_kb: number } {
+  const ram_regions: DeviceRamRegion[] = []
+  let ram_base = '0x20000000'
+  let ram_size_kb = 0
+  let defaultSet = false
+  for (const row of rows) {
+    if (!row.start || !row.length_kb) continue
+    const kb = parseInt(row.length_kb) || 0
+    const bytes = kb * 1024
+    const isDefault = row.is_default && !defaultSet ? true : false
+    ram_regions.push({
+      start: row.start,
+      length: `0x${bytes.toString(16).toUpperCase()}`,
+      is_default: isDefault,
+    })
+    if (isDefault) {
+      ram_base = row.start
+      ram_size_kb = kb
+      defaultSet = true
+    }
+  }
+  // 若无 default，取第一个
+  if (!defaultSet && ram_regions.length > 0) {
+    ram_regions[0].is_default = true
+    ram_base = ram_regions[0].start
+    ram_size_kb = parseInt(rows[0]?.length_kb || '0') || 0
+  }
+  return { ram_regions, ram_base, ram_size_kb }
 }
 
 export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDialogProps) {
-  const [form, setForm] = useState({ ...EMPTY_FORM })
+  const [form, setForm] = useState<FormState>({ ...EMPTY_FORM })
   const [creating, setCreating] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const notify = useNotificationStore((s) => s.push)
 
-  const update = (key: keyof typeof form, value: string) => {
+  const update = (key: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
@@ -75,26 +124,66 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
     }
   }
 
+  // ── RAM 行操作 ──
+  const addRamRow = () => {
+    setForm((prev) => ({
+      ...prev,
+      ram_rows: [...prev.ram_rows, { start: '0x20000000', length_kb: '32', is_default: false }],
+    }))
+  }
+  const removeRamRow = (idx: number) => {
+    setForm((prev) => {
+      const next = prev.ram_rows.filter((_, i) => i !== idx)
+      // 若删掉的是默认行，把第一行设为默认
+      if (next.length > 0 && !next.some((r) => r.is_default)) {
+        next[0].is_default = true
+      }
+      return { ...prev, ram_rows: next.length > 0 ? next : [{ start: '0x20000000', length_kb: '32', is_default: true }] }
+    })
+  }
+  const updateRamRow = (idx: number, patch: Partial<RamRow>) => {
+    setForm((prev) => {
+      const next = prev.ram_rows.map((r, i) => {
+        if (i !== idx) return r
+        const updated = { ...r, ...patch }
+        // 设为默认时，取消其他行的默认
+        if (patch.is_default === true) {
+          return updated
+        }
+        return updated
+      })
+      // 若 patch.is_default === true，取消其他行
+      if (patch.is_default === true) {
+        next.forEach((r, i) => {
+          if (i !== idx) r.is_default = false
+        })
+      }
+      return { ...prev, ram_rows: next }
+    })
+  }
+
   const handleSubmit = async () => {
     if (!form.flm_path) { notify({ type: 'warning', title: '请先选择 FLM 文件' }); return }
     if (!form.part_number) { notify({ type: 'warning', title: '请输入芯片型号' }); return }
 
     setCreating(true)
     try {
+      const { ram_regions, ram_base, ram_size_kb } = ramRowsToRegions(form.ram_rows)
       const req: CustomDeviceCreate = {
         flm_path: form.flm_path,
         part_number: form.part_number,
         core: form.core,
         flash_base_address: form.flash_base_address,
         flash_size: parseInt(form.flash_size) || 0,
-        ram_base_address: form.ram_base_address,
-        ram_size: parseInt(form.ram_size) || 0,
+        ram_base_address: ram_base,
+        ram_size: ram_size_kb,
         vendor: form.vendor,
         display_name: form.display_name || form.part_number,
+        ram_regions,
       }
       await createCustomDevice(req)
       notify({ type: 'success', title: `自定义芯片 ${form.part_number} 创建成功` })
-      setForm({ ...EMPTY_FORM })
+      setForm({ ...EMPTY_FORM, ram_rows: [...EMPTY_FORM.ram_rows] })
       onOpenChange(false)
       onSuccess()
     } catch (e) {
@@ -107,7 +196,7 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
   const handleOpenChange = (v: boolean) => {
     if (!v) {
       // 关闭时重置表单
-      setForm({ ...EMPTY_FORM })
+      setForm({ ...EMPTY_FORM, ram_rows: [...EMPTY_FORM.ram_rows] })
     }
     onOpenChange(v)
   }
@@ -122,7 +211,7 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="space-y-4 py-2 max-h-[70vh] overflow-y-auto pr-1">
           {/* FLM 文件选择 */}
           <div className="space-y-1.5">
             <Label>FLM Flash 算法文件</Label>
@@ -222,28 +311,58 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
             </div>
           </div>
 
-          {/* RAM 区域分组 */}
+          {/* RAM 区域分组（支持多个） */}
           <div className="rounded-md border border-border p-3 space-y-3">
-            <p className="text-xs font-medium text-muted-foreground">RAM 区域</p>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs">基地址</Label>
-                <Input
-                  value={form.ram_base_address}
-                  onChange={(e) => update('ram_base_address', e.target.value)}
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">大小 (KB)</Label>
-                <Input
-                  type="number"
-                  value={form.ram_size}
-                  onChange={(e) => update('ram_size', e.target.value)}
-                  className="text-xs tabular-nums"
-                />
-              </div>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-muted-foreground">RAM 区域</p>
+              <Button variant="ghost" size="sm" onClick={addRamRow} className="h-6 px-2 text-xs">
+                <Plus className="size-3 mr-1" />
+                添加
+              </Button>
             </div>
+            {form.ram_rows.map((row, idx) => (
+              <div key={idx} className="flex items-end gap-2">
+                <div className="space-y-1.5 flex-1">
+                  <Label className="text-xs">基地址 {idx + 1}</Label>
+                  <Input
+                    value={row.start}
+                    onChange={(e) => updateRamRow(idx, { start: e.target.value })}
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-1.5 w-24">
+                  <Label className="text-xs">大小 (KB)</Label>
+                  <Input
+                    type="number"
+                    value={row.length_kb}
+                    onChange={(e) => updateRamRow(idx, { length_kb: e.target.value })}
+                    className="text-xs tabular-nums"
+                  />
+                </div>
+                <label className="flex items-center gap-1 text-xs text-muted-foreground pb-2 whitespace-nowrap cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={row.is_default}
+                    onChange={() => updateRamRow(idx, { is_default: true })}
+                    className="size-3"
+                  />
+                  默认
+                </label>
+                {form.ram_rows.length > 1 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeRamRow(idx)}
+                    className="h-8 px-2 text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                )}
+              </div>
+            ))}
+            <p className="text-xs text-muted-foreground">
+              一个芯片可能有多个 RAM 区域（如 SRAM + CCM），标记为「默认」的区域将作为主 RAM
+            </p>
           </div>
         </div>
 

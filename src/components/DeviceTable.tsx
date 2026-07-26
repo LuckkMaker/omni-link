@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { Input } from '@/components/ui/input'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { totalRamKb, ramRegionsTooltip } from '@/lib/device-utils'
 import type { DeviceInfo } from '@shared/types'
 
 /** 格式化 Flash/RAM 大小：KB → 可读字符串 */
@@ -80,7 +81,8 @@ export function DeviceTable({
       if (filters.device && !d.display_name.toLowerCase().includes(filters.device.toLowerCase())) return false
       if (filters.core && !d.core.toLowerCase().includes(filters.core.toLowerCase())) return false
       if (filters.flash && !formatSize(d.flash_size).toLowerCase().includes(filters.flash.toLowerCase())) return false
-      if (filters.ram && !formatSize(d.ram_size).toLowerCase().includes(filters.ram.toLowerCase())) return false
+      const ramKb = totalRamKb(d.ram_regions, d.ram_size)
+      if (filters.ram && !formatSize(ramKb).toLowerCase().includes(filters.ram.toLowerCase())) return false
       return true
     })
   }, [devices, filters])
@@ -150,7 +152,12 @@ export function DeviceTable({
                   <td className="border-r border-border/50 px-3 py-2 text-center font-medium">{d.display_name}</td>
                   <td className="border-r border-border/50 px-3 py-2 text-center text-muted-foreground">{d.core}</td>
                   <td className="border-r border-border/50 px-3 py-2 text-center tabular-nums">{formatSize(d.flash_size)}</td>
-                  <td className="px-3 py-2 text-center tabular-nums">{formatSize(d.ram_size)}</td>
+                  <td
+                    className="px-3 py-2 text-center tabular-nums"
+                    title={ramRegionsTooltip(d.ram_regions)}
+                  >
+                    {formatSize(totalRamKb(d.ram_regions, d.ram_size))}
+                  </td>
                 </tr>
               ))
             )}

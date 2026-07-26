@@ -13,7 +13,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
-from core.interface import BackendInterface, ProbeInfo, TargetInfo, FlashResult, FlashRegionInfo, SectorInfo
+from core.interface import BackendInterface, ProbeInfo, TargetInfo, FlashResult, FlashRegionInfo, SectorInfo, RamRegionInfo
 from core.events import event_manager
 
 logger = logging.getLogger(__name__)
@@ -386,6 +386,7 @@ class PyOCDBackend(BackendInterface):
         sectors_info: list[SectorInfo] = []
         ram_start = 0
         ram_size = 0
+        ram_regions_info: list[RamRegionInfo] = []
 
         try:
             from pyocd.core.memory_map import MemoryType
@@ -428,6 +429,13 @@ class PyOCDBackend(BackendInterface):
             if ram_regions:
                 ram_start = ram_regions[0].start
                 ram_size = sum(r.length for r in ram_regions)
+                # 构建完整的 RAM 区域列表
+                for idx, r in enumerate(ram_regions):
+                    ram_regions_info.append(RamRegionInfo(
+                        start=r.start,
+                        length=r.length,
+                        is_default=(idx == 0),
+                    ))
         except Exception:
             pass
 
@@ -531,6 +539,7 @@ class PyOCDBackend(BackendInterface):
             sectors=sectors_info,
             ram_start=ram_start,
             ram_size=ram_size,
+            ram_regions=ram_regions_info,
         )
 
     # ── 目标管理 ──────────────────────────────────────────────
