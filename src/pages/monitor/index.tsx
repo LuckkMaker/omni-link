@@ -56,6 +56,8 @@ export default function MonitorPage() {
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH)
   const [watchHeight, setWatchHeight] = useState(WATCH_DEFAULT_HEIGHT)
   const [cursorMeasure, setCursorMeasure] = useState<CursorMeasurement | null>(null)
+  /** 鼠标游标位置的采样值及索引（JScope 风格：鼠标悬停波形图时显示对应位置的值） */
+  const [cursorData, setCursorData] = useState<{ values: Map<string, number | null>; sampleIndex: number } | null>(null)
   const notifIdRef = useRef<string | null>(null)
 
   // ── 初始化：拉取状态与变量列表 ──
@@ -400,6 +402,8 @@ export default function MonitorPage() {
                     className="h-full w-full"
                     onCursorSelect={setCursorMeasure}
                     onTimebaseChange={setTimebase}
+                    onFollowChange={setFollow}
+                    onCursorValueChange={setCursorData}
                   />
                 </div>
                 {/* 游标测量结果 */}
@@ -436,7 +440,7 @@ export default function MonitorPage() {
 
           {/* 底部 Watch 面板（折叠时高度为 0，向下收起露出全部波形图） */}
           <div style={{ height: watchHeight }} className="flex flex-col border-t border-border overflow-hidden">
-            {watchHeight > 0 && <WatchPanel uid={uid} onCollapse={() => setWatchHeight(0)} />}
+            {watchHeight > 0 && <WatchPanel uid={uid} onCollapse={() => setWatchHeight(0)} cursorData={cursorData} />}
           </div>
           {/* Watch 面板收起后的展开按钮 */}
           {watchHeight === 0 && (

@@ -28,8 +28,12 @@ interface Props {
   className?: string
   /** 游标选择回调（拖选区域后触发） */
   onCursorSelect?: (m: CursorMeasurement | null) => void
-  /** 时基变化回调（滚轮缩放时步进时基档位，与 ChannelPanel 下拉联动） */
+  /** 时基变化回调（滚轮缩放时与 ChannelPanel 下拉联动） */
   onTimebaseChange?: (secPerDiv: number) => void
+  /** Follow 模式变化回调（滚轮缩放时自动关闭 Follow） */
+  onFollowChange?: (follow: boolean) => void
+  /** 鼠标游标值变化回调（JScope 风格：鼠标悬停时推送游标位置的采样值及采样点索引） */
+  onCursorValueChange?: (data: { values: Map<string, number | null>; sampleIndex: number } | null) => void
 }
 
 /** 最大渲染点数（超过时做 min/max 降采样保留波形形状） */
@@ -73,7 +77,7 @@ function niceTimeStep(span: number): number {
 
 export function WaveformChart({
   variables, channels, samples, follow, paused = false,
-  windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange,
+  windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange, onFollowChange, onCursorValueChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -96,6 +100,12 @@ export function WaveformChart({
   // 时基变化回调 ref（避免重建 uPlot）
   const onTimebaseRef = useRef(onTimebaseChange)
   useEffect(() => { onTimebaseRef.current = onTimebaseChange }, [onTimebaseChange])
+  // Follow 变化回调 ref（避免重建 uPlot）
+  const onFollowChangeRef = useRef(onFollowChange)
+  useEffect(() => { onFollowChangeRef.current = onFollowChange }, [onFollowChange])
+  // 游标值变化回调 ref（JScope 风格）
+  const onCursorValueRef = useRef(onCursorValueChange)
+  useEffect(() => { onCursorValueRef.current = onCursorValueChange }, [onCursorValueChange])
 
   // ── 构建可见通道列表（visible=true 的通道）──
   const getVisibleSeries = useCallback(() => {
@@ -230,6 +240,12 @@ export function WaveformChart({
     const { data, series } = buildPlotData()
     if (data[0].length === 0) return
 
+    // 保存当前 X 轴范围 —— plot.setData() 会导致 uPlot 自动缩放 X 轴，
+    // 非 Follow 模式下需恢复用户手动设定的视图，否则每次渲染都会重置缩放
+    const savedXMin = plot.scales.x?.min
+    const savedXMax = plot.scales.x?.max
+    const hasSavedX = savedXMin !== undefined && savedXMax !== undefined
+
     plot.setData(data)
 
     // Y 轴自适应辅助：根据可见 X 范围计算并设置 Y 量程
@@ -340,11 +356,13 @@ export function WaveformChart({
       plot.setScale('x', { min: xMin, max: xMax })
       autoFitY(xMin, xMax)
     } else {
-      // 非 Follow 模式：冻结 X 轴在当前位置，不随新数据自动滚动
-      // 仅在首次渲染（无 X scale）时自动 fit 全部数据
-      const xScale = plot.scales.x
-      const needInit = !xScale || xScale.min === undefined || xScale.max === undefined
-      if (needInit && data[0].length > 1) {
+      // 非 Follow 模式：冻结 X 轴在用户手动设定的位置，不随新数据自动滚动
+      // setData 会自动缩放 X 轴，此处必须恢复保存的 X 范围
+      if (hasSavedX) {
+        plot.setScale('x', { min: savedXMin!, max: savedXMax! })
+        autoFitY(savedXMin!, savedXMax!)
+      } else if (data[0].length > 1) {
+        // 首次渲染（无已设 X scale）：自动 fit 全部数据
         yRangeRef.current = null
         const tMin = data[0][0] as number
         const tMax = data[0][data[0].length - 1] as number
@@ -354,9 +372,6 @@ export function WaveformChart({
         const fitMax = tMax + tPad
         plot.setScale('x', { min: fitMin, max: fitMax })
         autoFitY(fitMin, fitMax)
-      } else if (xScale && xScale.min !== undefined && xScale.max !== undefined) {
-        // Y 轴自适应当前可见窗口内的数据
-        autoFitY(xScale.min, xScale.max)
       }
     }
   }, [buildPlotData])
@@ -376,7 +391,38 @@ export function WaveformChart({
   useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, scheduleRender])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables, scheduleRender])
   useEffect(() => { chansRef.current = channels; dirtyRef.current = true; scheduleRender() }, [channels, scheduleRender])
-  useEffect(() => { windowRef.current = windowSec; dirtyRef.current = true; scheduleRender() }, [windowSec, scheduleRender])
+  // 时基变化：更新 windowRef，并在非 Follow 模式下同步更新 X 轴窗口宽度
+  // Follow 模式下 doRender 会自动使用 windowRef × GRID_DIVS 作为窗口，无需此处干预
+  // 非 Follow 模式下需主动 setScale，否则下拉切换时基不会改变可见窗口
+  // 注意：滚轮操作已直接 setScale 并回调 onTimebaseChange → store → windowSec 变化 → 此 effect 触发。
+  //       此时当前窗口宽度已与新时基匹配，通过比较跳过重复 setScale，避免以视图中心重新对齐导致跳动。
+  const prevWindowRef = useRef(windowSec)
+  useEffect(() => {
+    const prevWindow = prevWindowRef.current
+    windowRef.current = windowSec
+    if (prevWindow !== windowSec) {
+      prevWindowRef.current = windowSec
+      const plot = plotRef.current
+      if (plot && !followRef.current) {
+        const xScale = plot.scales.x
+        if (xScale && xScale.min !== undefined && xScale.max !== undefined) {
+          const currentRange = xScale.max - xScale.min
+          const expectedRange = windowSec * GRID_DIVS
+          // 当前窗口宽度已匹配新时基（来自滚轮操作的反馈），跳过重设
+          if (Math.abs(currentRange - expectedRange) / expectedRange > 0.01) {
+            // 来自下拉切换：以当前视图中心为锚点更新窗口宽度
+            const center = (xScale.min + xScale.max) / 2
+            let newMin = center - expectedRange / 2
+            let newMax = center + expectedRange / 2
+            if (newMin < 0) { newMin = 0; newMax = expectedRange }
+            plot.setScale('x', { min: newMin, max: newMax })
+          }
+        }
+      }
+    }
+    dirtyRef.current = true
+    scheduleRender()
+  }, [windowSec, scheduleRender])
   useEffect(() => { fpsRef.current = fps }, [fps])
 
   // ── 暂停状态：记录起始时间 ──
@@ -498,8 +544,8 @@ export function WaveformChart({
     plotRef.current = plot
 
     // ── 鼠标滚轮缩放 ──
-    // 默认：步进时基档位（1-2-5 序列），与 ChannelPanel 时基下拉联动
-    // 按 Shift：缩放 Y 轴（值），连续缩放
+    // X 轴：离散时基步进（示波器风格），每次滚动切换一档时基，钳位到最小/最大
+    // Y 轴（Shift）：以鼠标 Y 位置为中心连续缩放
     const onWheel = (e: WheelEvent) => {
       const p = plotRef.current
       if (!p) return
@@ -519,40 +565,99 @@ export function WaveformChart({
           p.setScale('y', { min: newMin, max: newMax })
         }
       } else {
-        // 步进时基档位（1-2-5 序列），与 ChannelPanel 下拉联动
-        // 向上滚（deltaY < 0）→ 减小时基（放大）；向下滚 → 增大时基（缩小）
-        const currentSecPerDiv = windowRef.current
-        const idx = findNearestTimebaseIndex(currentSecPerDiv)
-        const nextIdx = e.deltaY < 0
-          ? Math.max(0, idx - 1)   // 放大：走向更小的时基
-          : Math.min(TIMEBASE_OPTIONS.length - 1, idx + 1)  // 缩小：走向更大的时基
-        if (nextIdx === idx) return // 已到边界
-        const newSecPerDiv = TIMEBASE_OPTIONS[nextIdx].value
-        // 通知 store 更新时基（ChannelPanel 下拉会同步更新）
-        onTimebaseRef.current?.(newSecPerDiv)
-        // 立即更新 windowRef，使下一次渲染使用新时基
-        windowRef.current = newSecPerDiv
+        // X 轴：离散时基步进 —— 每次滚动恰好切换一档时基
+        const xScale = p.scales.x
+        if (!xScale || xScale.min === undefined || xScale.max === undefined) return
 
-        // 非 Follow 模式：以鼠标位置为中心设置新窗口
-        if (!followRef.current) {
-          const xScale = p.scales.x
-          if (xScale && xScale.min !== undefined && xScale.max !== undefined) {
-            const mouseVal = p.posToVal(e.offsetX, 'x')
-            const oldRange = xScale.max - xScale.min
-            const newRange = newSecPerDiv * GRID_DIVS
-            const ratio = (mouseVal - xScale.min) / oldRange
-            const newMin = Math.max(0, mouseVal - newRange * ratio)
-            const newMax = newMin + newRange
-            p.setScale('x', { min: newMin, max: newMax })
-          }
+        // Follow 模式下滚轮 → 关闭 Follow，切换为手动浏览
+        if (followRef.current) {
+          followRef.current = false
+          onFollowChangeRef.current?.(false)
         }
-        // Follow 模式：doRender 会自动以新时基更新窗口
-        dirtyRef.current = true
-        scheduleRender()
+
+        // 从当前可见窗口宽度反推当前时基档位
+        const currentRange = xScale.max - xScale.min
+        const currentSecPerDiv = currentRange / GRID_DIVS
+        const currentIdx = findNearestTimebaseIndex(currentSecPerDiv)
+
+        // 滚轮向上 (deltaY < 0) = 放大 = 时基减小 (index -1)
+        // 滚轮向下 (deltaY > 0) = 缩小 = 时基增大 (index +1)
+        const direction = e.deltaY < 0 ? -1 : 1
+        const newIdx = Math.max(0, Math.min(TIMEBASE_OPTIONS.length - 1, currentIdx + direction))
+
+        // 已在边界，保持不变（不发生档位切换）
+        if (newIdx === currentIdx) return
+
+        const newSecPerDiv = TIMEBASE_OPTIONS[newIdx].value
+        const newRange = newSecPerDiv * GRID_DIVS
+
+        // 以鼠标位置为中心设置新窗口，钳位 newMin 到 0（避免负时间）
+        const mouseVal = p.posToVal(e.offsetX, 'x')
+        const ratio = (mouseVal - xScale.min) / currentRange
+        let newMin = mouseVal - newRange * ratio
+        let newMax = newMin + newRange
+        if (newMin < 0) {
+          newMin = 0
+          newMax = newRange
+        }
+        p.setScale('x', { min: newMin, max: newMax })
+
+        // 同步时基下拉（不触发重绘，setScale 已触发 uPlot 重绘）
+        windowRef.current = newSecPerDiv
+        onTimebaseRef.current?.(newSecPerDiv)
       }
     }
+
+    // ── 鼠标游标值追踪（JScope 风格）──
+    // 鼠标悬停于波形图时，将游标 X 位置对应的采样值推送给 Watch 面板
+    let cursorRafId: number | null = null
+    let lastCursorX = -1
+    const onMouseMove = (e: MouseEvent) => {
+      const p = plotRef.current
+      if (!p) return
+      // 用 RAF 节流，避免高频 mousemove 触发过多回调
+      lastCursorX = e.offsetX
+      if (cursorRafId !== null) return
+      cursorRafId = requestAnimationFrame(() => {
+        cursorRafId = null
+        const plot = plotRef.current
+        if (!plot) return
+        const xVal = plot.posToVal(lastCursorX, 'x')
+        const pts = samplesRef.current
+        if (pts.length === 0) return
+        // 二分查找最近的采样点
+        let lo = 0, hi = pts.length - 1
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1
+          if (pts[mid].t_ms / 1000 < xVal) lo = mid + 1
+          else hi = mid
+        }
+        // 比较 lo 和 lo-1 哪个更近
+        let best = lo
+        if (lo > 0) {
+          const d1 = Math.abs(pts[lo].t_ms / 1000 - xVal)
+          const d0 = Math.abs(pts[lo - 1].t_ms / 1000 - xVal)
+          if (d0 < d1) best = lo - 1
+        }
+        const vals = new Map<string, number | null>()
+        for (const v of pts[best].values) vals.set(v.id, v.value)
+        onCursorValueRef.current?.({ values: vals, sampleIndex: best })
+      })
+    }
+    // 鼠标离开时不重置游标值 —— 保留最后游标位置的值继续显示（JScope 风格）
+    const onMouseLeave = () => {
+      if (cursorRafId !== null) {
+        cancelAnimationFrame(cursorRafId)
+        cursorRafId = null
+      }
+    }
+
     const wheelTarget = containerRef.current
-    if (wheelTarget) wheelTarget.addEventListener('wheel', onWheel, { passive: false })
+    if (wheelTarget) {
+      wheelTarget.addEventListener('wheel', onWheel, { passive: false })
+      wheelTarget.addEventListener('mousemove', onMouseMove)
+      wheelTarget.addEventListener('mouseleave', onMouseLeave)
+    }
 
     // ResizeObserver 监听容器大小变化
     const resizeObserver = new ResizeObserver(() => {
@@ -566,7 +671,12 @@ export function WaveformChart({
     resizeObserver.observe(containerRef.current)
 
     return () => {
-      if (wheelTarget) wheelTarget.removeEventListener('wheel', onWheel)
+      if (wheelTarget) {
+        wheelTarget.removeEventListener('wheel', onWheel)
+        wheelTarget.removeEventListener('mousemove', onMouseMove)
+        wheelTarget.removeEventListener('mouseleave', onMouseLeave)
+      }
+      if (cursorRafId !== null) cancelAnimationFrame(cursorRafId)
       resizeObserver.disconnect()
       plot.destroy()
       plotRef.current = null

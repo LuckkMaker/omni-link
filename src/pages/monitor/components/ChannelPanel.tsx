@@ -69,7 +69,6 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
   const elfLoaded = useMonitorStore((s) => s.elfLoaded)
   const elfChanged = useMonitorStore((s) => s.elfChanged)
   const setElfChanged = useMonitorStore((s) => s.setElfChanged)
-  const symbolCount = useMonitorStore((s) => s.symbolCount)
   const rateHz = useMonitorStore((s) => s.rateHz)
   const follow = useMonitorStore((s) => s.follow)
   const timebase = useMonitorStore((s) => s.timebase)
@@ -694,13 +693,6 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
               </button>
             )}
           </div>
-          {elfLoaded && elfPath && (
-            <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-              <span className="truncate" title={elfPath}>{elfPath.split(/[\\/]/).pop()}</span>
-              <span className="shrink-0">· {symbolCount} 符号</span>
-              {elfChanged && <span className="shrink-0 text-amber-600">· 已变化</span>}
-            </div>
-          )}
         </div>
 
       {/* ── 变量浏览（ELF 已加载）── */}
@@ -720,128 +712,130 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
             <span className="shrink-0 text-[10px] text-muted-foreground">{symbols.length}</span>
           </div>
 
-          {/* 分组符号列表 */}
+          {/* 分组符号列表（单一表头 + 文件分组行） */}
           <div className="min-h-0 flex-1 overflow-auto px-1">
-            {groupedSymbols.map(([file, syms]) => {
-              const collapsed = collapsedGroups.has(file)
-              return (
-                <div key={file} className="mb-1">
-                  {/* 组头 */}
-                  <button
-                    className="flex w-full items-center gap-1 rounded px-1 py-1 text-[11px] font-medium hover:bg-muted/30"
-                    onClick={() => toggleGroup(file)}
-                  >
-                    {collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
-                    <span className="truncate" title={file}>{file.split(/[\\/]/).pop()}</span>
-                    <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{syms.length}</span>
-                  </button>
-                  {/* 组内符号 */}
-                  {!collapsed && (
-                    <table className="w-full text-[11px]">
-                      <thead className="sticky top-0 bg-background z-10">
-                        <tr className="text-[10px] text-muted-foreground border-b border-border">
-                          <th className="w-5 px-1 py-0.5 font-medium text-left"></th>
-                          <th className="px-1 py-0.5 font-medium text-left">Name</th>
-                          <th className="px-1 py-0.5 font-medium text-left w-20">Address</th>
-                          <th className="px-1 py-0.5 font-medium text-left w-16">Type</th>
-                          <th className="px-1 py-0.5 font-medium text-center w-10">Size</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {syms.map((sym) => {
-                          const isSel = added.has(sym.name)
-                          const isExp = expandedArrays.has(sym.name)
-                          const partSet = addedElems[sym.name]
-                          const isChecked = checked.has(sym.name)  // 待添加勾选状态
-                          return (
-                            <Fragment key={sym.name}>
-                              <tr
-                                className={cn('border-b border-border/30', isSel && 'bg-primary/5', !isSel && isChecked && 'bg-primary/3')}
-                              >
-                                <td className="w-5 px-1 py-0.5">
-                                  <input
-                                    type="checkbox"
-                                    className="size-3 cursor-pointer"
-                                    checked={isSel || isChecked}
-                                    onChange={() => toggleSelect(sym)}
-                                    title={isSel ? '已添加到 Watch（点击移除）' : isChecked ? '已勾选（点击取消）' : '点击勾选待添加'}
-                                  />
-                                </td>
-                                <td className="px-1 py-0.5">
-                                  <div className="flex items-center gap-0.5">
-                                    {sym.is_array && sym.elem_count > 0 && (
-                                      <button
-                                        className="text-muted-foreground hover:text-foreground"
-                                        onClick={(e) => { e.stopPropagation(); toggleArrayExpand(sym.name) }}
-                                        title={isExp ? '收起元素' : '展开元素'}
-                                      >
-                                        {isExp ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-                                      </button>
-                                    )}
-                                    <span className="truncate" title={sym.name}>
-                                      {sym.name}
-                                      {sym.is_array && <span className="text-muted-foreground">[{sym.elem_count}]</span>}
-                                    </span>
-                                  </div>
-                                </td>
-                                <td className="px-1 py-0.5 font-mono text-[10px] w-20">
-                                  0x{sym.address.toString(16).toUpperCase().padStart(8, '0')}
-                                </td>
-                                <td className="px-1 py-0.5 font-mono text-[10px] w-16">
-                                  {sym.is_array ? `${sym.elem_type}[${sym.elem_count}]` : sym.type}
-                                </td>
-                                <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.size}</td>
-                              </tr>
-                              {/* 数组元素二级列表（展开） */}
-                              {sym.is_array && isExp && (
-                                <>
-                                  {partSet && partSet.size > 0 && !isSel && (
-                                    <tr className="bg-primary/5">
-                                      <td colSpan={5} className="px-2 py-0.5 text-[10px] text-primary">
-                                        已监视 {partSet.size}/{sym.elem_count} 个元素
-                                      </td>
-                                    </tr>
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-background z-10">
+                <tr className="text-[10px] text-muted-foreground border-b border-border">
+                  <th className="w-5 px-1 py-0.5 font-medium text-left"></th>
+                  <th className="px-1 py-0.5 font-medium text-left">Name</th>
+                  <th className="px-1 py-0.5 font-medium text-left w-20">Address</th>
+                  <th className="px-1 py-0.5 font-medium text-left w-16">Type</th>
+                  <th className="px-1 py-0.5 font-medium text-center w-10">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groupedSymbols.map(([file, syms]) => {
+                  const collapsed = collapsedGroups.has(file)
+                  return (
+                    <Fragment key={file}>
+                      {/* 文件分组行 */}
+                      <tr
+                        className="cursor-pointer hover:bg-muted/30 border-b border-border"
+                        onClick={() => toggleGroup(file)}
+                      >
+                        <td colSpan={5} className="px-1 py-1 text-[11px] font-medium">
+                          <div className="flex items-center gap-1">
+                            {collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+                            <span className="truncate" title={file}>{file.split(/[\\/]/).pop()}</span>
+                            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{syms.length}</span>
+                          </div>
+                        </td>
+                      </tr>
+                      {/* 组内符号 */}
+                      {!collapsed && syms.map((sym) => {
+                        const isSel = added.has(sym.name)
+                        const isExp = expandedArrays.has(sym.name)
+                        const partSet = addedElems[sym.name]
+                        const isChecked = checked.has(sym.name)
+                        return (
+                          <Fragment key={sym.name}>
+                            <tr
+                              className={cn('border-b border-border/30', isSel && 'bg-primary/5', !isSel && isChecked && 'bg-primary/3')}
+                            >
+                              <td className="w-5 px-1 py-0.5">
+                                <input
+                                  type="checkbox"
+                                  className="size-3 cursor-pointer"
+                                  checked={isSel || isChecked}
+                                  onChange={() => toggleSelect(sym)}
+                                  title={isSel ? '已添加到 Watch（点击移除）' : isChecked ? '已勾选（点击取消）' : '点击勾选待添加'}
+                                />
+                              </td>
+                              <td className="px-1 py-0.5">
+                                <div className="flex items-center gap-0.5">
+                                  {sym.is_array && sym.elem_count > 0 && (
+                                    <button
+                                      className="text-muted-foreground hover:text-foreground"
+                                      onClick={(e) => { e.stopPropagation(); toggleArrayExpand(sym.name) }}
+                                      title={isExp ? '收起元素' : '展开元素'}
+                                    >
+                                      {isExp ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+                                    </button>
                                   )}
-                                  {Array.from({ length: sym.elem_count }, (_, i) => {
-                                    const elemAddr = sym.address + i * sym.elem_size
-                                    const checked = isSel || (partSet?.has(i) ?? false)
-                                    return (
-                                      <tr
-                                        key={`${sym.name}[${i}]`}
-                                        className={cn('bg-muted/10', checked && 'bg-primary/5')}
-                                      >
-                                        <td className="w-5 px-1 py-0.5">
-                                          <input
-                                            type="checkbox"
-                                            className="size-3 cursor-pointer"
-                                            checked={checked}
-                                            onChange={() => toggleElem(sym, i)}
-                                            disabled={isSel}
-                                            title={checked ? '已添加到 Watch（点击移除）' : '点击勾选待添加'}
-                                          />
-                                        </td>
-                                        <td className="px-1 py-0.5 pl-4 font-mono text-[10px]">
-                                          {sym.name}[{i}]
-                                        </td>
-                                        <td className="px-1 py-0.5 font-mono text-[10px] w-20">
-                                          0x{elemAddr.toString(16).toUpperCase().padStart(8, '0')}
-                                        </td>
-                                        <td className="px-1 py-0.5 font-mono text-[10px] w-16">{sym.elem_type}</td>
-                                        <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.elem_size}</td>
-                                      </tr>
-                                    )
-                                  })}
-                                </>
-                              )}
-                            </Fragment>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              )
-            })}
+                                  <span className="truncate" title={sym.name}>
+                                    {sym.name}
+                                    {sym.is_array && <span className="text-muted-foreground">[{sym.elem_count}]</span>}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-1 py-0.5 font-mono text-[10px] w-20">
+                                0x{sym.address.toString(16).toUpperCase().padStart(8, '0')}
+                              </td>
+                              <td className="px-1 py-0.5 font-mono text-[10px] w-16">
+                                {sym.is_array ? `${sym.elem_type}[${sym.elem_count}]` : sym.type}
+                              </td>
+                              <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.size}</td>
+                            </tr>
+                            {/* 数组元素二级列表（展开） */}
+                            {sym.is_array && isExp && (
+                              <>
+                                {partSet && partSet.size > 0 && !isSel && (
+                                  <tr className="bg-primary/5">
+                                    <td colSpan={5} className="px-2 py-0.5 text-[10px] text-primary">
+                                      已监视 {partSet.size}/{sym.elem_count} 个元素
+                                    </td>
+                                  </tr>
+                                )}
+                                {Array.from({ length: sym.elem_count }, (_, i) => {
+                                  const elemAddr = sym.address + i * sym.elem_size
+                                  const checked = isSel || (partSet?.has(i) ?? false)
+                                  return (
+                                    <tr
+                                      key={`${sym.name}[${i}]`}
+                                      className={cn('bg-muted/10', checked && 'bg-primary/5')}
+                                    >
+                                      <td className="w-5 px-1 py-0.5">
+                                        <input
+                                          type="checkbox"
+                                          className="size-3 cursor-pointer"
+                                          checked={checked}
+                                          onChange={() => toggleElem(sym, i)}
+                                          disabled={isSel}
+                                          title={checked ? '已添加到 Watch（点击移除）' : '点击勾选待添加'}
+                                        />
+                                      </td>
+                                      <td className="px-1 py-0.5 pl-4 font-mono text-[10px]">
+                                        {sym.name}[{i}]
+                                      </td>
+                                      <td className="px-1 py-0.5 font-mono text-[10px] w-20">
+                                        0x{elemAddr.toString(16).toUpperCase().padStart(8, '0')}
+                                      </td>
+                                      <td className="px-1 py-0.5 font-mono text-[10px] w-16">{sym.elem_type}</td>
+                                      <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.elem_size}</td>
+                                    </tr>
+                                  )
+                                })}
+                              </>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
             {groupedSymbols.length === 0 && (
               <div className="px-2 py-4 text-center text-muted-foreground text-[11px]">
                 {filter ? '无匹配符号' : '无符号'}

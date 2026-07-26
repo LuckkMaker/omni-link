@@ -2,13 +2,19 @@ import { useState } from 'react'
 import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff, MoreVertical } from 'lucide-react'
 import { useMonitorStore, type ArrayGroup } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
-import { monitorService } from '@/services/monitor.service'
+import { monitorService, type SamplePoint } from '@/services/monitor.service'
 import { cn } from '@/lib/utils'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 
 /** 触发方式选项（与 ChannelConfig.triggerMode 对齐） */
@@ -43,10 +49,41 @@ const Y_RESOLUTION_OPTIONS: { value: number; label: string }[] = (() => {
   return opts
 })()
 
+/** 滑动平均窗口选项 */
+const MA_OPTIONS = [
+  { value: 0, label: 'Off' },
+  { value: 2, label: '2' },
+  { value: 4, label: '4' },
+  { value: 8, label: '8' },
+  { value: 16, label: '16' },
+  { value: 32, label: '32' },
+  { value: 64, label: '64' },
+]
+
+/**
+ * 计算指定采样点索引处的简单移动平均（SMA）。
+ * 居中窗口：以 idx 为中心，取 [idx-half, idx+half] 范围内的非 null 值求平均。
+ * 与 WaveformChart.buildPlotData 中的 MA 逻辑保持一致。
+ */
+function computeSMA(samples: SamplePoint[], varId: string, idx: number, window: number): number | null {
+  if (window < 1 || idx < 0 || idx >= samples.length) return null
+  const half = Math.floor(window / 2)
+  let sum = 0, cnt = 0
+  for (let k = -half; k <= half; k++) {
+    const i = idx + k
+    if (i < 0 || i >= samples.length) continue
+    const v = samples[i].values.find((x) => x.id === varId)?.value
+    if (v !== null && v !== undefined && typeof v === 'number') { sum += v; cnt++ }
+  }
+  return cnt > 0 ? sum / cnt : null
+}
+
 interface Props {
   uid: string | null
   /** 收起 Watch 面板（高度置 0，露出全部波形图） */
   onCollapse?: () => void
+  /** 鼠标游标位置的采样值及索引（JScope 风格：Value/MA 列显示游标位置的值） */
+  cursorData?: { values: Map<string, number | null>; sampleIndex: number } | null
 }
 
 /**
@@ -56,11 +93,10 @@ interface Props {
  * 其中 Min/Max/Moving Average/Y Resolution 属通道显示配置（ChannelConfig）。
  * Y 偏移/Y 缩放/触发 放在每行的"展开二级区"中，避免列过多导致横向滚动。
  */
-export function WatchPanel({ uid, onCollapse }: Props) {
+export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
   const variables = useMonitorStore((s) => s.variables)
   const channels = useMonitorStore((s) => s.channels)
   const samples = useMonitorStore((s) => s.samples)
-  const running = useMonitorStore((s) => s.running)
   const removeVariable = useMonitorStore((s) => s.removeVariable)
   const addVariable = useMonitorStore((s) => s.addVariable)
   const setChannel = useMonitorStore((s) => s.setChannel)
@@ -73,17 +109,11 @@ export function WatchPanel({ uid, onCollapse }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
-  // 取最新值
-  const lastSample = samples[samples.length - 1]
-  const lastValues = new Map<string, number | null>()
-  if (lastSample) {
-    for (const v of lastSample.values) lastValues.set(v.id, v.value)
-  }
-  const prevValues = new Map<string, number | null>()
-  const prev = samples[samples.length - 2]
-  if (prev) {
-    for (const v of prev.values) prevValues.set(v.id, v.value)
-  }
+  // JScope 风格：Value 列只显示游标位置的采样值，不显示实时值
+  // 鼠标离开波形图后保留最后游标位置的值（cursorData 不会被重置为 null）
+  // 鼠标从未进入波形图时 cursorData 为 null，显示 "—"
+  const cursorValues = cursorData?.values ?? null
+  const cursorIdx = cursorData?.sampleIndex ?? -1
 
   const handleRemove = async (id: string) => {
     if (!uid) return
@@ -207,7 +237,9 @@ export function WatchPanel({ uid, onCollapse }: Props) {
               <th className="border border-border px-1 py-1 text-center font-medium w-24">Address</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-8">Size</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-12">Type</th>
-              <th className="border border-border px-1 py-1 text-center font-medium w-24">Value</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-24 text-primary" title="游标位置采样值（鼠标悬停波形图）">
+                Value ◆
+              </th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Min</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Max</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">MA</th>
@@ -224,10 +256,15 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                 </td>
               </tr>
             ) : variables.map((v, i) => {
-              const val = lastValues.get(v.id)
-              const prevVal = prevValues.get(v.id)
-              const changed = running && val !== undefined && prevVal !== undefined && val !== prevVal
               const ch = channels.find((c) => c.varId === v.id)
+              // Value 列只显示游标位置的采样值（JScope 风格），不显示实时值
+              const val = cursorValues?.get(v.id) ?? null
+              const hasCursor = cursorValues !== null
+              // MA 值：在游标位置计算 SMA（窗口大小 > 0 时）
+              const maWindow = ch?.movingAverage ?? 0
+              const maVal = hasCursor && maWindow > 0 && cursorIdx >= 0
+                ? computeSMA(samples, v.id, cursorIdx, maWindow)
+                : null
               // 数组分组查找：首元素显示展开按钮，非首元素缩进显示
               const arrGroup = arrayGroups.find((g) => g.firstElemId === v.id)
               const subElemGroup = !arrGroup ? arrayGroups.find((g) => g.elemIds.includes(v.id) && g.firstElemId !== v.id) : null
@@ -280,15 +317,15 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                   <td className="border border-border px-1 py-1 font-mono text-center">
                     {v.type}
                   </td>
-                  {/* Value（双击编辑） */}
+                  {/* Value（双击编辑；只显示游标位置值，不显示实时值） */}
                   <td
                     className={cn(
                       'border border-border px-1 py-1 text-right font-mono tabular-nums transition-colors overflow-hidden',
-                      changed && 'bg-primary/10',
+                      hasCursor && 'bg-primary/5',
                       editingId === v.id && 'p-0',
                     )}
                     onDoubleClick={() => { setEditingId(v.id); setEditValue('') }}
-                    title="双击修改变量值"
+                    title={hasCursor ? '游标位置值（双击写入新值）' : '鼠标悬停波形图查看值（双击写入新值）'}
                   >
                     {editingId === v.id ? (
                       <input
@@ -303,7 +340,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                         onBlur={() => setEditingId(null)}
                         placeholder={val?.toString() ?? ''}
                       />
-                    ) : val === undefined ? '—' : val === null ? 'N/A' : val}
+                    ) : !hasCursor ? '—' : val === null ? 'N/A' : val}
                   </td>
                   {/* Min（null=自适应） */}
                   <td className="border border-border px-0.5 py-1">
@@ -327,17 +364,16 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                       title="Y 轴最大值（空=跟随自适应）"
                     />
                   </td>
-                  {/* Moving Average（窗口大小，0=关闭） */}
-                  <td className="border border-border px-0.5 py-1">
-                    <input
-                      type="number"
-                      min={0}
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
-                      value={ch?.movingAverage ?? 0}
-                      onChange={(e) => setChannel(v.id, { movingAverage: Math.max(0, Math.floor(Number(e.target.value))) })}
-                      placeholder="0"
-                      title="滑动平均窗口大小（0=关闭，>0=窗口大小）"
-                    />
+                  {/* Moving Average（显示游标位置处的 SMA 计算值；窗口配置在"更多"菜单） */}
+                  <td
+                    className="border border-border px-1 py-1 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
+                    title={maWindow > 0
+                      ? `SMA(${maWindow}) 游标位置滑动平均值（窗口配置在"更多"菜单）`
+                      : '滑动平均未开启（在"更多"菜单中配置窗口大小）'}
+                  >
+                    {maWindow > 0
+                      ? (maVal !== null ? maVal.toFixed(2) : '—')
+                      : 'Off'}
                   </td>
                   {/* Y Resolution（1-2-5 序列选择，0=自动）*/}
                   <td className="border border-border px-0.5 py-1">
@@ -376,7 +412,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                       )}
                     </div>
                   </td>
-                  {/* 更多操作：显示/隐藏、移除 */}
+                  {/* 更多操作：MA配置、显示/隐藏、移除 */}
                   <td className="border border-border px-0.5 py-1 text-center">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -387,7 +423,26 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                           <MoreVertical className="size-3" />
                         </button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-28">
+                      <DropdownMenuContent align="end" className="w-36">
+                        {/* MA 窗口配置子菜单 */}
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <span className="text-xs">滑动平均 (MA)</span>
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent>
+                            <DropdownMenuRadioGroup
+                              value={String(ch?.movingAverage ?? 0)}
+                              onValueChange={(val) => setChannel(v.id, { movingAverage: Number(val) })}
+                            >
+                              {MA_OPTIONS.map((opt) => (
+                                <DropdownMenuRadioItem key={opt.value} value={String(opt.value)}>
+                                  {opt.label}
+                                </DropdownMenuRadioItem>
+                              ))}
+                            </DropdownMenuRadioGroup>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem
                           onClick={() => setChannel(v.id, { visible: !(ch?.visible ?? true) })}
                         >
