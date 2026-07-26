@@ -3,6 +3,7 @@ import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import type { MonitorVariable, SamplePoint } from '@/services/monitor.service'
 import type { ChannelConfig } from '@/stores/monitor.store'
+import { TIMEBASE_OPTIONS, findNearestTimebaseIndex, GRID_DIVS } from '../constants'
 
 export interface CursorMeasurement {
   /** 左游标时间（秒） */
@@ -25,6 +26,8 @@ interface Props {
   className?: string
   /** 游标选择回调（拖选区域后触发） */
   onCursorSelect?: (m: CursorMeasurement | null) => void
+  /** 时基变化回调（滚轮缩放时步进时基档位，与 ChannelPanel 下拉联动） */
+  onTimebaseChange?: (secPerDiv: number) => void
 }
 
 /** 最大渲染点数（超过时做 min/max 降采样保留波形形状） */
@@ -35,8 +38,6 @@ const MA_WINDOW = 5
 const Y_PADDING = 0.1
 /** Y 轴 hysteresis：新范围与旧范围重叠超过此比例时不更新，避免频繁跳动 */
 const Y_HYSTERESIS = 0.15
-/** 示波器标准格数（水平方向） */
-const GRID_DIVS = 10
 
 /**
  * 相对时间格式化：根据数值大小自动选择 μs/ms/s 单位。
@@ -72,7 +73,7 @@ function niceTimeStep(span: number): number {
 
 export function WaveformChart({
   variables, channels, samples, follow,
-  windowSec = 10, fps = 30, className, onCursorSelect,
+  windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -89,13 +90,16 @@ export function WaveformChart({
   // 游标回调 ref（避免重建 uPlot）
   const onCursorRef = useRef(onCursorSelect)
   useEffect(() => { onCursorRef.current = onCursorSelect }, [onCursorSelect])
+  // 时基变化回调 ref（避免重建 uPlot）
+  const onTimebaseRef = useRef(onTimebaseChange)
+  useEffect(() => { onTimebaseRef.current = onTimebaseChange }, [onTimebaseChange])
 
   // 同步 ref（避免重建 uPlot）
   useEffect(() => { followRef.current = follow; dirtyRef.current = true; scheduleRender() }, [follow])
   useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables])
   useEffect(() => { chansRef.current = channels; dirtyRef.current = true; scheduleRender() }, [channels])
-  useEffect(() => { windowRef.current = windowSec }, [windowSec])
+  useEffect(() => { windowRef.current = windowSec; dirtyRef.current = true; scheduleRender() }, [windowSec])
   useEffect(() => { fpsRef.current = fps }, [fps])
 
   // ── 构建可见通道列表（visible=true 的通道）──
@@ -462,16 +466,17 @@ export function WaveformChart({
     const plot = new uPlot(opts, [[]], containerRef.current)
     plotRef.current = plot
 
-    // ── 鼠标滚轮缩放（以鼠标位置为中心）──
-    // 默认：缩放 X 轴（时间）；按 Shift：缩放 Y 轴（值）
+    // ── 鼠标滚轮缩放 ──
+    // 默认：步进时基档位（1-2-5 序列），与 ChannelPanel 时基下拉联动
+    // 按 Shift：缩放 Y 轴（值），连续缩放
     const onWheel = (e: WheelEvent) => {
       const p = plotRef.current
       if (!p) return
       e.preventDefault()
-      const zoomFactor = e.deltaY < 0 ? 0.8 : 1.25 // 向上滚缩小（放大视图），向下滚放大（缩小视图）
 
       if (e.shiftKey) {
-        // 缩放 Y 轴，以鼠标 Y 位置为中心
+        // 缩放 Y 轴，以鼠标 Y 位置为中心（连续缩放）
+        const zoomFactor = e.deltaY < 0 ? 0.8 : 1.25
         const yScale = p.scales.y
         if (yScale && yScale.min !== undefined && yScale.max !== undefined) {
           const mouseVal = p.posToVal(e.offsetY, 'y')
@@ -483,18 +488,36 @@ export function WaveformChart({
           p.setScale('y', { min: newMin, max: newMax })
         }
       } else {
-        // 缩放 X 轴（时间），以鼠标 X 位置为中心
-        const xScale = p.scales.x
-        if (xScale && xScale.min !== undefined && xScale.max !== undefined) {
-          const mouseVal = p.posToVal(e.offsetX, 'x')
-          const range = xScale.max - xScale.min
-          const newRange = range * zoomFactor
-          const ratio = (mouseVal - xScale.min) / range
-          // X 轴时间从 0 起算，钳位 newMin 到 0，禁止滚轮缩放到负时间
-          const newMin = Math.max(0, mouseVal - newRange * ratio)
-          const newMax = mouseVal + newRange * (1 - ratio)
-          p.setScale('x', { min: newMin, max: newMax })
+        // 步进时基档位（1-2-5 序列），与 ChannelPanel 下拉联动
+        // 向上滚（deltaY < 0）→ 减小时基（放大）；向下滚 → 增大时基（缩小）
+        const currentSecPerDiv = windowRef.current
+        const idx = findNearestTimebaseIndex(currentSecPerDiv)
+        const nextIdx = e.deltaY < 0
+          ? Math.max(0, idx - 1)   // 放大：走向更小的时基
+          : Math.min(TIMEBASE_OPTIONS.length - 1, idx + 1)  // 缩小：走向更大的时基
+        if (nextIdx === idx) return // 已到边界
+        const newSecPerDiv = TIMEBASE_OPTIONS[nextIdx].value
+        // 通知 store 更新时基（ChannelPanel 下拉会同步更新）
+        onTimebaseRef.current?.(newSecPerDiv)
+        // 立即更新 windowRef，使下一次渲染使用新时基
+        windowRef.current = newSecPerDiv
+
+        // 非 Follow 模式：以鼠标位置为中心设置新窗口
+        if (!followRef.current) {
+          const xScale = p.scales.x
+          if (xScale && xScale.min !== undefined && xScale.max !== undefined) {
+            const mouseVal = p.posToVal(e.offsetX, 'x')
+            const oldRange = xScale.max - xScale.min
+            const newRange = newSecPerDiv * GRID_DIVS
+            const ratio = (mouseVal - xScale.min) / oldRange
+            const newMin = Math.max(0, mouseVal - newRange * ratio)
+            const newMax = newMin + newRange
+            p.setScale('x', { min: newMin, max: newMax })
+          }
         }
+        // Follow 模式：doRender 会自动以新时基更新窗口
+        dirtyRef.current = true
+        scheduleRender()
       }
     }
     const wheelTarget = containerRef.current
@@ -518,12 +541,13 @@ export function WaveformChart({
       plotRef.current = null
     }
     // 依赖变量ID列表和通道可见性，变化时重建
+    // 注意：windowSec 不在依赖中 —— 时基切换只更新 windowRef 并触发重渲染，
+    // 不重建 uPlot 实例，避免波形图闪烁/数据丢失。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     variables.map((v) => v.id).join(','),
     channels.filter((c) => c.visible).map((c) => c.varId).join(','),
     channels.map((c) => c.color).join(','),
-    windowSec,
   ])
 
   return <div ref={containerRef} className={className} style={{ width: '100%', height: '100%' }} />

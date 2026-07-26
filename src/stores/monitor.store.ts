@@ -84,6 +84,10 @@ interface MonitorState {
   fps: number
   channels: ChannelConfig[]
 
+  // ── 目标设备状态 ──
+  /** CPU 内核状态：running=运行中, halted=已暂停, unknown=未知/未连接 */
+  coreState: 'running' | 'halted' | 'unknown'
+
   // ── 数组分组（M6：数组首元素+展开/收起）──
   arrayGroups: ArrayGroup[]
 
@@ -98,6 +102,7 @@ interface MonitorState {
   setFollow: (on: boolean) => void
   setTimebase: (t: number) => void
   setFps: (fps: number) => void
+  setCoreState: (state: 'running' | 'halted' | 'unknown') => void
 
   setElf: (path: string, count: number) => void
   setElfChanged: (v: boolean) => void
@@ -170,6 +175,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   fps: 30,
   channels: [],
   arrayGroups: [],
+  coreState: 'unknown',
 
   setRunning: (running) => set({ running }),
   setPaused: (paused) => set({ paused }),
@@ -181,6 +187,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   setFollow: (on) => set({ follow: on }),
   setTimebase: (t) => set({ timebase: t }),
   setFps: (fps) => set({ fps }),
+  setCoreState: (state) => set({ coreState: state }),
 
   setElf: (path, count) => set({ elfPath: path, elfLoaded: true, symbolCount: count, elfChanged: false }),
   setElfChanged: (v) => set({ elfChanged: v }),
@@ -262,5 +269,6 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     totalSamples: 0,
     channels: [],
     arrayGroups: [],
+    coreState: 'unknown',
   }),
 }))

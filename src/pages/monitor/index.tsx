@@ -36,7 +36,10 @@ export default function MonitorPage() {
   const follow = useMonitorStore((s) => s.follow)
   const setFollow = useMonitorStore((s) => s.setFollow)
   const timebase = useMonitorStore((s) => s.timebase)
+  const setTimebase = useMonitorStore((s) => s.setTimebase)
   const fps = useMonitorStore((s) => s.fps)
+  const coreState = useMonitorStore((s) => s.coreState)
+  const setCoreState = useMonitorStore((s) => s.setCoreState)
 
   const setRunning = useMonitorStore((s) => s.setRunning)
   const setPaused = useMonitorStore((s) => s.setPaused)
@@ -79,6 +82,22 @@ export default function MonitorPage() {
     }, 2000)
     return () => clearInterval(timer)
   }, [uid, running, setActualRateHz])
+
+  // ── 目标内核状态轮询（连接时定期查询 Run/Halt 状态）──
+  useEffect(() => {
+    if (!uid || !isConnected) return
+    const poll = async () => {
+      try {
+        const r = await monitorService.deviceState(uid)
+        if (r.success) {
+          setCoreState(r.state === 'running' ? 'running' : r.state === 'halted' ? 'halted' : 'unknown')
+        }
+      } catch { /* ignore */ }
+    }
+    poll()
+    const timer = setInterval(poll, 3000)
+    return () => clearInterval(timer)
+  }, [uid, isConnected, setCoreState])
 
   // ── WebSocket 事件订阅 ──
   useEffect(() => {
@@ -137,53 +156,49 @@ export default function MonitorPage() {
     return () => { offSample(); offStarted(); offStopped(); offError(); offInfo() }
   }, [uid, appendSamples, setRunning, setPaused, setStarting, setError, updateNotification, pushNotification])
 
-  // ── 启动/停止采样 ──
-  const handleToggleSampling = useCallback(async () => {
+  // ── 采样控制：启动/暂停/停止 ──
+  const handleStartPause = useCallback(async () => {
     if (!uid) return
-    if (running) {
+    if (running && !paused) {
+      // 运行中 → 暂停
       try {
-        await monitorService.stop(uid)
-        setRunning(false)
-        // 停止采样后自动关闭 Follow，切换到全览模式（Fit 全部数据）
-        // 对标示波器 Stop 行为：冻结并显示完整捕获波形
-        setFollow(false)
-        pushNotification({
-          type: 'info',
-          title: 'Monitor 采样已停止',
-          message: '',
-          autoClose: true,
-          autoCloseDelay: 2000,
-        })
+        await monitorService.pause(uid)
+        setPaused(true)
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        setError(msg)
         pushNotification({
-          type: 'error',
-          title: '停止采样失败',
-          message: msg,
-          autoClose: false,
+          type: 'error', title: '暂停失败',
+          message: e instanceof Error ? e.message : String(e),
+          autoClose: true, autoCloseDelay: 3000,
+        })
+      }
+    } else if (running && paused) {
+      // 已暂停 → 继续
+      try {
+        await monitorService.resume(uid)
+        setPaused(false)
+      } catch (e) {
+        pushNotification({
+          type: 'error', title: '恢复失败',
+          message: e instanceof Error ? e.message : String(e),
+          autoClose: true, autoCloseDelay: 3000,
         })
       }
     } else {
+      // 未运行 → 启动
       if (variables.length === 0) {
         pushNotification({
-          type: 'warning',
-          title: '请先添加监视变量',
+          type: 'warning', title: '请先添加监视变量',
           message: '在右侧边栏加载 ELF 文件并选择变量',
-          autoClose: true,
-          autoCloseDelay: 4000,
+          autoClose: true, autoCloseDelay: 4000,
         })
         return
       }
       setStarting(true)
       setError(null)
-      // 启动采样时自动开启 Follow，实时跟踪最新数据
       setFollow(true)
-      // 清空旧数据，从 0 点开始新一轮采集
       clearSamples()
       notifIdRef.current = pushNotification({
-        type: 'progress',
-        title: 'Monitor 采样启动中',
+        type: 'progress', title: 'Monitor 采样启动中',
         message: `正在以 ${rateHz} Hz 启动采样...`,
       })
       try {
@@ -192,33 +207,86 @@ export default function MonitorPage() {
           setStarting(false)
           if (notifIdRef.current) {
             updateNotification(notifIdRef.current, {
-              type: 'error',
-              title: 'Monitor 启动失败',
-              message: '未知错误',
-              autoClose: true,
-              autoCloseDelay: 5000,
+              type: 'error', title: 'Monitor 启动失败',
+              message: '未知错误', autoClose: true, autoCloseDelay: 5000,
             })
             notifIdRef.current = null
           }
         }
-        // 成功时由 monitor.started 事件处理通知转换
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         setStarting(false)
         setError(msg)
         if (notifIdRef.current) {
           updateNotification(notifIdRef.current, {
-            type: 'error',
-            title: 'Monitor 启动失败',
-            message: msg,
-            autoClose: true,
-            autoCloseDelay: 5000,
+            type: 'error', title: 'Monitor 启动失败',
+            message: msg, autoClose: true, autoCloseDelay: 5000,
           })
           notifIdRef.current = null
         }
       }
     }
-  }, [uid, running, variables.length, rateHz, setRunning, setStarting, setError, pushNotification, updateNotification, setFollow])
+  }, [uid, running, paused, variables.length, rateHz, setPaused, setStarting, setError, setFollow, clearSamples, pushNotification, updateNotification])
+
+  const handleStop = useCallback(async () => {
+    if (!uid) return
+    try {
+      await monitorService.stop(uid)
+      setRunning(false)
+      setPaused(false)
+      setFollow(false)
+      pushNotification({
+        type: 'info', title: 'Monitor 采样已停止',
+        message: '', autoClose: true, autoCloseDelay: 2000,
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg)
+      pushNotification({
+        type: 'error', title: '停止采样失败',
+        message: msg, autoClose: false,
+      })
+    }
+  }, [uid, setRunning, setPaused, setFollow, setError, pushNotification])
+
+  // ── 目标设备控制：Run/Halt/Reset ──
+  // 直接操作 CPU 内核，不影响采样线程（采样继续绘图）
+  const handleToggleDevice = useCallback(async () => {
+    if (!uid) return
+    try {
+      if (coreState === 'running') {
+        await monitorService.deviceHalt(uid)
+        setCoreState('halted')
+      } else {
+        await monitorService.deviceRun(uid)
+        setCoreState('running')
+      }
+    } catch (e) {
+      pushNotification({
+        type: 'error', title: '设备控制失败',
+        message: e instanceof Error ? e.message : String(e),
+        autoClose: true, autoCloseDelay: 3000,
+      })
+    }
+  }, [uid, coreState, setCoreState, pushNotification])
+
+  const handleReset = useCallback(async () => {
+    if (!uid) return
+    try {
+      const result = await monitorService.deviceReset(uid, true)
+      setCoreState(result.state === 'halted' ? 'halted' : 'running')
+      pushNotification({
+        type: 'info', title: '目标已复位',
+        message: '', autoClose: true, autoCloseDelay: 2000,
+      })
+    } catch (e) {
+      pushNotification({
+        type: 'error', title: '复位失败',
+        message: e instanceof Error ? e.message : String(e),
+        autoClose: true, autoCloseDelay: 3000,
+      })
+    }
+  }, [uid, setCoreState, pushNotification])
 
   // ── 侧边栏拖拽 ──
   const handleSidebarResize = useCallback((delta: number) => {
@@ -296,6 +364,7 @@ export default function MonitorPage() {
                 </p>
                 <p className="text-xs text-muted-foreground/70">
                   {rateHz >= 1000 ? `${(rateHz / 1000).toFixed(0)} kHz` : `${rateHz} Hz`} · SWD 轮询模式
+                  {coreState === 'halted' && ' · 内核已暂停'}
                 </p>
               </div>
             ) : (
@@ -305,7 +374,9 @@ export default function MonitorPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     {samples.length} 个采样点
                     {!running && samples.length > 0 && ' · 已停止'}
+                    {running && paused && ' · 采样暂停'}
                     {running && follow && ' · Follow'}
+                    {coreState === 'halted' && ' · 内核暂停'}
                     {cursorMeasure && ' · 游标测量中'}
                   </span>
                   <div className="flex items-center gap-3">
@@ -336,6 +407,7 @@ export default function MonitorPage() {
                     fps={fps}
                     className="h-full w-full"
                     onCursorSelect={setCursorMeasure}
+                    onTimebaseChange={setTimebase}
                   />
                 </div>
                 {/* 游标测量结果 */}
@@ -401,7 +473,11 @@ export default function MonitorPage() {
           <ChannelPanel
             uid={uid}
             isConnected={isConnected}
-            onToggleSampling={handleToggleSampling}
+            onStartPause={handleStartPause}
+            onStop={handleStop}
+            onToggleDevice={handleToggleDevice}
+            onReset={handleReset}
+            coreState={coreState}
           />
         </div>
       </div>

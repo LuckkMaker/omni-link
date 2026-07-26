@@ -160,8 +160,7 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
 
       // 欢迎信息（仅在未运行时显示；已运行时跳过，避免残留）
       if (!runningRef.current) {
-        term.write(`${COLOR.bold}${COLOR.cyan}RTT Viewer${COLOR.reset}\r\n`)
-        term.write(`${COLOR.dim}等待启动 RTT 会话...${COLOR.reset}\r\n`)
+        term.write(`${COLOR.dim}等待 RTT 会话启动...${COLOR.reset}\r\n`)
       }
 
       // 复制支持 + Ctrl+A 全选

@@ -13,6 +13,30 @@ const TRIGGER_MODES: { value: 'none' | 'rising' | 'falling' | 'level'; label: st
   { value: 'level', label: '电平' },
 ]
 
+/** Y 轴分辨率选项（1-2-5 序列，上限为 uint32_t 最大值 4294967295） */
+const Y_RESOLUTION_OPTIONS: { value: number; label: string }[] = (() => {
+  const opts: { value: number; label: string }[] = []
+  const UINT32_MAX = 4294967295
+  const mantissas = [1, 2, 5]
+  for (let exp = 0; ; exp++) {
+    const base = Math.pow(10, exp)
+    let done = false
+    for (const m of mantissas) {
+      const v = m * base
+      if (v > UINT32_MAX) { done = true; break }
+      // 格式化标签：k/M/G 后缀
+      let label: string
+      if (v >= 1e9) label = `${v / 1e9}G`
+      else if (v >= 1e6) label = `${v / 1e6}M`
+      else if (v >= 1e3) label = `${v / 1e3}k`
+      else label = `${v}`
+      opts.push({ value: v, label: `${label}/div` })
+    }
+    if (done) break
+  }
+  return opts
+})()
+
 interface Props {
   uid: string | null
   /** 收起 Watch 面板（高度置 0，露出全部波形图） */
@@ -314,16 +338,19 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                       title="启用滑动平均滤波"
                     />
                   </td>
-                  {/* Y Resolution */}
+                  {/* Y Resolution（1-2-5 序列选择，0=自动）*/}
                   <td className="border border-border px-1 py-1">
-                    <input
-                      type="number"
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                    <select
+                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded cursor-pointer"
                       value={ch?.yResolution ?? 0}
                       onChange={(e) => setChannel(v.id, { yResolution: Number(e.target.value) })}
-                      step="any"
                       title="Y 轴分辨率（每格代表的数值，0=自动）"
-                    />
+                    >
+                      <option value={0}>自动</option>
+                      {Y_RESOLUTION_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
                   </td>
                   {/* 展开二级配置区 */}
                   <td className="border border-border px-1 py-1 text-center">

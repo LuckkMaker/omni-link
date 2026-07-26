@@ -314,6 +314,75 @@ class MonitorBackend:
         paused = self._paused.get(uid)
         return paused is not None and not paused.is_set()
 
+    # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
+    # 直接操作 session.target，不暂停采样线程。
+    # Run/Halt/Reset 是毫秒级操作，采样线程的 SWD 读取有错误恢复机制，
+    # 短暂冲突由采样线程的 consecutive_errors 退避处理。
+
+    def run_target(self, uid: str) -> dict:
+        """运行目标内核（resume）"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.resume()
+            event_manager.log("info", f"Monitor: 目标内核已运行 (run)")
+            return {"success": True, "state": "running"}
+        except Exception as e:
+            event_manager.log("warning", f"Monitor: run 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def halt_target(self, uid: str) -> dict:
+        """暂停目标内核（halt）"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.halt()
+            event_manager.log("info", f"Monitor: 目标内核已暂停 (halt)")
+            return {"success": True, "state": "halted"}
+        except Exception as e:
+            event_manager.log("warning", f"Monitor: halt 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def reset_target(self, uid: str, run: bool = True) -> dict:
+        """复位目标芯片
+
+        Args:
+            run: True=复位后运行，False=复位后保持 halt
+        """
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.reset(reset_type=None)
+            if run:
+                session.target.resume()
+            event_manager.log("info",
+                              f"Monitor: 目标已复位 (reset, run={run})")
+            state = "running" if run else "halted"
+            return {"success": True, "state": state}
+        except Exception as e:
+            event_manager.log("warning", f"Monitor: reset 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_core_state(self, uid: str) -> dict:
+        """查询目标内核状态"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接", "state": "unknown"}
+        try:
+            from pyocd.core.target import Target
+            state = session.target.get_state()
+            if state == Target.State.RUNNING:
+                return {"success": True, "state": "running"}
+            elif state == Target.State.HALTED:
+                return {"success": True, "state": "halted"}
+            else:
+                return {"success": True, "state": str(state).lower()}
+        except Exception as e:
+            return {"success": False, "error": str(e), "state": "unknown"}
+
     # ── 采样循环 ──────────────────────────────────────────────
 
     def _sample_loop(self, uid: str):

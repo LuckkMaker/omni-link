@@ -204,6 +204,46 @@
 <DropdownMenu>...</DropdownMenu>
 ```
 
+### 6.4 右侧边栏 Section 规范
+
+**强制规则**：所有页面的右侧边栏（Commander、RTT Viewer、Monitor）必须使用统一的 Section 标题与分割线风格，以 Commander 页 `CommandSidebar` 为基准。
+
+#### Section 结构
+
+每个 Section 是一个带底边的块级容器，最后一个 Section 不带底边：
+
+```tsx
+<div className="border-b border-border last:border-b-0">
+  {/* Section 标题栏 */}
+  <div className="px-2 py-1.5">
+    <span className="text-xs font-medium text-muted-foreground">Section 标题</span>
+  </div>
+  {/* Section 内容 */}
+  <div className="space-y-1 p-2 pt-0">
+    {/* 控件、配置项... */}
+  </div>
+</div>
+```
+
+#### 标题样式
+
+| 层级 | 类 | 用途 |
+|------|----|------|
+| Section 标题 | `text-xs font-medium text-muted-foreground` | 主分区标题（如"采样控制"、"接收配置"） |
+| 子分组标题 | `text-[11px] font-medium tracking-wide text-muted-foreground/70` | Section 内的子分组（如"调试"） |
+
+#### 分割线规则
+
+- **Section 之间**：使用 `border-b border-border last:border-b-0`，**禁止使用 `<Separator />` 组件**
+- **Section 内弱分隔**：`border-b border-border/50 last:border-b-0`（列表项之间）
+- **可折叠 Section 标题**：`border-b border-border` + `hover:bg-muted/40 transition-colors`
+
+#### 禁止事项
+
+- 禁止在右侧边栏中使用 `<Separator />` 组件做 Section 分隔（仅工具栏内可用垂直 Separator）
+- 禁止使用 `<Label>` 组件做 Section 标题（Label 用于表单字段标签，不用于分区标题）
+- 禁止不同页面使用不同的 Section 标题字号/字重/颜色
+
 ---
 
 ## 7. 组件规范
@@ -439,3 +479,4 @@ formatSize(1024)  // "1.0 KB"
 - [ ] Button 图标+文字组合显式写 `gap-1.5`
 - [ ] hover 态加 `transition-colors`
 - [ ] 空状态用 `text-muted-foreground` + `opacity-40` 图标
+- [ ] 右侧边栏 Section 使用 `border-b border-border` 分隔，禁止 `<Separator />` 和 `<Label>` 做标题（见 6.4）

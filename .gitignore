@@ -3,21 +3,41 @@ node_modules/
 out/
 dist/
 
+# ── TypeScript ───────────────────────────
+*.tsbuildinfo
+.tsbuildinfo
+
 # ── Python ───────────────────────────────
 .venv/
+venv/
+env/
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.eggs/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 htmlcov/
 .coverage
+.coverage.*
+coverage.xml
 
 # ── 构建产物 ─────────────────────────────
 release/
 python/build/
 python/dist/
+build/
+
+# ── Electron 打包产物 ────────────────────
+*.app
+*.dmg
+*.exe
+*.AppImage
+*.snap
+*.deb
+*.rpm
 
 # ── PyInstaller 临时文件 ─────────────────
 *.spec.bak
@@ -34,14 +54,24 @@ python/data/packs/installed_packs.json
 
 # ── 环境配置 ─────────────────────────────
 .env
+.env.*
+!.env.example
 
 # ── 日志 ─────────────────────────────────
 *.log
+logs/
 
 # ── 临时/备份文件 ────────────────────────
 *.tmp
 *.bak
 *~
+*.orig
+
+# ── 缓存 ─────────────────────────────────
+.cache/
+.eslintcache
+.parcel-cache/
+.vite/
 
 # ── electron-vite 临时构建配置 ───────────
 electron.vite.config.*.mjs
@@ -52,10 +82,27 @@ electron.vite.config.*.mjs
 *.swp
 *.swo
 *.iml
+*.code-workspace
 
 # ── macOS ────────────────────────────────
 .DS_Store
+.AppleDouble
+.LSOverride
 
 # ── Windows ──────────────────────────────
 Thumbs.db
+Thumbs.db:encryptable
 Desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+
+# ── Linux ────────────────────────────────
+*~
+.fuse_hidden000
+.directory
+.Trash-*
+.nfs*
+
+# ── 调试 / Profile ───────────────────────
+*.prof
+*.profraw
