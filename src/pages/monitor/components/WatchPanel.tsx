@@ -237,8 +237,8 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
               <th className="border border-border px-1 py-1 text-center font-medium w-24">Address</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-8">Size</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-12">Type</th>
-              <th className="border border-border px-1 py-1 text-center font-medium w-24 text-primary" title="游标位置采样值（鼠标悬停波形图）">
-                Value ◆
+              <th className="border border-border px-1 py-1 text-center font-medium w-24" title="游标位置采样值（鼠标悬停波形图）">
+                Value
               </th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Min</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Max</th>
@@ -260,10 +260,10 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
               // Value 列只显示游标位置的采样值（JScope 风格），不显示实时值
               const val = cursorValues?.get(v.id) ?? null
               const hasCursor = cursorValues !== null
-              // MA 值：在游标位置计算 SMA（窗口大小 > 0 时）
+              // MA 值：显示最新采样点处的 SMA（基于全部采样数据，非游标位置）
               const maWindow = ch?.movingAverage ?? 0
-              const maVal = hasCursor && maWindow > 0 && cursorIdx >= 0
-                ? computeSMA(samples, v.id, cursorIdx, maWindow)
+              const maVal = maWindow > 0 && samples.length > 0
+                ? computeSMA(samples, v.id, samples.length - 1, maWindow)
                 : null
               // 数组分组查找：首元素显示展开按钮，非首元素缩进显示
               const arrGroup = arrayGroups.find((g) => g.firstElemId === v.id)
@@ -368,7 +368,7 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
                   <td
                     className="border border-border px-1 py-1 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
                     title={maWindow > 0
-                      ? `SMA(${maWindow}) 游标位置滑动平均值（窗口配置在"更多"菜单）`
+                      ? `SMA(${maWindow}) 最新滑动平均值（窗口配置在"更多"菜单）`
                       : '滑动平均未开启（在"更多"菜单中配置窗口大小）'}
                   >
                     {maWindow > 0

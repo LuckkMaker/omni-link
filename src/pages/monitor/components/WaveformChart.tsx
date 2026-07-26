@@ -240,17 +240,27 @@ export function WaveformChart({
     const { data, series } = buildPlotData()
     if (data[0].length === 0) return
 
-    // 保存当前 X 轴范围 —— plot.setData() 会导致 uPlot 自动缩放 X 轴，
-    // 非 Follow 模式下需恢复用户手动设定的视图，否则每次渲染都会重置缩放
+    // 保存当前 X/Y 轴范围 —— plot.setData() 会触发 uPlot 自动缩放两轴，
+    // 需在之后恢复，否则每次渲染都会重置用户的视图（已渲染波形会因 Y 轴跳变而"变化"）
     const savedXMin = plot.scales.x?.min
     const savedXMax = plot.scales.x?.max
+    const savedYMin = plot.scales.y?.min
+    const savedYMax = plot.scales.y?.max
     const hasSavedX = savedXMin !== undefined && savedXMax !== undefined
+    const hasSavedY = savedYMin !== undefined && savedYMax !== undefined
 
     plot.setData(data)
 
+    // 立即恢复 Y 轴范围（setData 会自动缩放 Y 轴到新数据范围）
+    // 防止已渲染波形因 Y 轴跳变而视觉上"变化"
+    if (hasSavedY) {
+      plot.setScale('y', { min: savedYMin!, max: savedYMax! })
+    }
+
     // Y 轴自适应辅助：根据可见 X 范围计算并设置 Y 量程
     // 优先使用用户设定的固定量程（min/max），否则自适应数据范围
-    const autoFitY = (xMin: number, xMax: number) => {
+    // ratchet=true 时只扩不缩（Follow 模式），防止已渲染波形因 Y 轴变化而跳动
+    const autoFitY = (xMin: number, xMax: number, ratchet: boolean = false) => {
       const hasFixedRange = series.some((s) => s.channel.min !== null || s.channel.max !== null)
       if (hasFixedRange) {
         // 固定量程模式：取各通道 min/max 的并集
@@ -305,16 +315,27 @@ export function WaveformChart({
           const paddedMin = yMin - range * Y_PADDING
           const paddedMax = yMax + range * Y_PADDING
 
-          // Hysteresis：新范围在旧范围内且变化不大时不更新，避免频繁跳动
           const prev = yRangeRef.current
           if (prev) {
-            const prevRange = prev.max - prev.min
-            if (paddedMin >= prev.min + prevRange * Y_HYSTERESIS &&
-                paddedMax <= prev.max - prevRange * Y_HYSTERESIS) {
-              // 数据在旧范围内，不更新
+            if (ratchet) {
+              // 只扩不缩：新范围超出旧范围时才扩展，绝不收缩
+              // 防止 Follow 模式下已渲染波形因 Y 轴缩放而跳动
+              const newMin = Math.min(prev.min, paddedMin)
+              const newMax = Math.max(prev.max, paddedMax)
+              if (newMin < prev.min || newMax > prev.max) {
+                yRangeRef.current = { min: newMin, max: newMax }
+                plot.setScale('y', { min: newMin, max: newMax })
+              }
             } else {
-              yRangeRef.current = { min: paddedMin, max: paddedMax }
-              plot.setScale('y', { min: paddedMin, max: paddedMax })
+              // 普通模式：数据在旧范围内时不更新（hysteresis）
+              const prevRange = prev.max - prev.min
+              if (paddedMin >= prev.min + prevRange * Y_HYSTERESIS &&
+                  paddedMax <= prev.max - prevRange * Y_HYSTERESIS) {
+                // 数据在旧范围内，不更新
+              } else {
+                yRangeRef.current = { min: paddedMin, max: paddedMax }
+                plot.setScale('y', { min: paddedMin, max: paddedMax })
+              }
             }
           } else {
             yRangeRef.current = { min: paddedMin, max: paddedMax }
@@ -354,13 +375,14 @@ export function WaveformChart({
       // 相对时间从 0 起算，xMin 钳位到 0，避免显示负时间
       const xMin = Math.max(0, xMax - win)
       plot.setScale('x', { min: xMin, max: xMax })
-      autoFitY(xMin, xMax)
+      // ratchet=true：Y 轴只扩不缩，防止已渲染波形因 Y 轴收缩而跳动
+      autoFitY(xMin, xMax, true)
     } else {
-      // 非 Follow 模式：冻结 X 轴在用户手动设定的位置，不随新数据自动滚动
-      // setData 会自动缩放 X 轴，此处必须恢复保存的 X 范围
+      // 非 Follow 模式：冻结 X 和 Y 轴，不随新数据自动调整
+      // setData 会自动缩放两轴，此处必须恢复保存的范围
+      // Y 轴已在 setData 后恢复，此处只需恢复 X 轴；不再调用 autoFitY —— 完全冻结
       if (hasSavedX) {
         plot.setScale('x', { min: savedXMin!, max: savedXMax! })
-        autoFitY(savedXMin!, savedXMax!)
       } else if (data[0].length > 1) {
         // 首次渲染（无已设 X scale）：自动 fit 全部数据
         yRangeRef.current = null
@@ -465,11 +487,9 @@ export function WaveformChart({
           label: s.variable.name,
           stroke: s.channel.color,
           width: 1.5,
-          // 阶梯路径（zero-order hold）：采样保持式渲染。
-          // 采样率高于信号变化率时，重复值显示为水平阶梯而非斜线，
-          // 忠实反映 SWD 轮询的真实采样行为，不丢弃任何采样点。
-          // align: 1（右对齐）= 值在采样时刻立即变化，符合"读到新值后保持到下次读取"的语义。
-          paths: uPlot.paths.stepped!({ align: 1 }),
+          // 线性插值渲染（默认）：相邻采样点用直线连接。
+          // 对标 JScope 的点对点渲染方式，波形平整有规律。
+          // stepped 路径会在采样间隔微小波动时产生不等宽阶梯，视觉上不规律。
           points: { show: false },
         })),
       ],

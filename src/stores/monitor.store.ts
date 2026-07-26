@@ -140,7 +140,7 @@ function makeChannel(varId: string, index: number): ChannelConfig {
     format: 'dec',
     min: null,
     max: null,
-    movingAverage: 0,
+    movingAverage: 8,
     yResolution: 0,
     triggerMode: 'none',
     triggerLevel: 0,
