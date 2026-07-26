@@ -34,6 +34,7 @@ export default function MonitorPage() {
   const samples = useMonitorStore((s) => s.samples)
   const channels = useMonitorStore((s) => s.channels)
   const follow = useMonitorStore((s) => s.follow)
+  const setFollow = useMonitorStore((s) => s.setFollow)
   const timebase = useMonitorStore((s) => s.timebase)
   const fps = useMonitorStore((s) => s.fps)
 
@@ -143,6 +144,9 @@ export default function MonitorPage() {
       try {
         await monitorService.stop(uid)
         setRunning(false)
+        // 停止采样后自动关闭 Follow，切换到全览模式（Fit 全部数据）
+        // 对标示波器 Stop 行为：冻结并显示完整捕获波形
+        setFollow(false)
         pushNotification({
           type: 'info',
           title: 'Monitor 采样已停止',
@@ -173,6 +177,10 @@ export default function MonitorPage() {
       }
       setStarting(true)
       setError(null)
+      // 启动采样时自动开启 Follow，实时跟踪最新数据
+      setFollow(true)
+      // 清空旧数据，从 0 点开始新一轮采集
+      clearSamples()
       notifIdRef.current = pushNotification({
         type: 'progress',
         title: 'Monitor 采样启动中',
@@ -210,7 +218,7 @@ export default function MonitorPage() {
         }
       }
     }
-  }, [uid, running, variables.length, rateHz, setRunning, setStarting, setError, pushNotification, updateNotification])
+  }, [uid, running, variables.length, rateHz, setRunning, setStarting, setError, pushNotification, updateNotification, setFollow])
 
   // ── 侧边栏拖拽 ──
   const handleSidebarResize = useCallback((delta: number) => {

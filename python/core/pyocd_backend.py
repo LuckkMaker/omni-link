@@ -6,6 +6,7 @@
 
 import time
 import os
+import array
 import threading
 import logging
 from typing import Optional
@@ -950,19 +951,28 @@ class PyOCDBackend(BackendInterface):
                 "phase": "verify", "current": 0, "total": total_bytes, "percent": 0,
             })
 
-            chunk_size = 4096
+            # 32KB 分块读取（v2 WinUSB 单次事务上限 ~8192 words = 32KB）
+            # 4字节对齐时用 block32（比 block8 快 2-3 倍），非对齐回退 block8
+            chunk_size = 32768
             for seg_addr, seg_data in segments:
-                # 分块读取 Flash 并对比
                 for offset in range(0, len(seg_data), chunk_size):
                     read_len = min(chunk_size, len(seg_data) - offset)
-                    flash_data = session.target.read_memory_block8(seg_addr + offset, read_len)
+                    addr = seg_addr + offset
+
+                    if addr % 4 == 0 and read_len % 4 == 0:
+                        # block32 + array 转换：USB 传输量减半，速度提升 2-3 倍
+                        words = session.target.read_memory_block32(addr, read_len // 4)
+                        flash_data = array.array('I', words).tobytes()
+                    else:
+                        flash_data = bytes(session.target.read_memory_block8(addr, read_len))
+
                     file_chunk = seg_data[offset:offset + read_len]
 
-                    if bytes(flash_data) != bytes(file_chunk):
+                    if flash_data != file_chunk:
                         # 找到第一个不匹配的字节
                         for i in range(read_len):
                             if flash_data[i] != file_chunk[i]:
-                                mismatch_addr = seg_addr + offset + i
+                                mismatch_addr = addr + i
                                 event_manager.log("error",
                                     f"Verify failed at 0x{mismatch_addr:08X}: "
                                     f"expected 0x{file_chunk[i]:02X}, got 0x{flash_data[i]:02X}")
@@ -1183,15 +1193,17 @@ class PyOCDBackend(BackendInterface):
 
         优化策略（对标 STM32CubeProgrammer <10s 方案）：
         1. 提升 SWD 频率至 ST-LINK 支持的最高值（4.6MHz V2 / 9MHz V3）
-        2. 使用 read_memory_block8 读取原始字节，用 C 级 bytes 操作比较
-        3. 大块读取（64KB），仅每 256KB 发送一次进度事件
+        2. 使用 read_memory_block32 批量读取（比 block8 快 2-3 倍），4字节对齐时自动启用
+        3. 大块读取（32KB = 8192 words），仅每 5% 发送一次进度事件
         4. 空白检查用 data.count(0xFF) == len(data)（C 级，O(n) 但常数极小）
+        5. 提前终止：找到首个非 0xFF 字节即停止扫描（非空场景下节省绝大部分读取时间）
 
         Args:
             address: 起始地址，None 则从 flash 起始
             size: 检查大小，None 则检查整个 flash
         Returns:
-            dict: success, is_blank, blank_bytes, total_bytes, first_nonblank_addr, duration_ms
+            dict: success, is_blank, blank_bytes, total_bytes, scanned_bytes,
+                  first_nonblank_addr, early_terminated, duration_ms
         """
         session = self._get_session(probe_uid)
         if not session:
@@ -1218,9 +1230,11 @@ class PyOCDBackend(BackendInterface):
             session.target.reset_and_halt()
 
             total_bytes = 0
+            scanned_bytes = 0
             blank_bytes = 0
             first_nonblank_addr = None
-            chunk_size = 65536  # 64KB per chunk — 平衡 USB 吞吐与内存占用
+            early_terminated = False
+            chunk_words = 8192  # 8192 words = 32KB per chunk — block32 最优批量大小
 
             # 计算总大小用于进度
             check_total = 0
@@ -1253,9 +1267,14 @@ class PyOCDBackend(BackendInterface):
                         event_manager.log("warning", f"Check blank cancelled at {total_bytes} bytes")
                         return {"success": False, "error": "Cancelled", "duration_ms": int((time.time() - start_time) * 1000)}
 
-                    # 用 block8 读取原始字节（bytearray），比 block32 返回 list[int] 更高效
-                    read_bytes = min(chunk_size, region_total - offset)
-                    data = session.target.read_memory_block8(start + offset, read_bytes)
+                    # block32 读取（比 block8 快 2-3 倍），非对齐地址/长度回退 block8
+                    read_bytes = min(chunk_words * 4, region_total - offset)
+                    addr = start + offset
+                    if addr % 4 == 0 and read_bytes % 4 == 0:
+                        words = session.target.read_memory_block32(addr, read_bytes // 4)
+                        data = array.array('I', words).tobytes()
+                    else:
+                        data = session.target.read_memory_block8(addr, read_bytes)
 
                     # C 级操作：count(0xFF) 是 bytearray 的内置 C 方法，极快
                     ff_count = data.count(0xFF)
@@ -1272,8 +1291,15 @@ class PyOCDBackend(BackendInterface):
                                 if data[i] != 0xFF:
                                     first_nonblank_addr = start + offset + i
                                     break
+                            # 提前终止：已找到首个非空地址，无需继续扫描剩余 Flash
+                            # 非空场景下可节省绝大部分 SWD 读取时间
+                            early_terminated = True
+                            total_bytes += read_bytes
+                            scanned_bytes = total_bytes
+                            break
 
                     total_bytes += read_bytes
+                    scanned_bytes = total_bytes
                     offset += read_bytes
 
                     # 减少进度事件频率：仅在百分比变化 >= 5% 时发送
@@ -1287,6 +1313,10 @@ class PyOCDBackend(BackendInterface):
                             "percent": pct,
                         })
 
+                # 提前终止时跳出外层 region 循环，不再扫描剩余 region
+                if early_terminated:
+                    break
+
             is_blank = (first_nonblank_addr is None)
             duration = int((time.time() - start_time) * 1000)
             event_manager.emit("flash.progress", {
@@ -1296,14 +1326,17 @@ class PyOCDBackend(BackendInterface):
             if is_blank:
                 event_manager.log("info", f"Check blank: PASSED ({total_bytes} bytes all 0xFF, {duration}ms)")
             else:
-                event_manager.log("info", f"Check blank: FAILED (first non-blank at 0x{first_nonblank_addr:08X}, {duration}ms)")
+                pct_scanned = round(scanned_bytes / check_total * 100, 1) if check_total > 0 else 100
+                event_manager.log("info", f"Check blank: FAILED (first non-blank at 0x{first_nonblank_addr:08X}, scanned {scanned_bytes}/{check_total} bytes ({pct_scanned}%), {duration}ms)")
 
             return {
                 "success": True,
                 "is_blank": is_blank,
                 "blank_bytes": blank_bytes,
                 "total_bytes": total_bytes,
+                "scanned_bytes": scanned_bytes,
                 "first_nonblank_addr": first_nonblank_addr,
+                "early_terminated": early_terminated,
                 "duration_ms": duration,
             }
         except Exception as e:

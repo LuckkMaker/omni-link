@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="LuckkMaker" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>Monitor - OMNI Work</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="../../css/extra.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Monitor";
+        var mkdocs_page_input_path = "guide\\monitor.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/yaml.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/c.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/cpp.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../..">
+          <img src="../../assets/images/logo.png" class="logo" alt="Logo"/>
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">首页</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../getting-started/">快速开始</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">用户指南</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../flash/">Flash</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../commander/">Commander</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../rtt-viewer/">RTT_Viewer</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Monitor</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">界面布局</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#elf">加载 ELF 文件</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">选择变量</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#swd-hss">SWD 模式（HSS）</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#rtt">RTT 模式</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">触发设置</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">游标测量</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#csv">CSV 导出</a>
+    </li>
+    </ul>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../contributing/">贡献指南</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">OMNI Work</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">用户指南</li>
+      <li class="breadcrumb-item active">Monitor</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LuckkMaker/omni-work/edit/master/docs/guide/monitor.md">Edit on omni-work</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="monitor">Monitor<a class="headerlink" href="#monitor" title="Permanent link">&para;</a></h1>
+<p>Monitor 页面提供变量实时监控与波形采样，对标 SEGGER J-Scope。</p>
+<p><img alt="Monitor 变量监控" src="../../assets/images/monitor_page.png" /></p>
+<h2 id="_1">界面布局<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<p>中央波形图基于 uPlot 渲染，纵轴为变量值、横轴为时间，网格线辅助读数，顶部标注当前采样点数。右侧面板分为可视化控制区（暂停/开始、缩放范围、刷新频率、Y 轴、过滤设置）与变量树。变量树按源文件分组，勾选复选框即可将变量加入监视。底部 Watch 表格实时显示变量名称、颜色标识、地址、类型、当前值、最小/最大值、移动均值等列。</p>
+<h2 id="elf">加载 ELF 文件<a class="headerlink" href="#elf" title="Permanent link">&para;</a></h2>
+<p>Monitor 通过 DWARF 调试信息自动从 ELF 文件提取变量地址。进入 Monitor 页面后，点击右侧变量树顶部的加载按钮选择 ELF 文件。加载成功后，变量树按源文件分组展示所有全局变量与静态变量。</p>
+<p>仅支持包含 DWARF 调试信息的 ELF 文件（编译时需加 <code>-g</code> 选项）。 stripped 二进制文件无法解析变量地址。</p>
+<h2 id="_2">选择变量<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<p>变量树按源文件分组（如 <code>main.c</code>、<code>system_stm32f4xx.c</code>、<code>app.c</code>），展开文件节点后勾选变量复选框，变量即加入波形图与底部 Watch 表格。每个变量自动分配一种颜色，波形图与表格中的颜色一致。</p>
+<p>取消勾选则从波形图移除该变量曲线。</p>
+<h2 id="swd-hss">SWD 模式（HSS）<a class="headerlink" href="#swd-hss" title="Permanent link">&para;</a></h2>
+<p>SWD 模式使用 HSS（High-Speed Sampling）异步采样，通过 SWD 周期性读取内存，非侵入目标程序运行。适合长期监控、不希望影响目标时序的场景。</p>
+<p>右侧可视化控制区设置采样频率（如 10 Hz、100 Hz、1 kHz）。实际采样率受 SWD 带宽限制，高频采样时实际速率可能低于标称值。</p>
+<h2 id="rtt">RTT 模式<a class="headerlink" href="#rtt" title="Permanent link">&para;</a></h2>
+<p>RTT 模式为侵入式高速采样，目标程序主动推送数据到 RTT 通道，适合高频采样场景。使用 RTT 模式需要在目标程序中集成数据推送代码，将待监控变量的值按约定格式写入 RTT 通道。</p>
+<p>RTT 模式采样率远高于 SWD 模式，但会占用目标 CPU 时间与 RTT 带宽。</p>
+<h2 id="_3">触发设置<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<p>触发功能在满足条件时自动暂停波形滚动，便于捕捉特定事件：</p>
+<ul>
+<li><strong>上升沿</strong> — 变量值从低于阈值上升到高于阈值时触发</li>
+<li><strong>下降沿</strong> — 变量值从高于阈值下降到低于阈值时触发</li>
+<li><strong>阈值</strong> — 变量值跨越指定阈值时触发</li>
+</ul>
+<p>在右侧触发设置区选择触发变量、触发类型与阈值。触发后波形冻结，可使用游标测量细节。</p>
+<h2 id="_4">游标测量<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<p>在波形图上点击或拖拽可放置游标。游标之间的时间差与变量值差自动显示在游标标签中。多游标模式下可测量任意两点间的变化量。</p>
+<h2 id="csv">CSV 导出<a class="headerlink" href="#csv" title="Permanent link">&para;</a></h2>
+<p>点击波形图工具栏的导出按钮，将当前采样数据导出为 CSV 文件。每列为一个变量，每行为一个采样点，首行为变量名。CSV 可用 Excel、Python pandas 等工具二次分析。</p>
+<blockquote>
+<p>Monitor 采样与 Flash 操作互斥。执行 Flash 烧录或擦除时，Monitor 自动暂停采样；Flash 操作完成后自动恢复。</p>
+</blockquote>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../rtt-viewer/" class="btn btn-neutral float-left" title="RTT_Viewer"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../../contributing/" class="btn btn-neutral float-right" title="贡献指南">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LuckkMaker/omni-work" class="fa fa-code-fork" style="color: #fcfcfc"> omni-work</a>
+        </span>
+    
+    
+      <span><a href="../rtt-viewer/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../../contributing/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

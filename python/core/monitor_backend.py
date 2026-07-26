@@ -13,6 +13,7 @@
 
 import time
 import struct
+import array
 import threading
 import logging
 from typing import Optional
@@ -36,7 +37,8 @@ TYPE_MAP = {
 }
 
 # 批量读合并阈值：相邻变量地址间隔 <= 此值时合并为一次 USB 事务（字节）
-MERGE_GAP = 4
+# 16 字节：合并更多变量组为单次读取，减少 USB 往返（高频采样下每往返 ~1-2ms）
+MERGE_GAP = 16
 # 高频推送批量阈值：当待推送样本数达到此值时打包一次 WS 推送
 PUSH_BATCH = 8
 # 错误退避上限
@@ -140,6 +142,10 @@ class MonitorBackend:
         self._transport: dict[str, str] = {}
         # uid -> RTT 模式下的 RTTControlBlock（直接持有，避免与 rtt_backend 的 poll loop 争抢）
         self._rtt_cbs: dict[str, object] = {}
+        # uid -> 缓存的变量分组（排序+合并后的结构，避免每帧重复排序）
+        self._vars_cache: dict[str, tuple] = {}
+        # uid -> 变量列表版本号（add/remove 时递增，用于缓存失效）
+        self._vars_version: dict[str, int] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
 
@@ -364,9 +370,13 @@ class MonitorBackend:
                         self._sample_counter_time[uid] = now
 
                     # 写入 RingBuffer
+                    # 注意：RingBuffer 定义了 __len__，空缓冲区时 bool(rb) 为 False，
+                    # 故用 is not None 判定，避免首条样本因缓冲区为空被丢弃。
+                    # values 是 list[{"id":..., "value":...}]，需转为 {id: value} 映射，
+                    # 不能用 dict(values)（会把 list-of-dict 错误转为 {'id':'value'}）。
                     rb = self._ring_buffers.get(uid)
-                    if rb:
-                        rb.push(t_ms, dict(values))
+                    if rb is not None:
+                        rb.push(t_ms, {item["id"]: item["value"] for item in values})
 
                     # 批量推送，降低 WS 消息数
                     if len(pending_samples) >= PUSH_BATCH:
@@ -397,8 +407,11 @@ class MonitorBackend:
     def _read_variables(self, uid: str) -> list:
         """批量读取所有变量
 
-        按地址排序后合并邻近变量为批量 read_memory_block8，减少 SWD 事务。
-        关键：直接用 session.target.read_memory_block8，绝不 halt。
+        按地址排序后合并邻近变量为批量读取，减少 SWD 事务。
+        优化：
+        - 缓存排序+分组结果，变量列表未变更时复用（避免每帧重复排序）
+        - 4字节对齐时用 read_memory_block32（比 block8 快 2-3 倍）
+        关键：直接用 session.target.read_memory_block8/block32，绝不 halt。
         """
         variables = self._variables.get(uid, [])
         if not variables:
@@ -409,27 +422,31 @@ class MonitorBackend:
             return []
         target = session.target
 
-        # 按地址排序
-        sorted_vars = sorted(variables, key=lambda v: v.address)
+        # 检查缓存：变量列表未变更时复用已排序+分组的结构
+        current_version = self._vars_version.get(uid, 0)
+        cached = self._vars_cache.get(uid)
+        if cached is None or cached[0] != current_version:
+            sorted_vars = sorted(variables, key=lambda v: v.address)
+            groups = self._build_read_groups(sorted_vars)
+            self._vars_cache[uid] = (current_version, groups)
+        else:
+            groups = cached[1]
+
         results: list = []
-        i = 0
-        n = len(sorted_vars)
-
-        while i < n:
-            # 合并邻近变量为一组（gap <= MERGE_GAP 字节）
-            j = i
-            group_end = sorted_vars[i].address + sorted_vars[i].size
-            while j + 1 < n and sorted_vars[j + 1].address - group_end <= MERGE_GAP:
-                j += 1
-                group_end = max(group_end, sorted_vars[j].address + sorted_vars[j].size)
-
-            # 4 字节对齐起止，便于 block32 读取（这里用 block8 兼容非对齐变量）
-            start_addr = sorted_vars[i].address
-            length = group_end - start_addr
+        for group in groups:
+            start_addr = group['start']
+            length = group['length']
+            group_vars = group['vars']
 
             try:
-                raw = bytes(target.read_memory_block8(start_addr, length))
-                for v in sorted_vars[i:j + 1]:
+                # 4字节对齐时用 block32（比 block8 快 2-3 倍），否则回退 block8
+                if start_addr % 4 == 0 and length % 4 == 0:
+                    words = target.read_memory_block32(start_addr, length // 4)
+                    raw = array.array('I', words).tobytes()
+                else:
+                    raw = bytes(target.read_memory_block8(start_addr, length))
+
+                for v in group_vars:
                     offset = v.address - start_addr
                     val_bytes = raw[offset:offset + v.size]
                     if len(val_bytes) < v.size:
@@ -440,9 +457,31 @@ class MonitorBackend:
                 logger.debug(f"Monitor read failed @0x{start_addr:08X}: {e}")
                 raise
 
-            i = j + 1
-
         return results
+
+    @staticmethod
+    def _build_read_groups(sorted_vars: list) -> list:
+        """将已排序的变量合并为读取组，返回 [{start, length, vars}, ...]"""
+        groups = []
+        i = 0
+        n = len(sorted_vars)
+        while i < n:
+            # 合并邻近变量为一组（gap <= MERGE_GAP 字节）
+            j = i
+            group_end = sorted_vars[i].address + sorted_vars[i].size
+            while j + 1 < n and sorted_vars[j + 1].address - group_end <= MERGE_GAP:
+                j += 1
+                group_end = max(group_end, sorted_vars[j].address + sorted_vars[j].size)
+
+            start_addr = sorted_vars[i].address
+            length = group_end - start_addr
+            groups.append({
+                'start': start_addr,
+                'length': length,
+                'vars': sorted_vars[i:j + 1],
+            })
+            i = j + 1
+        return groups
 
     def _decode(self, raw: bytes, var_type: str):
         """按数据类型解码原始字节（小端）"""
@@ -708,6 +747,7 @@ class MonitorBackend:
 
         with self._global_lock:
             self._variables.setdefault(uid, []).append(var)
+            self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
 
         return {"success": True, "variable": self._var_to_dict(var)}
 
@@ -717,6 +757,8 @@ class MonitorBackend:
             before = len(vars_list)
             self._variables[uid] = [v for v in vars_list if v.id != var_id]
             removed = before - len(self._variables[uid])
+            if removed:
+                self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
         return {"success": removed > 0}
 
     def get_variables(self, uid: str) -> list:

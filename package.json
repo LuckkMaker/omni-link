@@ -23,6 +23,7 @@
     "directories": {
       "output": "release"
     },
+    "electronDist": "node_modules/electron/dist",
     "files": [
       "out/**/*",
       "node_modules/**/*",

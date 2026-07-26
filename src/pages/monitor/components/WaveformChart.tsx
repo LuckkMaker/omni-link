@@ -29,10 +29,46 @@ interface Props {
 
 /** 最大渲染点数（超过时做 min/max 降采样保留波形形状） */
 const MAX_RENDER_POINTS = 20000
+/** 滑动平均窗口大小（启用 movingAverage 的通道使用，居中窗口） */
+const MA_WINDOW = 5
 /** Y 轴自适应的边距比例（上下各留 10%） */
 const Y_PADDING = 0.1
 /** Y 轴 hysteresis：新范围与旧范围重叠超过此比例时不更新，避免频繁跳动 */
 const Y_HYSTERESIS = 0.15
+/** 示波器标准格数（水平方向） */
+const GRID_DIVS = 10
+
+/**
+ * 相对时间格式化：根据数值大小自动选择 μs/ms/s 单位。
+ * 用于 X 轴刻度标签，对标示波器/STM32CubeMonitor 的相对时间显示。
+ */
+function formatTimeValue(v: number): string {
+  const abs = Math.abs(v)
+  if (abs === 0) return '0'
+  if (abs < 0.001) return `${(v * 1e6).toFixed(0)}μs`
+  if (abs < 1) return `${(v * 1e3).toFixed(1)}ms`
+  return `${v.toFixed(2)}s`
+}
+
+/**
+ * 根据时间跨度选择合适的刻度间隔（秒），使刻度线数量约为 5-8 个。
+ * 对标示波器 1-2-5 序列时基。
+ */
+function niceTimeStep(span: number): number {
+  if (span <= 0) return 1
+  const targetSteps = 6
+  const raw = span / targetSteps
+  // 1-2-5 序列
+  const exp = Math.floor(Math.log10(raw))
+  const base = Math.pow(10, exp)
+  const mantissa = raw / base
+  let step: number
+  if (mantissa < 1.5) step = 1 * base
+  else if (mantissa < 3.5) step = 2 * base
+  else if (mantissa < 7.5) step = 5 * base
+  else step = 10 * base
+  return step
+}
 
 export function WaveformChart({
   variables, channels, samples, follow,
@@ -55,7 +91,7 @@ export function WaveformChart({
   useEffect(() => { onCursorRef.current = onCursorSelect }, [onCursorSelect])
 
   // 同步 ref（避免重建 uPlot）
-  useEffect(() => { followRef.current = follow }, [follow])
+  useEffect(() => { followRef.current = follow; dirtyRef.current = true; scheduleRender() }, [follow])
   useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables])
   useEffect(() => { chansRef.current = channels; dirtyRef.current = true; scheduleRender() }, [channels])
@@ -78,6 +114,9 @@ export function WaveformChart({
   }, [])
 
   // ── 数据转换：samples -> uPlot data 格式 ──
+  // 流程：原始对齐 → min/max 降采样(超上限时) → 滑动平均(按通道)
+  // 不做去重：重复采样点是真实数据，反映"采样率 > 信号变化率"的采样保持行为。
+  // 阶梯锯齿通过 stepped 路径渲染（zero-order hold）正确呈现，而非丢弃数据点。
   const buildPlotData = useCallback(() => {
     const series = getVisibleSeries()
     const pts = samplesRef.current
@@ -85,65 +124,84 @@ export function WaveformChart({
       return { data: [[] as number[], ...series.map(() => [] as number[])] as uPlot.AlignedData, series }
     }
 
-    // 降采样：点数超过上限时用 min/max 降采样（每桶取最小+最大值，保留波形形状）
-    // 等间隔抽样会丢失峰值导致正弦波失真成锯齿，min/max 能保真
-    const needDownsample = pts.length > MAX_RENDER_POINTS
-    const bucketSize = needDownsample ? Math.ceil(pts.length / MAX_RENDER_POINTS) : 1
+    const nSer = series.length
 
-    const tArr: number[] = []
-    const valArrays: number[][] = series.map(() => [])
-
-    if (!needDownsample) {
-      // 无需降采样：直接取每个点
-      for (let i = 0; i < pts.length; i++) {
-        const pt = pts[i]
-        tArr.push(pt.t_ms / 1000)
-        series.forEach((s, si) => {
-          const v = pt.values.find((x) => x.id === s.variable.id)
-          valArrays[si].push(v?.value ?? null as any)
-        })
+    // 1) 提取原始对齐数据：times[i] + rows[i][si]（保留全部采样点，不去重）
+    const times: number[] = new Array(pts.length)
+    const rows: (number | null)[][] = new Array(pts.length)
+    for (let i = 0; i < pts.length; i++) {
+      const pt = pts[i]
+      times[i] = pt.t_ms / 1000
+      const row: (number | null)[] = new Array(nSer)
+      for (let si = 0; si < nSer; si++) {
+        const v = pt.values.find((x) => x.id === series[si].variable.id)
+        row[si] = v?.value ?? null
       }
+      rows[i] = row
+    }
+
+    // 2) min/max 降采样：点数超过上限时按桶取 min+max（同一时间戳输出两点，
+    //    uPlot 绘制垂直线，保真波形包络，不产生人为折线锯齿）
+    let fTimes: number[] = times
+    let valArrays: (number | null)[][]
+    let downsampled = false
+    if (times.length > MAX_RENDER_POINTS) {
+      const bucketSize = Math.ceil(times.length / MAX_RENDER_POINTS)
+      const ot: number[] = []
+      const ov: (number | null)[][] = series.map(() => [])
+      for (let b = 0; b < times.length; b += bucketSize) {
+        const end = Math.min(b + bucketSize, times.length)
+        const tMid = times[Math.min(end - 1, b + ((end - b) >> 1))]
+        ot.push(tMid, tMid)
+        for (let si = 0; si < nSer; si++) {
+          let min: number | null = null
+          let max: number | null = null
+          for (let j = b; j < end; j++) {
+            const v = rows[j][si]
+            if (v === null || typeof v !== 'number') continue
+            if (min === null || v < min) min = v
+            if (max === null || v > max) max = v
+          }
+          ov[si].push(min, max)
+        }
+      }
+      fTimes = ot
+      valArrays = ov
+      downsampled = true
     } else {
-      // min/max 降采样：每个桶输出 min 和 max 两个点（保持波形包络）
-      for (let b = 0; b < pts.length; b += bucketSize) {
-        const end = Math.min(b + bucketSize, pts.length)
-        // 桶内时间取首点（min 和 max 共用同一时间戳会导致垂直线，但 uPlot 会正确渲染）
-        const tFirst = pts[b].t_ms / 1000
-        const tLast = pts[end - 1].t_ms / 1000
-        tArr.push(tFirst)
-        series.forEach((s, si) => {
-          let min: number | null = null
-          let max: number | null = null
-          for (let j = b; j < end; j++) {
-            const v = pts[j].values.find((x) => x.id === s.variable.id)
-            const val = v?.value
-            if (val == null) continue
-            if (min == null || val < min) min = val
-            if (max == null || val > max) max = val
+      // 未降采样：rows 是 [pointIdx][seriesIdx]，转置为 [seriesIdx][pointIdx]
+      valArrays = series.map((_, si) => rows.map((r) => r[si]))
+    }
+
+    // 3) 滑动平均（按通道开关）：对启用 movingAverage 的通道做居中窗口平均，
+    //    平滑噪声。null 值跳过（不参与平均，保持 null）。
+    //    降采样后的数据已为包络极值，不再做平均。
+    if (!downsampled) {
+      const maEnabled = series.some((s) => s.channel.movingAverage)
+      if (maEnabled) {
+        const w = MA_WINDOW
+        const half = w >> 1
+        for (let si = 0; si < nSer; si++) {
+          if (!series[si].channel.movingAverage) continue
+          const src = valArrays[si]
+          const out: (number | null)[] = new Array(src.length)
+          for (let i = 0; i < src.length; i++) {
+            let sum = 0, cnt = 0
+            for (let k = -half; k <= half; k++) {
+              const idx = i + k
+              if (idx < 0 || idx >= src.length) continue
+              const v = src[idx]
+              if (v !== null && typeof v === 'number') { sum += v; cnt++ }
+            }
+            out[i] = cnt > 0 ? sum / cnt : src[i]
           }
-          // 同一桶的 min/max 先存，后续 push max（order: min then max）
-          ;(valArrays[si] as (number | null)[]).push(min)
-        })
-        // 桶末尾再 push 一次 max（确保峰值可见）
-        if (tLast !== tFirst) tArr.push(tLast)
-        else tArr.push(tFirst + 1e-9) // 避免时间戳完全相同
-        series.forEach((s, si) => {
-          let min: number | null = null
-          let max: number | null = null
-          for (let j = b; j < end; j++) {
-            const v = pts[j].values.find((x) => x.id === s.variable.id)
-            const val = v?.value
-            if (val == null) continue
-            if (min == null || val < min) min = val
-            if (max == null || val > max) max = val
-          }
-          ;(valArrays[si] as (number | null)[]).push(max)
-        })
+          valArrays[si] = out
+        }
       }
     }
 
     return {
-      data: [tArr, ...valArrays] as uPlot.AlignedData,
+      data: [fTimes, ...valArrays] as uPlot.AlignedData,
       series,
     }
   }, [getVisibleSeries])
@@ -185,7 +243,8 @@ export function WaveformChart({
     // Follow 模式：X 轴自动滚动到最新数据 + Y 轴自适应
     if (followRef.current && data[0].length > 0) {
       const lastT = data[0][data[0].length - 1] as number
-      const win = windowRef.current
+      // 示波器式时基：窗口宽度 = 时基 × 格数（10 格）
+      const win = windowRef.current * GRID_DIVS
 
       // 触发检测：找第一个启用触发的通道，以其最近触发点作为窗口右边界
       // （示波器式触发：信号穿越/达到阈值时定格，便于观察边沿/电平）
@@ -210,7 +269,8 @@ export function WaveformChart({
       }
 
       const xMax = trigXMax !== null ? trigXMax : lastT
-      const xMin = xMax - win
+      // 相对时间从 0 起算，xMin 钳位到 0，避免显示负时间
+      const xMin = Math.max(0, xMax - win)
       plot.setScale('x', { min: xMin, max: xMax })
 
       // Y 轴量程：优先使用用户设定的固定量程（min/max），否则自适应
@@ -288,8 +348,22 @@ export function WaveformChart({
         }
       }
     } else {
-      // 非 Follow 模式：重置 Y 轴 hysteresis，让 uPlot 自动计算
+      // 非 Follow 模式（停止/手动浏览）：自动 Fit 全部数据到视图
+      // 对标示波器 Stop 后的 Zoom Fit 行为，STM32CubeMonitor 停止后也自动全览
       yRangeRef.current = null
+      if (data[0].length > 1) {
+        const tMin = data[0][0] as number
+        const tMax = data[0][data[0].length - 1] as number
+        // 仅当 X 轴范围未手动缩放时自动 fit（用户拖拽缩放后不覆盖）
+        const xScale = plot.scales.x
+        const autoFit = !xScale || xScale.min === undefined || xScale.max === undefined
+        if (autoFit || tMin < (xScale?.min ?? 0) || tMax > (xScale?.max ?? 0)) {
+          // 添加 5% 边距，避免波形贴边；左侧钳位到 0，禁止显示负时间
+          const tRange = tMax - tMin || 1
+          const tPad = tRange * 0.02
+          plot.setScale('x', { min: Math.max(0, tMin - tPad), max: tMax + tPad })
+        }
+      }
     }
   }, [buildPlotData])
 
@@ -310,13 +384,20 @@ export function WaveformChart({
           label: s.variable.name,
           stroke: s.channel.color,
           width: 1.5,
+          // 阶梯路径（zero-order hold）：采样保持式渲染。
+          // 采样率高于信号变化率时，重复值显示为水平阶梯而非斜线，
+          // 忠实反映 SWD 轮询的真实采样行为，不丢弃任何采样点。
+          // align: 1（右对齐）= 值在采样时刻立即变化，符合"读到新值后保持到下次读取"的语义。
+          paths: uPlot.paths.stepped!({ align: 1 }),
           points: { show: false },
         })),
       ],
       axes: [
         {
-          label: windowSec < 0.001 ? 'Time (μs)' : windowSec < 1 ? 'Time (ms)' : 'Time (s)',
-          space: 60,
+          label: 'Time',
+          space: 70,
+          // 自定义刻度值格式化：相对时间用 μs/ms/s 显示，不使用 Unix 日期
+          values: (_self: uPlot, ticks: number[]) => ticks.map(formatTimeValue),
         },
         {
           label: 'Value',
@@ -371,7 +452,9 @@ export function WaveformChart({
       },
       scales: {
         x: {
-          time: true,
+          // time: false — X 轴值为相对秒数（从采样起点计时），
+          // 不是 Unix 时间戳。设为 true 会导致 uPlot 按 1970 纪元日期格式化。
+          time: false,
         },
       },
     }
@@ -407,7 +490,8 @@ export function WaveformChart({
           const range = xScale.max - xScale.min
           const newRange = range * zoomFactor
           const ratio = (mouseVal - xScale.min) / range
-          const newMin = mouseVal - newRange * ratio
+          // X 轴时间从 0 起算，钳位 newMin 到 0，禁止滚轮缩放到负时间
+          const newMin = Math.max(0, mouseVal - newRange * ratio)
           const newMax = mouseVal + newRange * (1 - ratio)
           p.setScale('x', { min: newMin, max: newMax })
         }

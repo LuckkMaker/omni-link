@@ -398,7 +398,21 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     await wrapOperation(set, get, '检查空白', '正在检查...', async () => {
       const result = await flashService.checkBlank(uid)
       if (result.success && result.is_blank !== undefined) {
-        return { success: true, duration_ms: result.duration_ms, error: result.is_blank ? undefined : `非空白，首个非0xFF地址: ${result.first_nonblank_addr ? formatHex(result.first_nonblank_addr) : 'N/A'}` }
+        if (result.is_blank) {
+          return { success: true, duration_ms: result.duration_ms }
+        }
+        // 非空白：提示首个非空地址，并显示实际扫描量（提前终止时 scanned_bytes < total_bytes）
+        const scanned = result.scanned_bytes ?? result.total_bytes ?? 0
+        const total = result.total_bytes ?? 0
+        const early = result.early_terminated
+        const scannedDesc = early && total > 0
+          ? `（已扫描 ${(scanned / 1024).toFixed(1)}KB / ${(total / 1024).toFixed(1)}KB，提前终止）`
+          : ''
+        return {
+          success: true,
+          duration_ms: result.duration_ms,
+          error: `非空白，首个非0xFF地址: ${result.first_nonblank_addr ? formatHex(result.first_nonblank_addr) : 'N/A'}${scannedDesc}`,
+        }
       }
       return { success: false, error: result.error ?? '检查失败' }
     })

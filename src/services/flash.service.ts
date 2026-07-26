@@ -63,7 +63,9 @@ export async function checkBlank(
   is_blank?: boolean
   blank_bytes?: number
   total_bytes?: number
+  scanned_bytes?: number
   first_nonblank_addr?: number | null
+  early_terminated?: boolean
   error?: string
   duration_ms?: number
 }> {
