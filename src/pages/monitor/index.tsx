@@ -403,6 +403,7 @@ export default function MonitorPage() {
                     channels={channels}
                     samples={samples}
                     follow={follow}
+                    paused={paused}
                     windowSec={timebase}
                     fps={fps}
                     className="h-full w-full"

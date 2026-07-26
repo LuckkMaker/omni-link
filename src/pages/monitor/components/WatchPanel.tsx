@@ -1,9 +1,15 @@
 import { useState } from 'react'
-import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff } from 'lucide-react'
+import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff, MoreVertical } from 'lucide-react'
 import { useMonitorStore, type ArrayGroup } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import { monitorService } from '@/services/monitor.service'
 import { cn } from '@/lib/utils'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu'
 
 /** 触发方式选项（与 ChannelConfig.triggerMode 对齐） */
 const TRIGGER_MODES: { value: 'none' | 'rising' | 'falling' | 'level'; label: string }[] = [
@@ -66,13 +72,6 @@ export function WatchPanel({ uid, onCollapse }: Props) {
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
-  /** 展开二级配置区的通道 id 集合 */
-  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
-  const toggleExpand = (id: string) => setExpandedRows((s) => {
-    const n = new Set(s)
-    if (n.has(id)) n.delete(id); else n.add(id)
-    return n
-  })
 
   // 取最新值
   const lastSample = samples[samples.length - 1]
@@ -203,18 +202,18 @@ export function WatchPanel({ uid, onCollapse }: Props) {
         <table className="w-full table-fixed border-collapse text-xs whitespace-nowrap">
           <thead className="sticky top-0 z-10 bg-muted/60">
             <tr>
-              <th className="border border-border px-1.5 py-1 text-left font-medium w-10">Color</th>
-              <th className="border border-border px-2 py-1 text-left font-medium w-32">Name</th>
-              <th className="border border-border px-2 py-1 text-left font-medium w-24">Address</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-10">Size</th>
-              <th className="border border-border px-1.5 py-1 text-left font-medium w-14">Type</th>
-              <th className="border border-border px-2 py-1 text-right font-medium w-32">Value</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-16">Min</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-16">Max</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-12">Moving Avg</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-16">Y Resolution</th>
-              <th className="border border-border px-1 py-1 text-center font-medium w-8">⚙</th>
-              <th className="border border-border w-8" />
+              <th className="border border-border px-1 py-1 text-center font-medium w-8">Color</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-32">Name</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-24">Address</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-8">Size</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-12">Type</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-24">Value</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-14">Min</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-14">Max</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-14">MA</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-16">Y Res</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-36">Trigger</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-10">More</th>
             </tr>
           </thead>
           <tbody>
@@ -249,7 +248,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     />
                   </td>
                   {/* Name（数组首元素显示展开/收起按钮，非首元素缩进） */}
-                  <td className="border border-border px-2 py-1 truncate max-w-[160px]" title={v.name}>
+                  <td className="border border-border px-1 py-1 truncate max-w-[160px]" title={v.name}>
                     <div className="flex items-center gap-0.5">
                       {arrGroup && (
                         <button
@@ -270,21 +269,21 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     </div>
                   </td>
                   {/* Address */}
-                  <td className="border border-border px-2 py-1 font-mono">
+                  <td className="border border-border px-1 py-1 font-mono text-center">
                     0x{v.address.toString(16).toUpperCase().padStart(8, '0')}
                   </td>
                   {/* Size */}
-                  <td className="border border-border px-1.5 py-1 text-center font-mono">
+                  <td className="border border-border px-1 py-1 text-center font-mono">
                     {v.size}
                   </td>
                   {/* Type */}
-                  <td className="border border-border px-1.5 py-1 font-mono">
+                  <td className="border border-border px-1 py-1 font-mono text-center">
                     {v.type}
                   </td>
                   {/* Value（双击编辑） */}
                   <td
                     className={cn(
-                      'border border-border px-2 py-1 text-right font-mono tabular-nums transition-colors overflow-hidden',
+                      'border border-border px-1 py-1 text-right font-mono tabular-nums transition-colors overflow-hidden',
                       changed && 'bg-primary/10',
                       editingId === v.id && 'p-0',
                     )}
@@ -307,7 +306,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     ) : val === undefined ? '—' : val === null ? 'N/A' : val}
                   </td>
                   {/* Min（null=自适应） */}
-                  <td className="border border-border px-1 py-1">
+                  <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
                       className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
@@ -318,7 +317,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     />
                   </td>
                   {/* Max（null=自适应） */}
-                  <td className="border border-border px-1 py-1">
+                  <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
                       className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
@@ -328,18 +327,20 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                       title="Y 轴最大值（空=跟随自适应）"
                     />
                   </td>
-                  {/* Moving Average */}
-                  <td className="border border-border px-1 py-1 text-center">
+                  {/* Moving Average（窗口大小，0=关闭） */}
+                  <td className="border border-border px-0.5 py-1">
                     <input
-                      type="checkbox"
-                      className="size-3 cursor-pointer"
-                      checked={ch?.movingAverage ?? false}
-                      onChange={(e) => setChannel(v.id, { movingAverage: e.target.checked })}
-                      title="启用滑动平均滤波"
+                      type="number"
+                      min={0}
+                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                      value={ch?.movingAverage ?? 0}
+                      onChange={(e) => setChannel(v.id, { movingAverage: Math.max(0, Math.floor(Number(e.target.value))) })}
+                      placeholder="0"
+                      title="滑动平均窗口大小（0=关闭，>0=窗口大小）"
                     />
                   </td>
                   {/* Y Resolution（1-2-5 序列选择，0=自动）*/}
-                  <td className="border border-border px-1 py-1">
+                  <td className="border border-border px-0.5 py-1">
                     <select
                       className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded cursor-pointer"
                       value={ch?.yResolution ?? 0}
@@ -352,91 +353,67 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                       ))}
                     </select>
                   </td>
-                  {/* 展开二级配置区 */}
-                  <td className="border border-border px-1 py-1 text-center">
-                    <button
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => toggleExpand(v.id)}
-                      title="展开/收起 通道显示配置（偏移/缩放/触发）"
-                    >
-                      {expandedRows.has(v.id) ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                    </button>
-                  </td>
-                  {/* 操作：隐藏/显示 + 移除 */}
-                  <td className="border border-border px-1 text-center">
-                    <div className="flex items-center justify-center gap-0.5">
-                      <button
-                        className={cn('hover:text-foreground', ch?.visible === false ? 'text-muted-foreground/50' : 'text-muted-foreground')}
-                        onClick={() => setChannel(v.id, { visible: !(ch?.visible ?? true) })}
-                        title={ch?.visible === false ? '显示通道' : '隐藏通道'}
+                  {/* Trigger Control：选择触发方式，[电平]时显示阈值输入 */}
+                  <td className="border border-border px-0.5 py-1">
+                    <div className="flex items-center gap-0.5">
+                      <select
+                        className="h-5 flex-1 min-w-0 bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded cursor-pointer"
+                        value={ch?.triggerMode ?? 'none'}
+                        onChange={(e) => setChannel(v.id, { triggerMode: e.target.value as 'none' | 'rising' | 'falling' | 'level' })}
+                        title="触发方式"
                       >
-                        {ch?.visible === false ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
-                      </button>
-                      <button
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => handleRemove(v.id)}
-                        title="移除变量"
-                      >
-                        <Trash2 className="size-3" />
-                      </button>
+                        {TRIGGER_MODES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                      {ch?.triggerMode === 'level' && (
+                        <input
+                          type="number"
+                          className="h-5 w-12 rounded border border-border bg-background px-0.5 text-center font-mono text-[11px] outline-none focus:ring-1 focus:ring-primary"
+                          value={ch?.triggerLevel ?? 0}
+                          onChange={(e) => setChannel(v.id, { triggerLevel: Number(e.target.value) })}
+                          step="any"
+                          title="触发阈值"
+                        />
+                      )}
                     </div>
                   </td>
-                </tr>
-                {/* 展开二级区：Y 偏移 / Y 缩放 / 触发方式 / 触发阈值 */}
-                {expandedRows.has(v.id) && (
-                  <tr key={`${v.id}-cfg`} className={i % 2 === 0 ? 'bg-background' : 'bg-muted/20'}>
-                    <td colSpan={12} className="border border-border px-2 py-1.5">
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
-                        <div className="flex items-center gap-1.5">
-                          <label className="text-muted-foreground" title="Y 轴偏移：波形垂直平移（数值加减）">偏移</label>
-                          <input
-                            type="number"
-                            className="h-5 w-16 rounded border border-border bg-background px-1 text-center font-mono outline-none focus:ring-1 focus:ring-primary"
-                            value={ch?.yOffset ?? 0}
-                            onChange={(e) => setChannel(v.id, { yOffset: Number(e.target.value) })}
-                            step="any"
-                            title="Y 轴偏移：波形垂直平移（数值加减）"
-                          />
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <label className="text-muted-foreground" title="Y 轴缩放：垂直放大倍数（1=原始）">缩放</label>
-                          <input
-                            type="number"
-                            className="h-5 w-16 rounded border border-border bg-background px-1 text-center font-mono outline-none focus:ring-1 focus:ring-primary"
-                            value={ch?.yScale ?? 1}
-                            onChange={(e) => setChannel(v.id, { yScale: Number(e.target.value) })}
-                            step="any"
-                            title="Y 轴缩放：垂直放大倍数（1=原始大小）"
-                          />
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <label className="text-muted-foreground" title="触发方式：信号达到阈值时定格波形">触发</label>
-                          <select
-                            className="h-5 rounded border border-border bg-background px-1 outline-none focus:ring-1 focus:ring-primary"
-                            value={ch?.triggerMode ?? 'none'}
-                            onChange={(e) => setChannel(v.id, { triggerMode: e.target.value as 'none' | 'rising' | 'falling' | 'level' })}
-                            title="触发方式"
-                          >
-                            {TRIGGER_MODES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                          </select>
-                          {ch?.triggerMode && ch.triggerMode !== 'none' && (
+                  {/* 更多操作：显示/隐藏、移除 */}
+                  <td className="border border-border px-0.5 py-1 text-center">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className="text-muted-foreground hover:text-foreground"
+                          title="更多操作"
+                        >
+                          <MoreVertical className="size-3" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-28">
+                        <DropdownMenuItem
+                          onClick={() => setChannel(v.id, { visible: !(ch?.visible ?? true) })}
+                        >
+                          {ch?.visible === false ? (
                             <>
-                              <label className="text-muted-foreground">阈值</label>
-                              <input
-                                type="number"
-                                className="h-5 w-18 rounded border border-border bg-background px-1 text-center font-mono outline-none focus:ring-1 focus:ring-primary"
-                                value={ch?.triggerLevel ?? 0}
-                                onChange={(e) => setChannel(v.id, { triggerLevel: Number(e.target.value) })}
-                                step="any"
-                                title="触发阈值"
-                              />
+                              <Eye className="size-3.5" />
+                              <span>显示通道</span>
+                            </>
+                          ) : (
+                            <>
+                              <EyeOff className="size-3.5" />
+                              <span>隐藏通道</span>
                             </>
                           )}
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
-                )}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onClick={() => handleRemove(v.id)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          <span>移除变量</span>
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </td>
+                </tr>
                 </>
               )
             })}

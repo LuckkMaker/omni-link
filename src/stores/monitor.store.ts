@@ -15,15 +15,13 @@ export interface ChannelConfig {
   varId: string
   color: string
   visible: boolean
-  yOffset: number
-  yScale: number
   format: 'dec' | 'hex' | 'bin'
   /** Y 轴最小值（固定量程模式，null 表示跟随自适应） */
   min: number | null
   /** Y 轴最大值（固定量程模式，null 表示跟随自适应） */
   max: number | null
-  /** 是否启用滑动平均 */
-  movingAverage: boolean
+  /** 滑动平均窗口大小（0=关闭，>0=窗口大小） */
+  movingAverage: number
   /** Y 轴分辨率（每格代表的数值，0 表示自动） */
   yResolution: number
   /** 触发方式：none=无，rising=上升沿，falling=下降沿，level=电平触发 */
@@ -139,12 +137,10 @@ function makeChannel(varId: string, index: number): ChannelConfig {
     varId,
     color: PALETTE[index % PALETTE.length],
     visible: true,
-    yOffset: 0,
-    yScale: 1,
     format: 'dec',
     min: null,
     max: null,
-    movingAverage: false,
+    movingAverage: 0,
     yResolution: 0,
     triggerMode: 'none',
     triggerLevel: 0,
