@@ -5,7 +5,7 @@ site_author: LuckkMaker
 theme:
   name: readthedocs
   favicon: assets/images/favicon.png
-  logo: assets/images/favicon.png
+  logo: assets/images/logo.png
   collapse_navigation: true
   sticky_navigation: true
   navigation_depth: 4

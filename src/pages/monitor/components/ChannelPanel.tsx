@@ -1,8 +1,9 @@
-import { Fragment, useState, useEffect, useCallback, useMemo } from 'react'
+import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Plus, Eye, EyeOff, FileUp, Search, Loader2,
   Radio, Zap, AlertTriangle, Trash2, Play, Square, Gauge,
   ChevronRight, ChevronDown, SlidersHorizontal,
+  Pause, RotateCcw,
 } from 'lucide-react'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -14,11 +15,16 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog'
+import { TIMEBASE_OPTIONS } from '../constants'
 
 interface Props {
   uid: string | null
   isConnected: boolean
-  onToggleSampling: () => void
+  onStartPause: () => void
+  onStop: () => void
+  onToggleDevice: () => void
+  onReset: () => void
+  coreState: 'running' | 'halted' | 'unknown'
 }
 
 /** 手动地址输入支持的数据类型 */
@@ -39,37 +45,6 @@ const RATE_OPTIONS = [
   { label: '100 kHz', value: 100000 },
 ]
 
-/** 时基档位（秒，作为 Follow/触发模式的时间窗口宽度），覆盖 us~s 全范围 */
-const TIMEBASE_OPTIONS = [
-  { label: '1 us/div', value: 0.000001 },
-  { label: '2 us/div', value: 0.000002 },
-  { label: '5 us/div', value: 0.000005 },
-  { label: '10 us/div', value: 0.00001 },
-  { label: '20 us/div', value: 0.00002 },
-  { label: '50 us/div', value: 0.00005 },
-  { label: '100 us/div', value: 0.0001 },
-  { label: '200 us/div', value: 0.0002 },
-  { label: '500 us/div', value: 0.0005 },
-  { label: '1 ms/div', value: 0.001 },
-  { label: '2 ms/div', value: 0.002 },
-  { label: '5 ms/div', value: 0.005 },
-  { label: '10 ms/div', value: 0.01 },
-  { label: '20 ms/div', value: 0.02 },
-  { label: '50 ms/div', value: 0.05 },
-  { label: '100 ms/div', value: 0.1 },
-  { label: '200 ms/div', value: 0.2 },
-  { label: '500 ms/div', value: 0.5 },
-  { label: '1 s/div', value: 1 },
-  { label: '2 s/div', value: 2 },
-  { label: '5 s/div', value: 5 },
-  { label: '10 s/div', value: 10 },
-  { label: '20 s/div', value: 20 },
-  { label: '50 s/div', value: 50 },
-  { label: '100 s/div', value: 100 },
-  { label: '200 s/div', value: 200 },
-  { label: '500 s/div', value: 500 },
-]
-
 /** 渲染帧率档位（FPS） */
 const FPS_OPTIONS = [1, 2, 5, 10, 15, 20, 25, 30, 40, 50]
 
@@ -82,7 +57,7 @@ const TRIGGER_MODES: { value: ChannelTriggerMode; label: string }[] = [
   { value: 'level', label: '电平' },
 ]
 
-export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
+export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleDevice, onReset, coreState }: Props) {
   const variables = useMonitorStore((s) => s.variables)
   const channels = useMonitorStore((s) => s.channels)
   const samples = useMonitorStore((s) => s.samples)
@@ -94,7 +69,6 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
   const elfLoaded = useMonitorStore((s) => s.elfLoaded)
   const elfChanged = useMonitorStore((s) => s.elfChanged)
   const setElfChanged = useMonitorStore((s) => s.setElfChanged)
-  const symbolCount = useMonitorStore((s) => s.symbolCount)
   const rateHz = useMonitorStore((s) => s.rateHz)
   const follow = useMonitorStore((s) => s.follow)
   const timebase = useMonitorStore((s) => s.timebase)
@@ -133,6 +107,9 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
   const [manualAddr, setManualAddr] = useState('')
   const [manualType, setManualType] = useState<MonitorVarType>('uint32')
   const [manualErr, setManualErr] = useState<string | null>(null)
+
+  // ELF 文件变化通知去重：避免每次轮询都推通知，仅在首次检测到变化时推送一次
+  const elfChangeNotifiedRef = useRef(false)
 
   // 取最新采样值
   const lastSample = samples[samples.length - 1]
@@ -248,7 +225,7 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
     setLoading(false)
     if (okCount > 0) {
       pushNotification({
-        type: 'success', title: '已添加到监视',
+        type: 'success', title: '已添加到 Watch',
         message: `${okCount} 个变量`,
         autoClose: true, autoCloseDelay: 2000,
       })
@@ -275,6 +252,7 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
       const res = await monitorService.loadElf(uid, filePath)
       if (res.success) {
         setElf(filePath, res.symbol_count)
+        elfChangeNotifiedRef.current = false
         pushNotification({
           type: 'success',
           title: 'ELF 已加载',
@@ -309,6 +287,7 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
       const res = await monitorService.loadElf(uid, elfPath)
       setElf(elfPath, res.symbol_count)
       setElfChanged(false)
+      elfChangeNotifiedRef.current = false
       fetchSymbols()
       pushNotification({
         type: 'success', title: 'ELF 已重新加载',
@@ -326,20 +305,29 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
     }
   }, [uid, elfPath, setElf, setElfChanged, fetchSymbols, pushNotification])
 
-  // ── ELF 文件变化轮询：采样未运行时每 5 秒检测 mtime，变化则提示重载 ──
+  // ── ELF 文件变化轮询：采样未运行时每 5 秒检测 mtime，变化则通过全局通知提醒 ──
   useEffect(() => {
     if (!uid || !elfLoaded || !elfPath || running) return
     let active = true
     const check = async () => {
       try {
         const r = await monitorService.checkElfChanged(uid)
-        if (active && r.changed) setElfChanged(true)
+        if (active && r.changed && !elfChangeNotifiedRef.current) {
+          elfChangeNotifiedRef.current = true
+          setElfChanged(true)
+          pushNotification({
+            type: 'warning',
+            title: 'ELF 文件已变化',
+            message: `${elfPath.split(/[\\/]/).pop()} 已更新，建议重新加载以同步符号表`,
+            autoClose: false,
+          })
+        }
       } catch { /* ignore */ }
     }
     check()
     const id = setInterval(check, 5000)
     return () => { active = false; clearInterval(id) }
-  }, [uid, elfLoaded, elfPath, running, setElfChanged])
+  }, [uid, elfLoaded, elfPath, running, setElfChanged, pushNotification])
 
   // ── 分组折叠 ──
   const toggleGroup = (file: string) => {
@@ -504,27 +492,45 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* ── 工具栏 ── */}
-      <div className="border-b border-border p-2 space-y-2">
-        {/* 启动 + Follow（最上方，平均分布）*/}
-        <div className="flex gap-1.5">
+      {/* ① 采样控制 */}
+      <div className="border-b border-border">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">采样控制</span>
+        </div>
+        <div className="space-y-1.5 p-2 pt-0">
+          {/* [启动/暂停] [停止] */}
+          <div className="flex gap-1.5">
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
+                running && !paused
+                  ? 'bg-amber-500/15 text-amber-600 hover:bg-amber-500/25'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90',
+                (starting && 'opacity-60 cursor-wait'),
+                (!isConnected && 'opacity-40 cursor-not-allowed'),
+              )}
+              onClick={onStartPause}
+              disabled={!isConnected || starting}
+            >
+              {running && !paused ? <Pause className="size-3" /> : <Play className="size-3" />}
+              {running && !paused ? '暂停' : running && paused ? '继续' : starting ? '启动中...' : '启动'}
+            </button>
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
+                'bg-destructive/10 text-destructive hover:bg-destructive/20',
+                (!running || starting) && 'opacity-40 cursor-not-allowed',
+              )}
+              onClick={onStop}
+              disabled={!running || starting}
+            >
+              <Square className="size-3" /> 停止
+            </button>
+          </div>
+          {/* Follow */}
           <button
             className={cn(
-              'flex h-7 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
-              running
-                ? 'bg-destructive/10 text-destructive hover:bg-destructive/20'
-                : 'bg-primary text-primary-foreground hover:bg-primary/90',
-              starting && 'opacity-60 cursor-wait',
-            )}
-            onClick={onToggleSampling}
-            disabled={!isConnected || starting || (running && paused)}
-          >
-            {running ? <Square className="size-3" /> : <Play className="size-3" />}
-            {running ? '停止' : starting ? '启动中...' : '启动'}
-          </button>
-          <button
-            className={cn(
-              'flex h-7 flex-1 items-center justify-center gap-1 rounded border text-[11px] transition-colors',
+              'flex h-7 w-full items-center justify-center gap-1 rounded border text-[11px] transition-colors',
               follow ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-muted/30',
             )}
             onClick={() => setFollow(!follow)}
@@ -533,99 +539,171 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
             <Gauge className="size-3" /> Follow
           </button>
         </div>
-
-        {/* 采样模式切换：RTT 同步 / HSS 异步 */}
-        <div className="flex items-center rounded-md border border-border p-0.5">
-          <button
-            onClick={() => !running && setTransport('rtt')}
-            disabled={running}
-            className={cn(
-              'flex h-6 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
-              transport === 'rtt' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground',
-              running && 'opacity-50 cursor-not-allowed',
-            )}
-            title="RTT 同步：固件集成 SEGGER_RTT 主动推送，速度快、与代码同步，但侵入固件"
-          >
-            <Radio className="size-3" /> RTT
-          </button>
-          <button
-            onClick={() => !running && setTransport('swd')}
-            disabled={running}
-            className={cn(
-              'flex h-6 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
-              transport === 'swd' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground',
-              running && 'opacity-50 cursor-not-allowed',
-            )}
-            title="HSS 异步：调试器通过 SWD 直接读内存，非侵入，速度受调试接口限制"
-          >
-            <Zap className="size-3" /> HSS
-          </button>
-        </div>
-
-        {/* 加载 ELF */}
-        <button
-          className="flex w-full items-center justify-center gap-1.5 rounded border border-primary bg-primary/10 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 disabled:opacity-50"
-          onClick={handleLoadElf}
-          disabled={!uid || loading || running}
-        >
-          {loading ? <Loader2 className="size-3.5 animate-spin" /> : <FileUp className="size-3.5" />}
-          {loading ? '加载中...' : elfLoaded ? '重新加载 ELF' : '加载 ELF 文件'}
-        </button>
-        {elfLoaded && elfPath && (
-          <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-            <span className="truncate" title={elfPath}>{elfPath.split(/[\\/]/).pop()}</span>
-            <span className="shrink-0">· {symbolCount} 符号</span>
-          </div>
-        )}
-        {elfChanged && (
-          <div className="flex items-center gap-2 rounded border border-yellow-500/50 bg-yellow-500/10 px-2 py-1.5 text-[11px] text-yellow-700 dark:text-yellow-400">
-            <span className="flex-1">ELF 文件已变化，建议重新加载</span>
-            <button
-              className="shrink-0 font-medium underline hover:no-underline"
-              onClick={reloadElf}
-              disabled={loading}
-            >重新加载</button>
-          </div>
-        )}
-
-        {/* 采样率 + FPS */}
-        <div className="grid grid-cols-2 gap-1.5">
-          <select
-            className="h-7 rounded border border-border bg-background px-1 text-[11px]"
-            value={rateHz}
-            onChange={(e) => setRateHz(Number(e.target.value))}
-            disabled={running}
-            title="采样率（后端每秒采样次数）"
-          >
-            {RATE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-          <select
-            className="h-7 rounded border border-border bg-background px-1 text-[11px]"
-            value={fps}
-            onChange={(e) => setFps(Number(e.target.value))}
-            title="渲染帧率（波形图每秒刷新次数）"
-          >
-            {FPS_OPTIONS.map((f) => <option key={f} value={f}>{f} FPS</option>)}
-          </select>
-        </div>
-
-        {/* 时基（div 时间分辨率）*/}
-        <select
-          className="h-7 w-full rounded border border-border bg-background px-1 text-[11px]"
-          value={timebase}
-          onChange={(e) => setTimebase(Number(e.target.value))}
-          title="时基（每格代表的时间，决定时间窗口宽度）"
-        >
-          {TIMEBASE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-
-        {transport === 'rtt' && (
-          <div className="flex items-start gap-1 rounded border border-amber-500/30 bg-amber-500/10 p-1.5 text-[10px] text-amber-600">
-            <AlertTriangle className="size-3 shrink-0 mt-0.5" />
-            <span>RTT 模式需固件集成 SEGGER_RTT 并按协议写采样数据，变量 id 按添加顺序对应。</span>
-          </div>
-        )}
       </div>
+
+      {/* ② 目标设备控制 */}
+      <div className="border-b border-border">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">目标设备控制</span>
+        </div>
+        <div className="space-y-1.5 p-2 pt-0">
+          {/* [Run/Halt] [Reset]：直接操作 CPU 内核，与采样独立 */}
+          <div className="flex gap-1.5">
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded border text-[11px] font-medium transition-colors',
+                coreState === 'running'
+                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20'
+                  : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20',
+                !isConnected && 'opacity-40 cursor-not-allowed',
+              )}
+              onClick={onToggleDevice}
+              disabled={!isConnected}
+              title="Run/Halt 目标内核（不影响采样）"
+            >
+              {coreState === 'running' ? <><Pause className="size-3" /> Halt</> : <><Play className="size-3" /> Run</>}
+            </button>
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded border border-border text-[11px] font-medium transition-colors',
+                'text-muted-foreground hover:bg-muted/30 hover:text-foreground',
+                !isConnected && 'opacity-40 cursor-not-allowed',
+              )}
+              onClick={onReset}
+              disabled={!isConnected}
+              title="复位目标芯片"
+            >
+              <RotateCcw className="size-3" /> Reset
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ③ 采样配置 */}
+      <div className="border-b border-border">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">采样配置</span>
+        </div>
+        <div className="space-y-1.5 p-2 pt-0">
+          {/* 传输模式：RTT 同步 / HSS 异步 */}
+          <div className="flex items-center rounded-md border border-border p-0.5">
+            <button
+              onClick={() => !running && setTransport('rtt')}
+              disabled={running}
+              className={cn(
+                'flex h-6 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
+                transport === 'rtt' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground',
+                running && 'opacity-50 cursor-not-allowed',
+              )}
+              title="RTT 同步：固件集成 SEGGER_RTT 主动推送，速度快、与代码同步，但侵入固件"
+            >
+              <Radio className="size-3" /> RTT
+            </button>
+            <button
+              onClick={() => !running && setTransport('swd')}
+              disabled={running}
+              className={cn(
+                'flex h-6 flex-1 items-center justify-center gap-1 rounded text-[11px] font-medium transition-colors',
+                transport === 'swd' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground',
+                running && 'opacity-50 cursor-not-allowed',
+              )}
+              title="HSS 异步：调试器通过 SWD 直接读内存，非侵入，速度受调试接口限制"
+            >
+              <Zap className="size-3" /> HSS
+            </button>
+          </div>
+          {/* 采样率 */}
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 w-14 text-[11px] text-muted-foreground">采样率</span>
+            <select
+              className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+              value={rateHz}
+              onChange={(e) => setRateHz(Number(e.target.value))}
+              disabled={running}
+              title="采样率：后端每秒从目标读取变量的次数（数据采集频率）"
+            >
+              {RATE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          {/* 渲染帧率（独立于采样率，控制波形图刷新频率）*/}
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 w-14 text-[11px] text-muted-foreground">渲染帧率</span>
+            <select
+              className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+              value={fps}
+              onChange={(e) => setFps(Number(e.target.value))}
+              title="渲染帧率：波形图每秒重绘次数（与采样率独立，降低可减少 CPU 占用）"
+            >
+              {FPS_OPTIONS.map((f) => <option key={f} value={f}>{f} FPS</option>)}
+            </select>
+          </div>
+          {/* 时基（div 时间分辨率，控制 X 轴，与鼠标滚轮联动）*/}
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 w-14 text-[11px] text-muted-foreground">时基</span>
+            <select
+              className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+              value={timebase}
+              onChange={(e) => setTimebase(Number(e.target.value))}
+              title="时基（每格代表的时间，决定 Follow 模式时间窗口宽度 = 时基 × 10 格；鼠标滚轮可步进切换）"
+            >
+              {TIMEBASE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          {transport === 'rtt' && (
+            <div className="flex items-start gap-1 rounded border border-amber-500/30 bg-amber-500/10 p-1.5 text-[10px] text-amber-600">
+              <AlertTriangle className="size-3 shrink-0 mt-0.5" />
+              <span>RTT 模式需固件集成 SEGGER_RTT 并按协议写采样数据，变量 id 按添加顺序对应。</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ④ 变量列表 */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="border-b border-border px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">变量列表</span>
+        </div>
+        {/* ELF 加载 */}
+        <div className="space-y-1.5 border-b border-border p-2">
+          <div className="flex gap-1.5">
+            {elfLoaded ? (
+              <>
+                {/* 已加载：重新加载（文件变化时高亮） + 更换文件 */}
+                <button
+                  className={cn(
+                    'flex h-7 flex-1 items-center justify-center gap-1.5 rounded border text-xs font-medium transition-colors',
+                    elfChanged
+                      ? 'border-amber-500 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20'
+                      : 'border-primary bg-primary/10 text-primary hover:bg-primary/20',
+                  )}
+                  onClick={reloadElf}
+                  disabled={!uid || loading}
+                  title={elfChanged ? 'ELF 文件已变化，点击重新加载' : '重新加载当前 ELF 文件'}
+                >
+                  {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+                  {loading ? '加载中...' : '重新加载'}
+                </button>
+                <button
+                  className="flex h-7 items-center justify-center gap-1.5 rounded border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+                  onClick={handleLoadElf}
+                  disabled={!uid || loading || running}
+                  title="选择新的 ELF 文件"
+                >
+                  <FileUp className="size-3.5" /> 更换
+                </button>
+              </>
+            ) : (
+              <button
+                className="flex h-7 w-full items-center justify-center gap-1.5 rounded border border-primary bg-primary/10 text-xs font-medium text-primary hover:bg-primary/20 disabled:opacity-50"
+                onClick={handleLoadElf}
+                disabled={!uid || loading || running}
+              >
+                {loading ? <Loader2 className="size-3.5 animate-spin" /> : <FileUp className="size-3.5" />}
+                {loading ? '加载中...' : '加载 ELF 文件'}
+              </button>
+            )}
+          </div>
+        </div>
 
       {/* ── 变量浏览（ELF 已加载）── */}
       {elfLoaded && (
@@ -644,128 +722,130 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
             <span className="shrink-0 text-[10px] text-muted-foreground">{symbols.length}</span>
           </div>
 
-          {/* 分组符号列表 */}
+          {/* 分组符号列表（单一表头 + 文件分组行） */}
           <div className="min-h-0 flex-1 overflow-auto px-1">
-            {groupedSymbols.map(([file, syms]) => {
-              const collapsed = collapsedGroups.has(file)
-              return (
-                <div key={file} className="mb-1">
-                  {/* 组头 */}
-                  <button
-                    className="flex w-full items-center gap-1 rounded px-1 py-1 text-[11px] font-medium hover:bg-muted/30"
-                    onClick={() => toggleGroup(file)}
-                  >
-                    {collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
-                    <span className="truncate" title={file}>{file.split(/[\\/]/).pop()}</span>
-                    <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{syms.length}</span>
-                  </button>
-                  {/* 组内符号 */}
-                  {!collapsed && (
-                    <table className="w-full text-[11px]">
-                      <thead className="sticky top-0 bg-background z-10">
-                        <tr className="text-[10px] text-muted-foreground border-b border-border">
-                          <th className="w-5 px-1 py-0.5 font-medium text-left"></th>
-                          <th className="px-1 py-0.5 font-medium text-left">Name</th>
-                          <th className="px-1 py-0.5 font-medium text-left w-20">Address</th>
-                          <th className="px-1 py-0.5 font-medium text-left w-16">Type</th>
-                          <th className="px-1 py-0.5 font-medium text-center w-10">Size</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {syms.map((sym) => {
-                          const isSel = added.has(sym.name)
-                          const isExp = expandedArrays.has(sym.name)
-                          const partSet = addedElems[sym.name]
-                          const isChecked = checked.has(sym.name)  // 待添加勾选状态
-                          return (
-                            <Fragment key={sym.name}>
-                              <tr
-                                className={cn('border-b border-border/30', isSel && 'bg-primary/5', !isSel && isChecked && 'bg-primary/3')}
-                              >
-                                <td className="w-5 px-1 py-0.5">
-                                  <input
-                                    type="checkbox"
-                                    className="size-3 cursor-pointer"
-                                    checked={isSel || isChecked}
-                                    onChange={() => toggleSelect(sym)}
-                                    title={isSel ? '已添加到监视（点击移除）' : isChecked ? '已勾选（点击取消）' : '点击勾选待添加'}
-                                  />
-                                </td>
-                                <td className="px-1 py-0.5">
-                                  <div className="flex items-center gap-0.5">
-                                    {sym.is_array && sym.elem_count > 0 && (
-                                      <button
-                                        className="text-muted-foreground hover:text-foreground"
-                                        onClick={(e) => { e.stopPropagation(); toggleArrayExpand(sym.name) }}
-                                        title={isExp ? '收起元素' : '展开元素'}
-                                      >
-                                        {isExp ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-                                      </button>
-                                    )}
-                                    <span className="truncate" title={sym.name}>
-                                      {sym.name}
-                                      {sym.is_array && <span className="text-muted-foreground">[{sym.elem_count}]</span>}
-                                    </span>
-                                  </div>
-                                </td>
-                                <td className="px-1 py-0.5 font-mono text-[10px] w-20">
-                                  0x{sym.address.toString(16).toUpperCase().padStart(8, '0')}
-                                </td>
-                                <td className="px-1 py-0.5 font-mono text-[10px] w-16">
-                                  {sym.is_array ? `${sym.elem_type}[${sym.elem_count}]` : sym.type}
-                                </td>
-                                <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.size}</td>
-                              </tr>
-                              {/* 数组元素二级列表（展开） */}
-                              {sym.is_array && isExp && (
-                                <>
-                                  {partSet && partSet.size > 0 && !isSel && (
-                                    <tr className="bg-primary/5">
-                                      <td colSpan={5} className="px-2 py-0.5 text-[10px] text-primary">
-                                        已监视 {partSet.size}/{sym.elem_count} 个元素
-                                      </td>
-                                    </tr>
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-background z-10">
+                <tr className="text-[10px] text-muted-foreground border-b border-border">
+                  <th className="w-5 px-1 py-0.5 font-medium text-left"></th>
+                  <th className="px-1 py-0.5 font-medium text-left">Name</th>
+                  <th className="px-1 py-0.5 font-medium text-left w-20">Address</th>
+                  <th className="px-1 py-0.5 font-medium text-left w-16">Type</th>
+                  <th className="px-1 py-0.5 font-medium text-center w-10">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groupedSymbols.map(([file, syms]) => {
+                  const collapsed = collapsedGroups.has(file)
+                  return (
+                    <Fragment key={file}>
+                      {/* 文件分组行 */}
+                      <tr
+                        className="cursor-pointer hover:bg-muted/30 border-b border-border"
+                        onClick={() => toggleGroup(file)}
+                      >
+                        <td colSpan={5} className="px-1 py-1 text-[11px] font-medium">
+                          <div className="flex items-center gap-1">
+                            {collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+                            <span className="truncate" title={file}>{file.split(/[\\/]/).pop()}</span>
+                            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{syms.length}</span>
+                          </div>
+                        </td>
+                      </tr>
+                      {/* 组内符号 */}
+                      {!collapsed && syms.map((sym) => {
+                        const isSel = added.has(sym.name)
+                        const isExp = expandedArrays.has(sym.name)
+                        const partSet = addedElems[sym.name]
+                        const isChecked = checked.has(sym.name)
+                        return (
+                          <Fragment key={sym.name}>
+                            <tr
+                              className={cn('border-b border-border/30', isSel && 'bg-primary/5', !isSel && isChecked && 'bg-primary/3')}
+                            >
+                              <td className="w-5 px-1 py-0.5">
+                                <input
+                                  type="checkbox"
+                                  className="size-3 cursor-pointer"
+                                  checked={isSel || isChecked}
+                                  onChange={() => toggleSelect(sym)}
+                                  title={isSel ? '已添加到 Watch（点击移除）' : isChecked ? '已勾选（点击取消）' : '点击勾选待添加'}
+                                />
+                              </td>
+                              <td className="px-1 py-0.5">
+                                <div className="flex items-center gap-0.5">
+                                  {sym.is_array && sym.elem_count > 0 && (
+                                    <button
+                                      className="text-muted-foreground hover:text-foreground"
+                                      onClick={(e) => { e.stopPropagation(); toggleArrayExpand(sym.name) }}
+                                      title={isExp ? '收起元素' : '展开元素'}
+                                    >
+                                      {isExp ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+                                    </button>
                                   )}
-                                  {Array.from({ length: sym.elem_count }, (_, i) => {
-                                    const elemAddr = sym.address + i * sym.elem_size
-                                    const checked = isSel || (partSet?.has(i) ?? false)
-                                    return (
-                                      <tr
-                                        key={`${sym.name}[${i}]`}
-                                        className={cn('bg-muted/10', checked && 'bg-primary/5')}
-                                      >
-                                        <td className="w-5 px-1 py-0.5">
-                                          <input
-                                            type="checkbox"
-                                            className="size-3 cursor-pointer"
-                                            checked={checked}
-                                            onChange={() => toggleElem(sym, i)}
-                                            disabled={isSel}
-                                            title={checked ? '已添加到监视（点击移除）' : '点击勾选待添加'}
-                                          />
-                                        </td>
-                                        <td className="px-1 py-0.5 pl-4 font-mono text-[10px]">
-                                          {sym.name}[{i}]
-                                        </td>
-                                        <td className="px-1 py-0.5 font-mono text-[10px] w-20">
-                                          0x{elemAddr.toString(16).toUpperCase().padStart(8, '0')}
-                                        </td>
-                                        <td className="px-1 py-0.5 font-mono text-[10px] w-16">{sym.elem_type}</td>
-                                        <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.elem_size}</td>
-                                      </tr>
-                                    )
-                                  })}
-                                </>
-                              )}
-                            </Fragment>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              )
-            })}
+                                  <span className="truncate" title={sym.name}>
+                                    {sym.name}
+                                    {sym.is_array && <span className="text-muted-foreground">[{sym.elem_count}]</span>}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-1 py-0.5 font-mono text-[10px] w-20">
+                                0x{sym.address.toString(16).toUpperCase().padStart(8, '0')}
+                              </td>
+                              <td className="px-1 py-0.5 font-mono text-[10px] w-16">
+                                {sym.is_array ? `${sym.elem_type}[${sym.elem_count}]` : sym.type}
+                              </td>
+                              <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.size}</td>
+                            </tr>
+                            {/* 数组元素二级列表（展开） */}
+                            {sym.is_array && isExp && (
+                              <>
+                                {partSet && partSet.size > 0 && !isSel && (
+                                  <tr className="bg-primary/5">
+                                    <td colSpan={5} className="px-2 py-0.5 text-[10px] text-primary">
+                                      已监视 {partSet.size}/{sym.elem_count} 个元素
+                                    </td>
+                                  </tr>
+                                )}
+                                {Array.from({ length: sym.elem_count }, (_, i) => {
+                                  const elemAddr = sym.address + i * sym.elem_size
+                                  const checked = isSel || (partSet?.has(i) ?? false)
+                                  return (
+                                    <tr
+                                      key={`${sym.name}[${i}]`}
+                                      className={cn('bg-muted/10', checked && 'bg-primary/5')}
+                                    >
+                                      <td className="w-5 px-1 py-0.5">
+                                        <input
+                                          type="checkbox"
+                                          className="size-3 cursor-pointer"
+                                          checked={checked}
+                                          onChange={() => toggleElem(sym, i)}
+                                          disabled={isSel}
+                                          title={checked ? '已添加到 Watch（点击移除）' : '点击勾选待添加'}
+                                        />
+                                      </td>
+                                      <td className="px-1 py-0.5 pl-4 font-mono text-[10px]">
+                                        {sym.name}[{i}]
+                                      </td>
+                                      <td className="px-1 py-0.5 font-mono text-[10px] w-20">
+                                        0x{elemAddr.toString(16).toUpperCase().padStart(8, '0')}
+                                      </td>
+                                      <td className="px-1 py-0.5 font-mono text-[10px] w-16">{sym.elem_type}</td>
+                                      <td className="px-1 py-0.5 font-mono text-[10px] text-center w-10">{sym.elem_size}</td>
+                                    </tr>
+                                  )
+                                })}
+                              </>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
             {groupedSymbols.length === 0 && (
               <div className="px-2 py-4 text-center text-muted-foreground text-[11px]">
                 {filter ? '无匹配符号' : '无符号'}
@@ -800,6 +880,7 @@ export function ChannelPanel({ uid, isConnected, onToggleSampling }: Props) {
           </div>
         </div>
       )}
+      </div>
 
       {/* 自定义变量弹窗 */}
       <Dialog open={showManualDialog} onOpenChange={setShowManualDialog}>

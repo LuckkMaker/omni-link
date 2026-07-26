@@ -349,12 +349,18 @@ def _parse_pdsc_device(elem, vendor: str, parent_processor=None,
     flash_base = "0x00000000"
     ram_base = "0x20000000"
     flash_regions = []
+    # 收集所有 RAM 区域（一个设备可能有多个 RAM，如 SRAM1 + CCM）
+    ram_regions = []
+    # 默认 RAM（PDSC default="1"），用于回填 ram_base/ram_size
+    default_ram_start = None
+    default_ram_size_bytes = 0
 
     for mem in elem.findall('memory'):
         mem_name = (mem.get('name') or '').upper()
         mem_id = (mem.get('id') or '').upper()
         start_str = mem.get('start', '0x00000000')
         size_str = mem.get('size', '0x0')
+        is_default = mem.get('default', '0') == '1'
 
         try:
             start = int(start_str, 16) if start_str.startswith('0x') else int(start_str)
@@ -380,8 +386,27 @@ def _parse_pdsc_device(elem, vendor: str, parent_processor=None,
                 "is_boot_memory": True,
             })
         elif is_ram:
-            ram_size = size // 1024
-            ram_base = f"0x{start:08X}"
+            ram_regions.append({
+                "start": f"0x{start:08X}",
+                "length": f"0x{size:X}",
+                "is_default": is_default,
+            })
+            # 记录默认 RAM（PDSC default="1"）；若无 default 标记则取第一个
+            if is_default:
+                default_ram_start = start
+                default_ram_size_bytes = size
+            elif default_ram_start is None:
+                default_ram_start = start
+                default_ram_size_bytes = size
+
+    # 回填主 RAM 信息（保持 ram_base_address/ram_size 字段向后兼容）
+    if default_ram_start is not None:
+        ram_base = f"0x{default_ram_start:08X}"
+        ram_size = default_ram_size_bytes // 1024
+
+    # 若没有任何 RAM 区域被标记 default，将第一个标为默认
+    if ram_regions and not any(r["is_default"] for r in ram_regions):
+        ram_regions[0]["is_default"] = True
 
     # 解析内核信息：优先 device 自身的 <processor>，回退 parent_processor
     # 注意：device 级别的 <processor> 可能只包含部分属性（如 Dfpu/Dmpu），
@@ -422,6 +447,7 @@ def _parse_pdsc_device(elem, vendor: str, parent_processor=None,
         "ram_base_address": ram_base,
         "device_id_address": "0xE0042000",
         "flash_regions": flash_regions,
+        "ram_regions": ram_regions,
     }
 
 

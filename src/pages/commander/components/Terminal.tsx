@@ -437,7 +437,6 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
     })
 
     // 欢迎信息
-    term.write(`${COLOR.bold}${COLOR.cyan}OMNI Work Commander${COLOR.reset}\r\n`)
     term.write(
       `${COLOR.dim}Type 'help' for commands, Tab to complete, Ctrl+R to search history${COLOR.reset}\r\n`
     )

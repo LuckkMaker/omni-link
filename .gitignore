@@ -1,36 +1,108 @@
+# ── Node.js ──────────────────────────────
 node_modules/
 out/
 dist/
+
+# ── TypeScript ───────────────────────────
+*.tsbuildinfo
+.tsbuildinfo
+
+# ── Python ───────────────────────────────
 .venv/
+venv/
+env/
 __pycache__/
 *.pyc
-.env
-*.log
-*.pack
+*.pyo
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# ── 构建产物 ─────────────────────────────
 release/
 python/build/
+python/dist/
+build/
 
-# SQLite WAL 临时文件
+# ── Electron 打包产物 ────────────────────
+*.app
+*.dmg
+*.exe
+*.AppImage
+*.snap
+*.deb
+*.rpm
+
+# ── PyInstaller 临时文件 ─────────────────
+*.spec.bak
+
+# ── 运行时数据（用户生成，不纳入版本控制）──
+# devices.xml 是种子数据，需要追踪
+python/data/devices.db
 python/data/devices.db-wal
 python/data/devices.db-shm
+python/data/packs/installed_packs.json
 
-# macOS 系统文件
-.DS_Store
+# ── CMSIS-Pack 文件 ──────────────────────
+*.pack
 
-# Windows 系统文件
-Thumbs.db
-Desktop.ini
+# ── 环境配置 ─────────────────────────────
+.env
+.env.*
+!.env.example
 
-# electron-vite 临时构建配置文件
+# ── 日志 ─────────────────────────────────
+*.log
+logs/
+
+# ── 临时/备份文件 ────────────────────────
+*.tmp
+*.bak
+*~
+*.orig
+
+# ── 缓存 ─────────────────────────────────
+.cache/
+.eslintcache
+.parcel-cache/
+.vite/
+
+# ── electron-vite 临时构建配置 ───────────
 electron.vite.config.*.mjs
 
-# PyInstaller 产物
-python/dist/
-
-# IDE 文件
+# ── IDE ──────────────────────────────────
 .idea/
 .vscode/
 *.swp
 *.swo
+*.iml
+*.code-workspace
 
-# 打包产物已在 release/ 中，确保覆盖
+# ── macOS ────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Windows ──────────────────────────────
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+
+# ── Linux ────────────────────────────────
+*~
+.fuse_hidden000
+.directory
+.Trash-*
+.nfs*
+
+# ── 调试 / Profile ───────────────────────
+*.prof
+*.profraw

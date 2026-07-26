@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="LuckkMaker" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>Commander - OMNI Work</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="../../css/extra.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Commander";
+        var mkdocs_page_input_path = "guide\\commander.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/yaml.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/c.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/cpp.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../..">
+          <img src="../../assets/images/logo.png" class="logo" alt="Logo"/>
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">首页</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../getting-started/">快速开始</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">用户指南</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../flash/">Flash</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Commander</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">界面布局</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">连接</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">常用命令</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#_4">复位与运行控制</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_5">内存读写</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_6">寄存器与反汇编</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_7">快捷命令面板</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_8">一键工作流</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#source">source 命令</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../rtt-viewer/">RTT_Viewer</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../monitor/">Monitor</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../contributing/">贡献指南</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">OMNI Work</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">用户指南</li>
+      <li class="breadcrumb-item active">Commander</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LuckkMaker/omni-work/edit/master/docs/guide/commander.md">Edit on omni-work</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="commander">Commander<a class="headerlink" href="#commander" title="Permanent link">&para;</a></h1>
+<p>Commander 页面提供交互式命令行，复用 pyOCD Commander REPL，对标 SEGGER J-Link Commander。</p>
+<p><img alt="Commander 命令行" src="../../assets/images/commander_page.png" /></p>
+<h2 id="_1">界面布局<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<p>中央终端区域为 xterm.js 渲染的交互式 REPL，执行 <code>halt</code>、<code>load</code>、<code>reset</code>、<code>step</code> 等命令后自动输出反汇编结果，指令行附带源文件名与行号标注（如 <code>system_stm32f4xx.c:168</code>），并在右侧注释中显示对应的 C 代码片段。右侧命令面板将 halt/step/where/reset 等命令归类为快捷按钮，路径切换区可快速加载 ELF 文件，「常用流程」区将调试、断点调试、解锁刷写三套多步操作链封装为可单击的工作流。</p>
+<h2 id="_2">连接<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<p>Commander 复用顶部设备切换器选择的探针与目标。进入 Commander 页面后，终端自动连接并显示目标状态。若探针未连接，终端提示等待连接。</p>
+<p>Commander 采用 keep-alive 机制，切走页面时使用 <code>display:none</code> 保留 xterm 实例与会话状态，切回时无需重新连接。</p>
+<h2 id="_3">常用命令<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<p>完整命令列表见 <a href="../../reference/command/">Command reference</a>。</p>
+<h3 id="_4">复位与运行控制<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>reset</code></td>
+<td>复位目标</td>
+</tr>
+<tr>
+<td><code>halt</code></td>
+<td>暂停目标</td>
+</tr>
+<tr>
+<td><code>continue</code></td>
+<td>继续运行</td>
+</tr>
+<tr>
+<td><code>step</code></td>
+<td>单步执行一条指令</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_5">内存读写<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>read32 ADDR [COUNT]</code></td>
+<td>读取 32 位内存</td>
+</tr>
+<tr>
+<td><code>write32 ADDR DATA...</code></td>
+<td>写入 32 位内存</td>
+</tr>
+<tr>
+<td><code>load FILE</code></td>
+<td>烧录固件文件</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_6">寄存器与反汇编<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>reg</code></td>
+<td>读取所有核心寄存器</td>
+</tr>
+<tr>
+<td><code>reg NAME</code></td>
+<td>读取指定寄存器</td>
+</tr>
+<tr>
+<td><code>disasm ADDR [COUNT]</code></td>
+<td>反汇编指定地址</td>
+</tr>
+<tr>
+<td><code>where</code></td>
+<td>显示当前 PC 位置与源码</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_7">快捷命令面板<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
+<p>右侧命令面板提供常用命令的快捷按钮，无需手动输入：</p>
+<ul>
+<li><strong>halt / step / continue / reset</strong> — 运行控制</li>
+<li><strong>where</strong> — 查看当前执行位置</li>
+<li><strong>disasm</strong> — 反汇编当前 PC 附近代码</li>
+</ul>
+<h2 id="_8">一键工作流<a class="headerlink" href="#_8" title="Permanent link">&para;</a></h2>
+<p>「常用流程」区将多步操作链封装为单击工作流：</p>
+<ul>
+<li><strong>调试</strong> — halt → 加载 ELF → reset → halt，准备好调试环境</li>
+<li><strong>断点调试</strong> — halt → 加载 ELF → 设置断点 → reset → halt → continue，运行到断点处暂停</li>
+<li><strong>解锁刷写</strong> — 解锁安全区域 → 擦除 → 烧录，适用于带读保护的芯片</li>
+</ul>
+<h2 id="source">source 命令<a class="headerlink" href="#source" title="Permanent link">&para;</a></h2>
+<p><code>source</code> 命令参考 GDB 的 <code>directory</code>/<code>substitute-path</code> 设计，解决跨机器源码路径映射问题。当 ELF 文件中记录的源码路径（如编译机的 <code>/home/user/project/src/main.c</code>）与当前机器上的实际路径不一致时，可通过 <code>source</code> 配置替换规则：</p>
+<pre class="highlight"><code>source add /home/user/project/src D:/myproject/src
+source list
+source remove 0</code></pre>
+<p>配置后，<code>where</code> 和 <code>disasm</code> 命令显示的反汇编结果会附带正确的源码路径与代码片段。</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../flash/" class="btn btn-neutral float-left" title="Flash"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../rtt-viewer/" class="btn btn-neutral float-right" title="RTT_Viewer">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LuckkMaker/omni-work" class="fa fa-code-fork" style="color: #fcfcfc"> omni-work</a>
+        </span>
+    
+    
+      <span><a href="../flash/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../rtt-viewer/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

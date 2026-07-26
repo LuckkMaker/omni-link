@@ -163,6 +163,9 @@ export function StatusBar() {
 
   // Monitor 统计信息（运行时显示）
   const monRunning = useMonitorStore((s) => s.running)
+  const monPaused = useMonitorStore((s) => s.paused)
+  const monFollow = useMonitorStore((s) => s.follow)
+  const monCoreState = useMonitorStore((s) => s.coreState)
   const monRateHz = useMonitorStore((s) => s.rateHz)
   const monActualRateHz = useMonitorStore((s) => s.actualRateHz)
   const monVarCount = useMonitorStore((s) => s.variables.length)
@@ -267,9 +270,24 @@ export function StatusBar() {
           <>
             <div className="w-px h-3 bg-white/20" />
             <div className="flex items-center gap-1 px-2" title="Monitor 采样运行中">
-              <Activity className="size-3 text-green-400 animate-pulse" />
+              <Activity className={cn('size-3 text-green-400', !monPaused && 'animate-pulse')} />
               <span className="text-white/80">Monitor</span>
             </div>
+            {monPaused && (
+              <div className="flex items-center gap-1 px-2" title="采样已暂停">
+                <span className="text-amber-300 text-[10px]">已暂停</span>
+              </div>
+            )}
+            {monFollow && !monPaused && (
+              <div className="flex items-center gap-1 px-2" title="Follow 模式：X 轴自动跟随最新数据">
+                <span className="text-blue-300 text-[10px]">Follow</span>
+              </div>
+            )}
+            {monCoreState === 'halted' && (
+              <div className="flex items-center gap-1 px-2" title="目标内核已暂停">
+                <span className="text-amber-300 text-[10px]">内核暂停</span>
+              </div>
+            )}
             <div className="flex items-center gap-1 px-2" title={`采样模式：${monTransport === 'rtt' ? 'RTT 同步' : 'HSS 异步'}`}>
               <span className="text-white/60 text-[10px]">{monTransport === 'rtt' ? 'RTT' : 'HSS'}</span>
             </div>

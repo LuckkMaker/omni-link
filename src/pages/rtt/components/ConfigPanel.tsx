@@ -2,8 +2,6 @@ import { useCallback, useState } from 'react'
 import { Eraser, Trash2, Download, Keyboard, MessageSquare, FileDown, ListChecks, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Separator } from '@/components/ui/separator'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   Select,
@@ -204,12 +202,13 @@ export function ConfigPanel({ uid, terminalRef, onOpenMultiString }: ConfigPanel
   const dataSize = activeTab?.bufferSize ?? 0
 
   return (
-    <div className="flex flex-col gap-2.5 p-2.5 overflow-y-auto text-xs">
+    <div className="flex flex-col overflow-y-auto text-xs">
       {/* ① 接收配置 */}
-      <section className="space-y-1">
-        <Label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-          接收配置
-        </Label>
+      <div className="border-b border-border last:border-b-0">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">接收配置</span>
+        </div>
+        <div className="space-y-1 p-2 pt-0">
 
         {/* 输入模式切换（segmented） */}
         <div className="flex items-center rounded-md border border-border p-0.5">
@@ -275,15 +274,15 @@ export function ConfigPanel({ uid, terminalRef, onOpenMultiString }: ConfigPanel
           <FileDown className="mr-1 h-3 w-3" />
           {recordToFile ? '停止接收' : '接收数据到文件'}
         </Button>
-      </section>
-
-      <Separator />
+        </div>
+      </div>
 
       {/* ② 发送配置 */}
-      <section className="space-y-1">
-        <Label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-          发送配置
-        </Label>
+      <div className="border-b border-border last:border-b-0">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">发送配置</span>
+        </div>
+        <div className="space-y-1 p-2 pt-0">
 
         {/* HEX 发送 + 回车换行：两个独立 CheckRow 并列保持视觉一致 */}
         <div className="grid grid-cols-2 gap-x-2">
@@ -395,7 +394,8 @@ export function ConfigPanel({ uid, terminalRef, onOpenMultiString }: ConfigPanel
           <ListChecks className="mr-1.5 h-3 w-3" />
           多字符串
         </Button>
-      </section>
+        </div>
+      </div>
 
       <SaveFormatDialog open={showSaveDialog} onOpenChange={setShowSaveDialog} onConfirm={handleSave} dataSize={dataSize} />
     </div>

@@ -13,6 +13,7 @@
 
 import time
 import struct
+import array
 import threading
 import logging
 from typing import Optional
@@ -36,7 +37,8 @@ TYPE_MAP = {
 }
 
 # 批量读合并阈值：相邻变量地址间隔 <= 此值时合并为一次 USB 事务（字节）
-MERGE_GAP = 4
+# 16 字节：合并更多变量组为单次读取，减少 USB 往返（高频采样下每往返 ~1-2ms）
+MERGE_GAP = 16
 # 高频推送批量阈值：当待推送样本数达到此值时打包一次 WS 推送
 PUSH_BATCH = 8
 # 错误退避上限
@@ -136,10 +138,16 @@ class MonitorBackend:
         self._elf_paths: dict[str, str] = {}
         # uid -> 采样起点（monotonic）
         self._start_time: dict[str, float] = {}
+        # uid -> 暂停起始时间（monotonic），用于恢复时消除时间间隙
+        self._pause_start: dict[str, float] = {}
         # uid -> 传输模式（"swd" 轮询 / "rtt" 同步）
         self._transport: dict[str, str] = {}
         # uid -> RTT 模式下的 RTTControlBlock（直接持有，避免与 rtt_backend 的 poll loop 争抢）
         self._rtt_cbs: dict[str, object] = {}
+        # uid -> 缓存的变量分组（排序+合并后的结构，避免每帧重复排序）
+        self._vars_cache: dict[str, tuple] = {}
+        # uid -> 变量列表版本号（add/remove 时递增，用于缓存失效）
+        self._vars_version: dict[str, int] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
 
@@ -236,19 +244,30 @@ class MonitorBackend:
         return {"success": True}
 
     def _stop_internal(self, uid: str):
-        """内部停止（不加锁，调用方持有全局锁）"""
-        running = self._running.pop(uid, None)
-        thread = self._threads.pop(uid, None)
+        """内部停止（不加锁，调用方持有全局锁）
+
+        关键：先通知线程退出并等待其结束，再清理共享字典。
+        若先 pop 字典再 clear running，采样线程可能在 _start_time 被 pop 后
+        仍读取到默认值 t0，产生 t_ms=0 的异常样本，导致波形横向回到起点。
+        """
+        # 1) 先通知采样线程退出
+        running = self._running.get(uid)
+        if running:
+            running.clear()
+        # 2) 等待线程退出（此时线程仍能读到正确的 _start_time 等共享状态）
+        thread = self._threads.get(uid)
+        if thread:
+            thread.join(timeout=2)
+        # 3) 线程已退出，安全清理所有共享字典
+        self._running.pop(uid, None)
+        self._threads.pop(uid, None)
         self._paused.pop(uid, None)
         self._locks.pop(uid, None)
         self._rate_hz.pop(uid, None)
         self._start_time.pop(uid, None)
+        self._pause_start.pop(uid, None)
         self._transport.pop(uid, None)
         # 保留 ring_buffer 供回看，直到下次 start 或探针断开
-        if running:
-            running.clear()
-        if thread:
-            thread.join(timeout=2)
         # RTT 模式：线程退出后兜底清理控制块（正常退出时线程已在 finally 清理）
         cb = self._rtt_cbs.pop(uid, None)
         if cb is not None:
@@ -262,18 +281,37 @@ class MonitorBackend:
         """暂停采样（Flash/Commander 操作前调用）
 
         采样线程保持运行但跳过实际读取，保留会话状态。
+        记录暂停起始时间，供 resume() 消除时间间隙。
         """
         paused = self._paused.get(uid)
         if paused and paused.is_set():
             paused.clear()
+            self._pause_start[uid] = time.monotonic()
             event_manager.emit("monitor.info", {
                 "uid": uid, "paused": True, "reason": "flash/commander 操作",
             })
 
     def resume(self, uid: str):
-        """恢复采样"""
+        """恢复采样
+
+        调整 _start_time 以消除暂停期间的时间间隙，使恢复后采样时间戳
+        连续递进（对标 JScope：暂停不推进时间轴）。
+
+        关键：必须先更新 start_time，再解除暂停标志。
+        若先 paused.set() 再更新 start_time，采样线程可能在 start_time
+        更新前读取旧值，产生包含暂停时长的时间戳，导致时间间隙和值畸变。
+        """
         paused = self._paused.get(uid)
         if paused and not paused.is_set():
+            # 1) 先调整 start_time，消除暂停期间的时间间隙
+            #    这样恢复后的 t_ms = (now - start_time) * 1000 不包含暂停时长
+            pause_start = self._pause_start.pop(uid, None)
+            if pause_start is not None:
+                pause_duration = time.monotonic() - pause_start
+                start_time = self._start_time.get(uid)
+                if start_time is not None:
+                    self._start_time[uid] = start_time + pause_duration
+            # 2) 再解除暂停标志，此时 start_time 已更新，采样线程读到的是正确值
             paused.set()
             event_manager.emit("monitor.info", {"uid": uid, "paused": False})
 
@@ -308,6 +346,75 @@ class MonitorBackend:
         paused = self._paused.get(uid)
         return paused is not None and not paused.is_set()
 
+    # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
+    # 直接操作 session.target，不暂停采样线程。
+    # Run/Halt/Reset 是毫秒级操作，采样线程的 SWD 读取有错误恢复机制，
+    # 短暂冲突由采样线程的 consecutive_errors 退避处理。
+
+    def run_target(self, uid: str) -> dict:
+        """运行目标内核（resume）"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.resume()
+            event_manager.log("info", f"Monitor: 目标内核已运行 (run)")
+            return {"success": True, "state": "running"}
+        except Exception as e:
+            event_manager.log("warning", f"Monitor: run 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def halt_target(self, uid: str) -> dict:
+        """暂停目标内核（halt）"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.halt()
+            event_manager.log("info", f"Monitor: 目标内核已暂停 (halt)")
+            return {"success": True, "state": "halted"}
+        except Exception as e:
+            event_manager.log("warning", f"Monitor: halt 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def reset_target(self, uid: str, run: bool = True) -> dict:
+        """复位目标芯片
+
+        Args:
+            run: True=复位后运行，False=复位后保持 halt
+        """
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.reset(reset_type=None)
+            if run:
+                session.target.resume()
+            event_manager.log("info",
+                              f"Monitor: 目标已复位 (reset, run={run})")
+            state = "running" if run else "halted"
+            return {"success": True, "state": state}
+        except Exception as e:
+            event_manager.log("warning", f"Monitor: reset 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_core_state(self, uid: str) -> dict:
+        """查询目标内核状态"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接", "state": "unknown"}
+        try:
+            from pyocd.core.target import Target
+            state = session.target.get_state()
+            if state == Target.State.RUNNING:
+                return {"success": True, "state": "running"}
+            elif state == Target.State.HALTED:
+                return {"success": True, "state": "halted"}
+            else:
+                return {"success": True, "state": str(state).lower()}
+        except Exception as e:
+            return {"success": False, "error": str(e), "state": "unknown"}
+
     # ── 采样循环 ──────────────────────────────────────────────
 
     def _sample_loop(self, uid: str):
@@ -319,6 +426,7 @@ class MonitorBackend:
         interval = 1.0 / rate if rate > 0 else 0.01
         consecutive_errors = 0
         pending_samples: list = []  # 批量推送缓冲
+        last_t_ms = 0.0  # 上一个采样点时间戳，确保严格单调递增（uPlot 要求）
 
         while True:
             running = self._running.get(uid)
@@ -349,6 +457,11 @@ class MonitorBackend:
                 if values:
                     start_t = self._start_time.get(uid, t0)
                     t_ms = (t0 - start_t) * 1000.0
+                    # 确保时间戳严格单调递增（uPlot 要求）
+                    # 防止暂停/恢复时序不精确导致时间戳回退
+                    if t_ms <= last_t_ms:
+                        t_ms = last_t_ms + 0.001  # 向前推进 1μs
+                    last_t_ms = t_ms
                     sample = {"t_ms": t_ms, "values": values}
                     pending_samples.append(sample)
 
@@ -364,9 +477,13 @@ class MonitorBackend:
                         self._sample_counter_time[uid] = now
 
                     # 写入 RingBuffer
+                    # 注意：RingBuffer 定义了 __len__，空缓冲区时 bool(rb) 为 False，
+                    # 故用 is not None 判定，避免首条样本因缓冲区为空被丢弃。
+                    # values 是 list[{"id":..., "value":...}]，需转为 {id: value} 映射，
+                    # 不能用 dict(values)（会把 list-of-dict 错误转为 {'id':'value'}）。
                     rb = self._ring_buffers.get(uid)
-                    if rb:
-                        rb.push(t_ms, dict(values))
+                    if rb is not None:
+                        rb.push(t_ms, {item["id"]: item["value"] for item in values})
 
                     # 批量推送，降低 WS 消息数
                     if len(pending_samples) >= PUSH_BATCH:
@@ -397,8 +514,11 @@ class MonitorBackend:
     def _read_variables(self, uid: str) -> list:
         """批量读取所有变量
 
-        按地址排序后合并邻近变量为批量 read_memory_block8，减少 SWD 事务。
-        关键：直接用 session.target.read_memory_block8，绝不 halt。
+        按地址排序后合并邻近变量为批量读取，减少 SWD 事务。
+        优化：
+        - 缓存排序+分组结果，变量列表未变更时复用（避免每帧重复排序）
+        - 4字节对齐时用 read_memory_block32（比 block8 快 2-3 倍）
+        关键：直接用 session.target.read_memory_block8/block32，绝不 halt。
         """
         variables = self._variables.get(uid, [])
         if not variables:
@@ -409,27 +529,31 @@ class MonitorBackend:
             return []
         target = session.target
 
-        # 按地址排序
-        sorted_vars = sorted(variables, key=lambda v: v.address)
+        # 检查缓存：变量列表未变更时复用已排序+分组的结构
+        current_version = self._vars_version.get(uid, 0)
+        cached = self._vars_cache.get(uid)
+        if cached is None or cached[0] != current_version:
+            sorted_vars = sorted(variables, key=lambda v: v.address)
+            groups = self._build_read_groups(sorted_vars)
+            self._vars_cache[uid] = (current_version, groups)
+        else:
+            groups = cached[1]
+
         results: list = []
-        i = 0
-        n = len(sorted_vars)
-
-        while i < n:
-            # 合并邻近变量为一组（gap <= MERGE_GAP 字节）
-            j = i
-            group_end = sorted_vars[i].address + sorted_vars[i].size
-            while j + 1 < n and sorted_vars[j + 1].address - group_end <= MERGE_GAP:
-                j += 1
-                group_end = max(group_end, sorted_vars[j].address + sorted_vars[j].size)
-
-            # 4 字节对齐起止，便于 block32 读取（这里用 block8 兼容非对齐变量）
-            start_addr = sorted_vars[i].address
-            length = group_end - start_addr
+        for group in groups:
+            start_addr = group['start']
+            length = group['length']
+            group_vars = group['vars']
 
             try:
-                raw = bytes(target.read_memory_block8(start_addr, length))
-                for v in sorted_vars[i:j + 1]:
+                # 4字节对齐时用 block32（比 block8 快 2-3 倍），否则回退 block8
+                if start_addr % 4 == 0 and length % 4 == 0:
+                    words = target.read_memory_block32(start_addr, length // 4)
+                    raw = array.array('I', words).tobytes()
+                else:
+                    raw = bytes(target.read_memory_block8(start_addr, length))
+
+                for v in group_vars:
                     offset = v.address - start_addr
                     val_bytes = raw[offset:offset + v.size]
                     if len(val_bytes) < v.size:
@@ -440,9 +564,31 @@ class MonitorBackend:
                 logger.debug(f"Monitor read failed @0x{start_addr:08X}: {e}")
                 raise
 
-            i = j + 1
-
         return results
+
+    @staticmethod
+    def _build_read_groups(sorted_vars: list) -> list:
+        """将已排序的变量合并为读取组，返回 [{start, length, vars}, ...]"""
+        groups = []
+        i = 0
+        n = len(sorted_vars)
+        while i < n:
+            # 合并邻近变量为一组（gap <= MERGE_GAP 字节）
+            j = i
+            group_end = sorted_vars[i].address + sorted_vars[i].size
+            while j + 1 < n and sorted_vars[j + 1].address - group_end <= MERGE_GAP:
+                j += 1
+                group_end = max(group_end, sorted_vars[j].address + sorted_vars[j].size)
+
+            start_addr = sorted_vars[i].address
+            length = group_end - start_addr
+            groups.append({
+                'start': start_addr,
+                'length': length,
+                'vars': sorted_vars[i:j + 1],
+            })
+            i = j + 1
+        return groups
 
     def _decode(self, raw: bytes, var_type: str):
         """按数据类型解码原始字节（小端）"""
@@ -708,6 +854,7 @@ class MonitorBackend:
 
         with self._global_lock:
             self._variables.setdefault(uid, []).append(var)
+            self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
 
         return {"success": True, "variable": self._var_to_dict(var)}
 
@@ -717,6 +864,8 @@ class MonitorBackend:
             before = len(vars_list)
             self._variables[uid] = [v for v in vars_list if v.id != var_id]
             removed = before - len(self._variables[uid])
+            if removed:
+                self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
         return {"success": removed > 0}
 
     def get_variables(self, uid: str) -> list:

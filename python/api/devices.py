@@ -24,6 +24,13 @@ class FlashRegionCreate(BaseModel):
     is_boot_memory: bool = False
 
 
+class RamRegionCreate(BaseModel):
+    """RAM 区域（一个设备可能有多个 RAM region，如 SRAM + CCM）"""
+    start: str
+    length: str
+    is_default: bool = False
+
+
 class DeviceCreate(BaseModel):
     part_number: str
     vendor: str
@@ -35,6 +42,7 @@ class DeviceCreate(BaseModel):
     flash_base_address: str
     ram_base_address: str
     flash_regions: list[FlashRegionCreate] = Field(default_factory=list)
+    ram_regions: list[RamRegionCreate] = Field(default_factory=list)
 
 
 class CustomDeviceCreate(BaseModel):
@@ -48,6 +56,7 @@ class CustomDeviceCreate(BaseModel):
     ram_size: int  # KB
     vendor: str = "Custom"
     display_name: str = ""
+    ram_regions: list[RamRegionCreate] = Field(default_factory=list)
 
 
 # ── 辅助函数 ─────────────────────────────
@@ -148,6 +157,7 @@ async def create_custom_device(req: CustomDeviceCreate):
             ram_size=req.ram_size,
             vendor=req.vendor,
             display_name=req.display_name,
+            ram_regions=[r.model_dump() for r in req.ram_regions] if req.ram_regions else None,
         )
         return _enrich_device(device)
     except Exception as e:

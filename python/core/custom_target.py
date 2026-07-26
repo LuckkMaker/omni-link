@@ -50,6 +50,7 @@ def create_custom_target(
     ram_size: int,
     vendor: str = "Custom",
     display_name: str = "",
+    ram_regions: Optional[list[dict]] = None,
 ) -> dict:
     """创建并注册 FLM 自定义芯片
 
@@ -68,6 +69,8 @@ def create_custom_target(
         ram_size: RAM 大小（KB）
         vendor: 厂商名（默认 "Custom"）
         display_name: 显示名（默认同 part_number）
+        ram_regions: 多 RAM 区域列表 [{"start": "0x...", "length": "0x...", "is_default": bool}]，
+                     若为 None 则由 ram_base_address/ram_size 合成单个默认区域
 
     Returns: 创建的设备信息 dict
     Raises: Exception on failure
@@ -82,8 +85,11 @@ def create_custom_target(
     # 解析 Flash 基地址和大小
     flash_start = int(flash_base_address, 16) if isinstance(flash_base_address, str) else flash_base_address
     flash_length = flash_size * 1024
-    ram_start = int(ram_base_address, 16) if isinstance(ram_base_address, str) else ram_base_address
-    ram_length = ram_size * 1024
+
+    # 规范化 RAM 区域列表
+    normalized_ram_regions = _normalize_ram_regions(
+        ram_regions, ram_base_address, ram_size
+    )
 
     # 动态创建 Target 类
     target_class = _build_custom_target_class(
@@ -93,8 +99,7 @@ def create_custom_target(
         flm_path=flm_path,
         flash_start=flash_start,
         flash_length=flash_length,
-        ram_start=ram_start,
-        ram_length=ram_length,
+        ram_regions=normalized_ram_regions,
     )
 
     # 注册到 TARGET 字典
@@ -123,6 +128,7 @@ def create_custom_target(
                 "is_boot_memory": True,
             }
         ],
+        "ram_regions": normalized_ram_regions,
     }
 
     # 存储 FLM 文件路径（供后续重新加载）
@@ -138,6 +144,40 @@ def create_custom_target(
     return device_info
 
 
+def _normalize_ram_regions(
+    ram_regions: Optional[list[dict]],
+    ram_base_address: str,
+    ram_size: int,
+) -> list[dict]:
+    """规范化 RAM 区域列表
+
+    若 ram_regions 非空，直接使用（确保每个区域有 start/length/is_default）；
+    否则由 ram_base_address + ram_size 合成单个默认区域。
+    保证至少有一个区域被标记为 is_default=True。
+    """
+    if ram_regions:
+        normalized = []
+        for r in ram_regions:
+            normalized.append({
+                "start": r["start"],
+                "length": r["length"],
+                "is_default": bool(r.get("is_default", False)),
+            })
+        # 保证至少一个 default
+        if not any(r["is_default"] for r in normalized):
+            normalized[0]["is_default"] = True
+        return normalized
+
+    # 合成单个默认区域
+    ram_start = int(ram_base_address, 16) if isinstance(ram_base_address, str) else ram_base_address
+    ram_length = ram_size * 1024
+    return [{
+        "start": f"0x{ram_start:08X}",
+        "length": f"0x{ram_length:X}",
+        "is_default": True,
+    }]
+
+
 def _build_custom_target_class(
     part_number: str,
     vendor: str,
@@ -145,12 +185,24 @@ def _build_custom_target_class(
     flm_path: str,
     flash_start: int,
     flash_length: int,
-    ram_start: int,
-    ram_length: int,
+    ram_regions: list[dict],
 ):
-    """动态构建 CoreSightTarget 子类"""
+    """动态构建 CoreSightTarget 子类
+
+    Args:
+        ram_regions: [{"start": "0x...", "length": "0x...", "is_default": bool}, ...]
+    """
 
     core_class = _get_core_class(core_name)
+
+    # 预解析 RAM 区域为 (start_int, length_int, is_default) 元组列表
+    parsed_ram_regions = []
+    for r in ram_regions:
+        start_val = r["start"]
+        length_val = r["length"]
+        start_int = int(start_val, 16) if isinstance(start_val, str) else start_val
+        length_int = int(length_val, 16) if isinstance(length_val, str) else length_val
+        parsed_ram_regions.append((start_int, length_int, r.get("is_default", False)))
 
     class CustomFlmTarget:
         """由 FLM 文件动态创建的自定义芯片 Target"""
@@ -161,8 +213,7 @@ def _build_custom_target_class(
         _flm_path = flm_path
         _flash_start = flash_start
         _flash_length = flash_length
-        _ram_start = ram_start
-        _ram_length = ram_length
+        _ram_regions = parsed_ram_regions
         _part_number = part_number
 
         def __init__(self, session):
@@ -197,13 +248,15 @@ def _build_custom_target_class(
             )
             regions.append(flash_region)
 
-            # 创建 RAM 区域
-            ram_region = mm.RamRegion(
-                name="ram",
-                start=self._ram_start,
-                length=self._ram_length,
-            )
-            regions.append(ram_region)
+            # 创建所有 RAM 区域
+            for idx, (r_start, r_length, is_default) in enumerate(self._ram_regions):
+                # 第一个 RAM 区域命名为 "ram"，其余按序号命名
+                r_name = "ram" if idx == 0 else f"ram{idx + 1}"
+                regions.append(mm.RamRegion(
+                    name=r_name,
+                    start=r_start,
+                    length=r_length,
+                ))
 
             return mm.MemoryMap(*regions)
 
@@ -252,8 +305,6 @@ def load_custom_targets() -> int:
         try:
             flash_base = dev.get("flash_base_address", "0x00000000")
             flash_size = dev.get("flash_size", 0)
-            ram_base = dev.get("ram_base_address", "0x20000000")
-            ram_size = dev.get("ram_size", 0)
 
             target_class = _build_custom_target_class(
                 part_number=dev["part_number"],
@@ -262,8 +313,11 @@ def load_custom_targets() -> int:
                 flm_path=flm_path,
                 flash_start=int(flash_base, 16),
                 flash_length=flash_size * 1024,
-                ram_start=int(ram_base, 16),
-                ram_length=ram_size * 1024,
+                ram_regions=_normalize_ram_regions(
+                    dev.get("ram_regions"),
+                    dev.get("ram_base_address", "0x20000000"),
+                    dev.get("ram_size", 0),
+                ),
             )
 
             from pyocd.target import TARGET

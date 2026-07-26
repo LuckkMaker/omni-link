@@ -37,6 +37,14 @@ class SectorInfo:
 
 
 @dataclass
+class RamRegionInfo:
+    """RAM 区域信息（一段连续的 RAM）"""
+    start: int
+    length: int
+    is_default: bool = False
+
+
+@dataclass
 class TargetInfo:
     part_number: str
     core: str
@@ -54,6 +62,8 @@ class TargetInfo:
     # 新增：RAM 信息
     ram_start: int = 0
     ram_size: int = 0
+    # 新增：完整的 RAM 区域列表（运行时从 pyOCD memory_map 提取）
+    ram_regions: list[RamRegionInfo] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """递归转换为可 JSON 序列化的字典"""

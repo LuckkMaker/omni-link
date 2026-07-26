@@ -39,6 +39,10 @@ class StartSamplingRequest(BaseModel):
     transport: str = "swd"             # swd | rtt
 
 
+class DeviceControlRequest(BaseModel):
+    run: bool = True                   # reset 后是否自动运行
+
+
 # ── 状态 ──────────────────────────────────────────────
 
 @router.get("/probes/{uid}/monitor/status")
@@ -126,6 +130,57 @@ def start_sampling(uid: str, req: StartSamplingRequest):
 def stop_sampling(uid: str):
     """停止采样"""
     return monitor_backend.stop(uid)
+
+
+@router.post("/probes/{uid}/monitor/pause")
+def pause_sampling(uid: str):
+    """暂停采样（采样线程保持运行但跳过读取，保留会话状态）"""
+    monitor_backend.pause(uid)
+    return {"success": True, "paused": True}
+
+
+@router.post("/probes/{uid}/monitor/resume")
+def resume_sampling(uid: str):
+    """恢复采样"""
+    monitor_backend.resume(uid)
+    return {"success": True, "paused": False}
+
+
+# ── 目标设备控制（Run/Halt/Reset）─────────────────────────
+# 直接操作 CPU 内核状态，不影响采样线程。
+# 采样运行时执行 Run/Halt/Reset，采样继续绘图（波形反映内核状态变化）。
+
+@router.post("/probes/{uid}/monitor/device/run")
+def device_run(uid: str):
+    """运行目标内核（resume）"""
+    result = monitor_backend.run_target(uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Run failed"))
+    return result
+
+
+@router.post("/probes/{uid}/monitor/device/halt")
+def device_halt(uid: str):
+    """暂停目标内核（halt）"""
+    result = monitor_backend.halt_target(uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Halt failed"))
+    return result
+
+
+@router.post("/probes/{uid}/monitor/device/reset")
+def device_reset(uid: str, req: DeviceControlRequest):
+    """复位目标芯片"""
+    result = monitor_backend.reset_target(uid, run=req.run)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Reset failed"))
+    return result
+
+
+@router.get("/probes/{uid}/monitor/device/state")
+def device_state(uid: str):
+    """查询目标内核状态（running/halted）"""
+    return monitor_backend.get_core_state(uid)
 
 
 # ── 录制导出 ──────────────────────────────────────────────

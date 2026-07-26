@@ -148,11 +148,7 @@ from .st import target_STM32F407xx
 # from . import target_Air32F103xx
 # from . import target_AMA3B1KK
 
-from .geehy import target_APM32F403xx
-from .geehy import target_APM32F407xx
-from .geehy import target_G32F031
-from .geehy import target_G32M3101
-from .geehy import target_G32F002
+# Geehy 芯片已改为通过 CMSIS-Pack DFP 导入，不再使用内置目标定义
 
 ## @brief Dictionary of all builtin targets.
 #
@@ -161,11 +157,6 @@ from .geehy import target_G32F002
 #   normalises user-provided target type names for comparison with these.
 BUILTIN_TARGETS = {
           'cortex_m': CoreSightTarget,
-          'apm32f403xb': target_APM32F403xx.APM32F403xB,
-          'apm32f407xg': target_APM32F407xx.APM32F407xG,
-          'g32f002x5' : target_G32F002.G32F002x5,
-          'g32f031x8' : target_G32F031.G32F031x8,
-          'g32m3101x8' : target_G32M3101.G32M3101x8,
           'stm32f103rc' : target_STM32F103RC.STM32F103RC,
           'stm32f407xg' : target_STM32F407xx.STM32F407xG,
           'stm32f429xg' : target_STM32F429xx.STM32F429xG,

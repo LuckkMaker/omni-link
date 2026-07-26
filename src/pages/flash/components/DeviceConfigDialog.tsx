@@ -8,13 +8,43 @@
  */
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import type { TargetInfo, DeviceInfo } from '@shared/types'
+import type { TargetInfo, DeviceInfo, RamRegionInfo } from '@shared/types'
+import { formatBytes } from '@/lib/device-utils'
 
 interface DeviceConfigDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   target: TargetInfo | null
   deviceInfo?: DeviceInfo
+}
+
+/** 规范化为运行时 RAM 区域列表（优先 target.ram_regions，否则 deviceInfo.ram_regions，最后合成单个） */
+function resolveRamRegions(
+  target: TargetInfo | null,
+  deviceInfo?: DeviceInfo
+): { start: number; length: number; is_default: boolean }[] {
+  // 运行时 ram_regions
+  if (target?.ram_regions && target.ram_regions.length > 0) {
+    return target.ram_regions.map((r: RamRegionInfo) => ({
+      start: r.start,
+      length: r.length,
+      is_default: r.is_default,
+    }))
+  }
+  // 静态 deviceInfo.ram_regions
+  if (deviceInfo?.ram_regions && deviceInfo.ram_regions.length > 0) {
+    return deviceInfo.ram_regions.map((r) => ({
+      start: parseInt(r.start, 16) || 0,
+      length: parseInt(r.length, 16) || 0,
+      is_default: r.is_default,
+    }))
+  }
+  // 回退：合成单个默认区域
+  const ramStart = target?.ram_start
+    ?? (deviceInfo?.ram_base_address ? parseInt(deviceInfo.ram_base_address, 16) : 0)
+  const ramBytes = target?.ram_size
+    ?? (deviceInfo ? deviceInfo.ram_size * 1024 : 0)
+  return [{ start: ramStart, length: ramBytes, is_default: true }]
 }
 
 export function DeviceConfigDialog({ open, onOpenChange, target, deviceInfo }: DeviceConfigDialogProps) {
@@ -32,9 +62,8 @@ export function DeviceConfigDialog({ open, onOpenChange, target, deviceInfo }: D
   const deviceId = target?.device_id ?? ''
   const revisionId = target?.revision_id ?? ''
 
-  // RAM 信息：基地址优先从 device_info.json 获取
-  const ramBaseAddress = deviceInfo?.ram_base_address ?? (target?.ram_start ? `0x${target.ram_start.toString(16).toUpperCase().padStart(8, '0')}` : '-')
-  const ramSizeBytes = target?.ram_size ?? (deviceInfo ? deviceInfo.ram_size * 1024 : 0)
+  const ramRegions = resolveRamRegions(target, deviceInfo)
+  const ramTotalBytes = ramRegions.reduce((s, r) => s + r.length, 0)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -60,8 +89,28 @@ export function DeviceConfigDialog({ open, onOpenChange, target, deviceInfo }: D
 
           {/* 目标 RAM */}
           <Section title="目标 RAM">
-            <Row label="基地址" value={ramBaseAddress} mono />
-            <Row label="大小" value={ramSizeBytes ? formatSize(ramSizeBytes) : '-'} />
+            {ramRegions.length > 1 && (
+              <Row label="总计" value={ramTotalBytes ? formatBytes(ramTotalBytes) : '-'} />
+            )}
+            {ramRegions.map((r, i) => {
+              const addr = `0x${r.start.toString(16).toUpperCase().padStart(8, '0')}`
+              const label = ramRegions.length > 1
+                ? `RAM${i + 1}${r.is_default ? ' (默认)' : ''}`
+                : '基地址'
+              return (
+                <div key={i}>
+                  {ramRegions.length > 1 && (
+                    <Row label={label} value={`${addr} · ${formatBytes(r.length)}`} mono />
+                  )}
+                  {ramRegions.length === 1 && (
+                    <>
+                      <Row label="基地址" value={addr} mono />
+                      <Row label="大小" value={r.length ? formatBytes(r.length) : '-'} />
+                    </>
+                  )}
+                </div>
+              )
+            })}
           </Section>
 
           {!target && !deviceInfo && (
@@ -97,10 +146,4 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
       <span className={mono ? 'font-mono' : ''}>{value}</span>
     </div>
   )
-}
-
-function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${bytes} B`
 }

@@ -1,9 +1,21 @@
 import { useState } from 'react'
-import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff } from 'lucide-react'
+import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff, MoreVertical } from 'lucide-react'
 import { useMonitorStore, type ArrayGroup } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
-import { monitorService } from '@/services/monitor.service'
+import { monitorService, type SamplePoint } from '@/services/monitor.service'
 import { cn } from '@/lib/utils'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
 
 /** 触发方式选项（与 ChannelConfig.triggerMode 对齐） */
 const TRIGGER_MODES: { value: 'none' | 'rising' | 'falling' | 'level'; label: string }[] = [
@@ -13,10 +25,65 @@ const TRIGGER_MODES: { value: 'none' | 'rising' | 'falling' | 'level'; label: st
   { value: 'level', label: '电平' },
 ]
 
+/** Y 轴分辨率选项（1-2-5 序列，上限为 uint32_t 最大值 4294967295） */
+const Y_RESOLUTION_OPTIONS: { value: number; label: string }[] = (() => {
+  const opts: { value: number; label: string }[] = []
+  const UINT32_MAX = 4294967295
+  const mantissas = [1, 2, 5]
+  for (let exp = 0; ; exp++) {
+    const base = Math.pow(10, exp)
+    let done = false
+    for (const m of mantissas) {
+      const v = m * base
+      if (v > UINT32_MAX) { done = true; break }
+      // 格式化标签：k/M/G 后缀
+      let label: string
+      if (v >= 1e9) label = `${v / 1e9}G`
+      else if (v >= 1e6) label = `${v / 1e6}M`
+      else if (v >= 1e3) label = `${v / 1e3}k`
+      else label = `${v}`
+      opts.push({ value: v, label: `${label}/div` })
+    }
+    if (done) break
+  }
+  return opts
+})()
+
+/** 滑动平均窗口选项 */
+const MA_OPTIONS = [
+  { value: 0, label: 'Off' },
+  { value: 2, label: '2' },
+  { value: 4, label: '4' },
+  { value: 8, label: '8' },
+  { value: 16, label: '16' },
+  { value: 32, label: '32' },
+  { value: 64, label: '64' },
+]
+
+/**
+ * 计算指定采样点索引处的简单移动平均（SMA）。
+ * 居中窗口：以 idx 为中心，取 [idx-half, idx+half] 范围内的非 null 值求平均。
+ * 与 WaveformChart.buildPlotData 中的 MA 逻辑保持一致。
+ */
+function computeSMA(samples: SamplePoint[], varId: string, idx: number, window: number): number | null {
+  if (window < 1 || idx < 0 || idx >= samples.length) return null
+  const half = Math.floor(window / 2)
+  let sum = 0, cnt = 0
+  for (let k = -half; k <= half; k++) {
+    const i = idx + k
+    if (i < 0 || i >= samples.length) continue
+    const v = samples[i].values.find((x) => x.id === varId)?.value
+    if (v !== null && v !== undefined && typeof v === 'number') { sum += v; cnt++ }
+  }
+  return cnt > 0 ? sum / cnt : null
+}
+
 interface Props {
   uid: string | null
   /** 收起 Watch 面板（高度置 0，露出全部波形图） */
   onCollapse?: () => void
+  /** 鼠标游标位置的采样值及索引（JScope 风格：Value/MA 列显示游标位置的值） */
+  cursorData?: { values: Map<string, number | null>; sampleIndex: number } | null
 }
 
 /**
@@ -26,11 +93,10 @@ interface Props {
  * 其中 Min/Max/Moving Average/Y Resolution 属通道显示配置（ChannelConfig）。
  * Y 偏移/Y 缩放/触发 放在每行的"展开二级区"中，避免列过多导致横向滚动。
  */
-export function WatchPanel({ uid, onCollapse }: Props) {
+export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
   const variables = useMonitorStore((s) => s.variables)
   const channels = useMonitorStore((s) => s.channels)
   const samples = useMonitorStore((s) => s.samples)
-  const running = useMonitorStore((s) => s.running)
   const removeVariable = useMonitorStore((s) => s.removeVariable)
   const addVariable = useMonitorStore((s) => s.addVariable)
   const setChannel = useMonitorStore((s) => s.setChannel)
@@ -42,25 +108,12 @@ export function WatchPanel({ uid, onCollapse }: Props) {
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
-  /** 展开二级配置区的通道 id 集合 */
-  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
-  const toggleExpand = (id: string) => setExpandedRows((s) => {
-    const n = new Set(s)
-    if (n.has(id)) n.delete(id); else n.add(id)
-    return n
-  })
 
-  // 取最新值
-  const lastSample = samples[samples.length - 1]
-  const lastValues = new Map<string, number | null>()
-  if (lastSample) {
-    for (const v of lastSample.values) lastValues.set(v.id, v.value)
-  }
-  const prevValues = new Map<string, number | null>()
-  const prev = samples[samples.length - 2]
-  if (prev) {
-    for (const v of prev.values) prevValues.set(v.id, v.value)
-  }
+  // JScope 风格：Value 列只显示游标位置的采样值，不显示实时值
+  // 鼠标离开波形图后保留最后游标位置的值（cursorData 不会被重置为 null）
+  // 鼠标从未进入波形图时 cursorData 为 null，显示 "—"
+  const cursorValues = cursorData?.values ?? null
+  const cursorIdx = cursorData?.sampleIndex ?? -1
 
   const handleRemove = async (id: string) => {
     if (!uid) return
@@ -179,18 +232,20 @@ export function WatchPanel({ uid, onCollapse }: Props) {
         <table className="w-full table-fixed border-collapse text-xs whitespace-nowrap">
           <thead className="sticky top-0 z-10 bg-muted/60">
             <tr>
-              <th className="border border-border px-1.5 py-1 text-left font-medium w-10">Color</th>
-              <th className="border border-border px-2 py-1 text-left font-medium w-32">Name</th>
-              <th className="border border-border px-2 py-1 text-left font-medium w-24">Address</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-10">Size</th>
-              <th className="border border-border px-1.5 py-1 text-left font-medium w-14">Type</th>
-              <th className="border border-border px-2 py-1 text-right font-medium w-32">Value</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-16">Min</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-16">Max</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-12">Moving Avg</th>
-              <th className="border border-border px-1.5 py-1 text-center font-medium w-16">Y Resolution</th>
-              <th className="border border-border px-1 py-1 text-center font-medium w-8">⚙</th>
-              <th className="border border-border w-8" />
+              <th className="border border-border px-1 py-1 text-center font-medium w-8">Color</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-32">Name</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-24">Address</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-8">Size</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-12">Type</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-24" title="游标位置采样值（鼠标悬停波形图）">
+                Value
+              </th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-14">Min</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-14">Max</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-14">MA</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-16">Y Res</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-36">Trigger</th>
+              <th className="border border-border px-1 py-1 text-center font-medium w-10">More</th>
             </tr>
           </thead>
           <tbody>
@@ -201,10 +256,15 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                 </td>
               </tr>
             ) : variables.map((v, i) => {
-              const val = lastValues.get(v.id)
-              const prevVal = prevValues.get(v.id)
-              const changed = running && val !== undefined && prevVal !== undefined && val !== prevVal
               const ch = channels.find((c) => c.varId === v.id)
+              // Value 列只显示游标位置的采样值（JScope 风格），不显示实时值
+              const val = cursorValues?.get(v.id) ?? null
+              const hasCursor = cursorValues !== null
+              // MA 值：显示最新采样点处的 SMA（基于全部采样数据，非游标位置）
+              const maWindow = ch?.movingAverage ?? 0
+              const maVal = maWindow > 0 && samples.length > 0
+                ? computeSMA(samples, v.id, samples.length - 1, maWindow)
+                : null
               // 数组分组查找：首元素显示展开按钮，非首元素缩进显示
               const arrGroup = arrayGroups.find((g) => g.firstElemId === v.id)
               const subElemGroup = !arrGroup ? arrayGroups.find((g) => g.elemIds.includes(v.id) && g.firstElemId !== v.id) : null
@@ -225,7 +285,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     />
                   </td>
                   {/* Name（数组首元素显示展开/收起按钮，非首元素缩进） */}
-                  <td className="border border-border px-2 py-1 truncate max-w-[160px]" title={v.name}>
+                  <td className="border border-border px-1 py-1 truncate max-w-[160px]" title={v.name}>
                     <div className="flex items-center gap-0.5">
                       {arrGroup && (
                         <button
@@ -246,26 +306,26 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     </div>
                   </td>
                   {/* Address */}
-                  <td className="border border-border px-2 py-1 font-mono">
+                  <td className="border border-border px-1 py-1 font-mono text-center">
                     0x{v.address.toString(16).toUpperCase().padStart(8, '0')}
                   </td>
                   {/* Size */}
-                  <td className="border border-border px-1.5 py-1 text-center font-mono">
+                  <td className="border border-border px-1 py-1 text-center font-mono">
                     {v.size}
                   </td>
                   {/* Type */}
-                  <td className="border border-border px-1.5 py-1 font-mono">
+                  <td className="border border-border px-1 py-1 font-mono text-center">
                     {v.type}
                   </td>
-                  {/* Value（双击编辑） */}
+                  {/* Value（双击编辑；只显示游标位置值，不显示实时值） */}
                   <td
                     className={cn(
-                      'border border-border px-2 py-1 text-right font-mono tabular-nums transition-colors overflow-hidden',
-                      changed && 'bg-primary/10',
+                      'border border-border px-1 py-1 text-right font-mono tabular-nums transition-colors overflow-hidden',
+                      hasCursor && 'bg-primary/5',
                       editingId === v.id && 'p-0',
                     )}
                     onDoubleClick={() => { setEditingId(v.id); setEditValue('') }}
-                    title="双击修改变量值"
+                    title={hasCursor ? '游标位置值（双击写入新值）' : '鼠标悬停波形图查看值（双击写入新值）'}
                   >
                     {editingId === v.id ? (
                       <input
@@ -280,10 +340,10 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                         onBlur={() => setEditingId(null)}
                         placeholder={val?.toString() ?? ''}
                       />
-                    ) : val === undefined ? '—' : val === null ? 'N/A' : val}
+                    ) : !hasCursor ? '—' : val === null ? 'N/A' : val}
                   </td>
                   {/* Min（null=自适应） */}
-                  <td className="border border-border px-1 py-1">
+                  <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
                       className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
@@ -294,7 +354,7 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                     />
                   </td>
                   {/* Max（null=自适应） */}
-                  <td className="border border-border px-1 py-1">
+                  <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
                       className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
@@ -304,124 +364,117 @@ export function WatchPanel({ uid, onCollapse }: Props) {
                       title="Y 轴最大值（空=跟随自适应）"
                     />
                   </td>
-                  {/* Moving Average */}
-                  <td className="border border-border px-1 py-1 text-center">
-                    <input
-                      type="checkbox"
-                      className="size-3 cursor-pointer"
-                      checked={ch?.movingAverage ?? false}
-                      onChange={(e) => setChannel(v.id, { movingAverage: e.target.checked })}
-                      title="启用滑动平均滤波"
-                    />
+                  {/* Moving Average（显示游标位置处的 SMA 计算值；窗口配置在"更多"菜单） */}
+                  <td
+                    className="border border-border px-1 py-1 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
+                    title={maWindow > 0
+                      ? `SMA(${maWindow}) 最新滑动平均值（窗口配置在"更多"菜单）`
+                      : '滑动平均未开启（在"更多"菜单中配置窗口大小）'}
+                  >
+                    {maWindow > 0
+                      ? (maVal !== null ? maVal.toFixed(2) : '—')
+                      : 'Off'}
                   </td>
-                  {/* Y Resolution */}
-                  <td className="border border-border px-1 py-1">
-                    <input
-                      type="number"
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                  {/* Y Resolution（1-2-5 序列选择，0=自动）*/}
+                  <td className="border border-border px-0.5 py-1">
+                    <select
+                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded cursor-pointer"
                       value={ch?.yResolution ?? 0}
                       onChange={(e) => setChannel(v.id, { yResolution: Number(e.target.value) })}
-                      step="any"
                       title="Y 轴分辨率（每格代表的数值，0=自动）"
-                    />
-                  </td>
-                  {/* 展开二级配置区 */}
-                  <td className="border border-border px-1 py-1 text-center">
-                    <button
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => toggleExpand(v.id)}
-                      title="展开/收起 通道显示配置（偏移/缩放/触发）"
                     >
-                      {expandedRows.has(v.id) ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                    </button>
+                      <option value={0}>自动</option>
+                      {Y_RESOLUTION_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
                   </td>
-                  {/* 操作：隐藏/显示 + 移除 */}
-                  <td className="border border-border px-1 text-center">
-                    <div className="flex items-center justify-center gap-0.5">
-                      <button
-                        className={cn('hover:text-foreground', ch?.visible === false ? 'text-muted-foreground/50' : 'text-muted-foreground')}
-                        onClick={() => setChannel(v.id, { visible: !(ch?.visible ?? true) })}
-                        title={ch?.visible === false ? '显示通道' : '隐藏通道'}
+                  {/* Trigger Control：选择触发方式，[电平]时显示阈值输入 */}
+                  <td className="border border-border px-0.5 py-1">
+                    <div className="flex items-center gap-0.5">
+                      <select
+                        className="h-5 flex-1 min-w-0 bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded cursor-pointer"
+                        value={ch?.triggerMode ?? 'none'}
+                        onChange={(e) => setChannel(v.id, { triggerMode: e.target.value as 'none' | 'rising' | 'falling' | 'level' })}
+                        title="触发方式"
                       >
-                        {ch?.visible === false ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
-                      </button>
-                      <button
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => handleRemove(v.id)}
-                        title="移除变量"
-                      >
-                        <Trash2 className="size-3" />
-                      </button>
+                        {TRIGGER_MODES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                      {ch?.triggerMode === 'level' && (
+                        <input
+                          type="number"
+                          className="h-5 w-12 rounded border border-border bg-background px-0.5 text-center font-mono text-[11px] outline-none focus:ring-1 focus:ring-primary"
+                          value={ch?.triggerLevel ?? 0}
+                          onChange={(e) => setChannel(v.id, { triggerLevel: Number(e.target.value) })}
+                          step="any"
+                          title="触发阈值"
+                        />
+                      )}
                     </div>
                   </td>
-                </tr>
-                {/* 展开二级区：Y 偏移 / Y 缩放 / 触发方式 / 触发阈值 */}
-                {expandedRows.has(v.id) && (
-                  <tr key={`${v.id}-cfg`} className={i % 2 === 0 ? 'bg-background' : 'bg-muted/20'}>
-                    <td colSpan={12} className="border border-border px-2 py-1.5">
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
-                        <div className="flex items-center gap-1.5">
-                          <label className="text-muted-foreground" title="Y 轴偏移：波形垂直平移（数值加减）">偏移</label>
-                          <input
-                            type="number"
-                            className="h-5 w-16 rounded border border-border bg-background px-1 text-center font-mono outline-none focus:ring-1 focus:ring-primary"
-                            value={ch?.yOffset ?? 0}
-                            onChange={(e) => setChannel(v.id, { yOffset: Number(e.target.value) })}
-                            step="any"
-                            title="Y 轴偏移：波形垂直平移（数值加减）"
-                          />
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <label className="text-muted-foreground" title="Y 轴缩放：垂直放大倍数（1=原始）">缩放</label>
-                          <input
-                            type="number"
-                            className="h-5 w-16 rounded border border-border bg-background px-1 text-center font-mono outline-none focus:ring-1 focus:ring-primary"
-                            value={ch?.yScale ?? 1}
-                            onChange={(e) => setChannel(v.id, { yScale: Number(e.target.value) })}
-                            step="any"
-                            title="Y 轴缩放：垂直放大倍数（1=原始大小）"
-                          />
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <label className="text-muted-foreground" title="触发方式：信号达到阈值时定格波形">触发</label>
-                          <select
-                            className="h-5 rounded border border-border bg-background px-1 outline-none focus:ring-1 focus:ring-primary"
-                            value={ch?.triggerMode ?? 'none'}
-                            onChange={(e) => setChannel(v.id, { triggerMode: e.target.value as 'none' | 'rising' | 'falling' | 'level' })}
-                            title="触发方式"
-                          >
-                            {TRIGGER_MODES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                          </select>
-                          {ch?.triggerMode && ch.triggerMode !== 'none' && (
+                  {/* 更多操作：MA配置、显示/隐藏、移除 */}
+                  <td className="border border-border px-0.5 py-1 text-center">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className="text-muted-foreground hover:text-foreground"
+                          title="更多操作"
+                        >
+                          <MoreVertical className="size-3" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-36">
+                        {/* MA 窗口配置子菜单 */}
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <span className="text-xs">滑动平均 (MA)</span>
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent>
+                            <DropdownMenuRadioGroup
+                              value={String(ch?.movingAverage ?? 0)}
+                              onValueChange={(val) => setChannel(v.id, { movingAverage: Number(val) })}
+                            >
+                              {MA_OPTIONS.map((opt) => (
+                                <DropdownMenuRadioItem key={opt.value} value={String(opt.value)}>
+                                  {opt.label}
+                                </DropdownMenuRadioItem>
+                              ))}
+                            </DropdownMenuRadioGroup>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={() => setChannel(v.id, { visible: !(ch?.visible ?? true) })}
+                        >
+                          {ch?.visible === false ? (
                             <>
-                              <label className="text-muted-foreground">阈值</label>
-                              <input
-                                type="number"
-                                className="h-5 w-18 rounded border border-border bg-background px-1 text-center font-mono outline-none focus:ring-1 focus:ring-primary"
-                                value={ch?.triggerLevel ?? 0}
-                                onChange={(e) => setChannel(v.id, { triggerLevel: Number(e.target.value) })}
-                                step="any"
-                                title="触发阈值"
-                              />
+                              <Eye className="size-3.5" />
+                              <span>显示通道</span>
+                            </>
+                          ) : (
+                            <>
+                              <EyeOff className="size-3.5" />
+                              <span>隐藏通道</span>
                             </>
                           )}
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
-                )}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onClick={() => handleRemove(v.id)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          <span>移除变量</span>
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </td>
+                </tr>
                 </>
               )
             })}
           </tbody>
         </table>
       </div>
-
-      {running && (
-        <div className="border-t border-border bg-muted/20 px-2 py-0.5 text-[10px] text-muted-foreground">
-          双击 Value 单元格修改变量值 · {samples.length} 个采样点
-        </div>
-      )}
     </div>
   )
 }
