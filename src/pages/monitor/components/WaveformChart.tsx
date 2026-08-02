@@ -38,6 +38,8 @@ interface Props {
   onCursorValueChange?: (data: { values: Map<string, number | null>; sampleIndex: number } | null) => void
   /** 全览信号：数值递增时缩放显示全部已采数据（关闭 Follow + X 轴覆盖数据首尾 + Y 轴重新自适应） */
   fitSignal?: number
+  /** Y 轴自动归一化：开启后每个通道按各自数据范围独立缩放（等价于所有通道都设了 yResolution） */
+  yNormalized?: boolean
 }
 
 // 降采样由 uPlot decimation 基于可视像素宽度完成（稳定分桶，无索引漂移伪影）
@@ -81,7 +83,7 @@ function niceTimeStep(span: number): number {
 export function WaveformChart({
   variables, channels, samples, samplesVersion, follow, paused = false,
   windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange, onFollowChange, onCursorValueChange,
-  fitSignal,
+  fitSignal, yNormalized = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -96,8 +98,8 @@ export function WaveformChart({
   const fpsRef = useRef(fps)
   // Y 轴 hysteresis：记录上次设置的 Y 范围
   const yRangeRef = useRef<{ min: number; max: number } | null>(null)
-  // Y 轴配置变化检测：yResolution/min/max 变化时重置 yRangeRef，强制重新计算 Y 轴
-  const prevYConfigRef = useRef<Map<string, { yRes: number; min: number | null; max: number | null }>>(new Map())
+  // Y 轴配置变化检测：yResolution/min/max/visible 变化时重置 yRangeRef，强制重新计算 Y 轴
+  const prevYConfigRef = useRef<Map<string, { yRes: number; min: number | null; max: number | null; visible: boolean }>>(new Map())
   // 逐通道 Y 归一化参数（示波器模式：每通道独立 Y 量程，共享 0..GRID_DIVS 网格）
   // key = varId, value = { yRes: 每格数值, center: 数据中心 }
   const normParamsRef = useRef<Map<string, { yRes: number; center: number }>>(new Map())
@@ -117,6 +119,9 @@ export function WaveformChart({
   // 游标值变化回调 ref（JScope 风格）
   const onCursorValueRef = useRef(onCursorValueChange)
   useEffect(() => { onCursorValueRef.current = onCursorValueChange }, [onCursorValueChange])
+  // Y 轴自动归一化开关 ref（buildPlotData 是 useCallback，需经 ref 读取最新值）
+  const yNormRef = useRef(yNormalized)
+  useEffect(() => { yNormRef.current = yNormalized }, [yNormalized])
 
   // ── 构建可见通道列表（visible=true 的通道）──
   const getVisibleSeries = useCallback(() => {
@@ -220,13 +225,13 @@ export function WaveformChart({
     }
 
     // 4) 逐通道 Y 归一化（示波器模式）
-    // 当任意通道设置了 yResolution > 0 时，所有通道数据归一化到 0..GRID_DIVS 网格。
-    // 每通道独立缩放：yResolution 决定每格代表的数值，数据中心对齐网格中心。
-    // 改变某通道 Y Res 只影响该通道波形幅度，不影响坐标系 Y 轴范围（始终 0..GRID_DIVS）。
-    // 未设 yResolution 的通道自动按数据范围计算等效 yResolution，填满网格。
+    // 触发条件：任意通道设置了 yResolution > 0，或全局开启"Y 轴自动归一化"。
+    // 开启后所有通道数据归一化到 0..GRID_DIVS 网格，每通道独立缩放：
+    // yResolution 决定每格代表的数值（未设置的通道按自身数据范围自动计算），
+    // 多量级通道共存时互不压缩（如 s_cnt 0~4000 与 var -100~100 同时可见）。
     const anyYRes = series.some((s) => (s.channel.yResolution ?? 0) > 0)
-    normalizedRef.current = anyYRes
-    if (anyYRes) {
+    normalizedRef.current = anyYRes || yNormRef.current
+    if (normalizedRef.current) {
       const normParams = normParamsRef.current
       const halfGrid = GRID_DIVS / 2
       for (let si = 0; si < nSer; si++) {
@@ -478,6 +483,16 @@ export function WaveformChart({
     scheduleRender()
   }, [follow, scheduleRender])
 
+  // Y 轴自动归一化开关切换：清空归一化参数与 Y 轴缓存，强制按新模式重算
+  // （归一化模式 <-> 共享量程模式）
+  useEffect(() => {
+    normYResetRef.current = true
+    normParamsRef.current.clear()
+    yRangeRef.current = null
+    dirtyRef.current = true
+    scheduleRender()
+  }, [yNormalized, scheduleRender])
+
   // ── 全览：fitSignal 递增时，关闭 Follow + X 轴缩放覆盖全部已采数据 + Y 轴重新自适应 ──
   const lastFitSignalRef = useRef(0)
   useEffect(() => {
@@ -504,16 +519,24 @@ export function WaveformChart({
   useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, samplesVersion, scheduleRender])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables, scheduleRender])
   useEffect(() => {
-    // 检测 Y 轴配置变化（yResolution/min/max），变化时重置 yRangeRef 强制重新计算
+    // 检测 Y 轴配置变化（yResolution/min/max/visible）或通道数量变化（增删变量），
+    // 变化时重置 yRangeRef 强制重新计算。
+    // - visible：隐藏/显示通道后可见数据范围变化，需重新适配 Y 轴
+    // - 通道数量：删除变量后 channels 变少，若仅比较现有通道配置则检测不到变化，
+    //   Y 轴停留在包含已删通道的范围，剩余通道波形可能不可见
     const prevMap = prevYConfigRef.current
+    const prevCount = prevMap.size   // 遍历前记录旧通道数（遍历中会新增 key）
     let yConfigChanged = false
     for (const ch of channels) {
       const prev = prevMap.get(ch.varId)
-      const curr = { yRes: ch.yResolution ?? 0, min: ch.min, max: ch.max }
-      if (prev && (prev.yRes !== curr.yRes || prev.min !== curr.min || prev.max !== curr.max)) {
+      const curr = { yRes: ch.yResolution ?? 0, min: ch.min, max: ch.max, visible: ch.visible ?? true }
+      if (prev && (prev.yRes !== curr.yRes || prev.min !== curr.min || prev.max !== curr.max || prev.visible !== curr.visible)) {
         yConfigChanged = true
       }
       prevMap.set(ch.varId, curr)
+    }
+    if (prevCount !== channels.length) {
+      yConfigChanged = true
     }
     if (yConfigChanged) {
       yRangeRef.current = null

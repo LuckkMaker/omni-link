@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Activity, X } from 'lucide-react'
+import { Activity, X, Loader2 } from 'lucide-react'
 import { useProbeStore } from '@/stores/probe.store'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -35,8 +35,10 @@ export default function MonitorPage() {
   // samples 引用稳定（高频可变缓冲），依赖版本号触发重渲染以读取最新数据
   const samplesVersion = useMonitorStore((s) => s.samplesVersion)
   const channels = useMonitorStore((s) => s.channels)
+  const historyLoading = useMonitorStore((s) => s.historyLoading)
   const follow = useMonitorStore((s) => s.follow)
   const setFollow = useMonitorStore((s) => s.setFollow)
+  const yNormalized = useMonitorStore((s) => s.yNormalized)
   const timebase = useMonitorStore((s) => s.timebase)
   const setTimebase = useMonitorStore((s) => s.setTimebase)
   const fps = useMonitorStore((s) => s.fps)
@@ -369,11 +371,25 @@ export default function MonitorPage() {
     }
   }, [uid, pushNotification])
 
-  // ── 全览：关闭 Follow 并递增信号，波形图缩放显示全部已采数据 ──
-  const handleFitAll = useCallback(() => {
+  // ── 全览：关闭 Follow + 从磁盘加载全量历史（阶段2：历史无上限），再缩放到全部数据 ──
+  const handleFitAll = useCallback(async () => {
+    if (!uid) return
     setFollow(false)
+    // 拉取磁盘历史（最多 MAX_SAMPLES 点，超过取最近一段；失败静默——前端缓冲仍可全览）
+    useMonitorStore.getState().setHistoryLoading(true)
+    try {
+      const hist = await monitorService.readRecord(uid, { startMs: 0, limit: 600000 })
+      if (hist.success && hist.segments && hist.segments.length > 0) {
+        useMonitorStore.getState().loadHistory(hist.segments)
+      } else {
+        useMonitorStore.getState().setHistoryLoading(false)
+      }
+    } catch {
+      useMonitorStore.getState().setHistoryLoading(false)
+    }
+    // 历史加载完成（或失败）后缩放到当前缓冲首尾
     setFitSignal((n) => n + 1)
-  }, [setFollow])
+  }, [uid, setFollow])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -408,6 +424,13 @@ export default function MonitorPage() {
               </div>
             ) : (
               <div className="flex h-full flex-col">
+                {/* 全览历史加载中提示 */}
+                {historyLoading && (
+                  <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    正在加载全部历史数据（最近 {Math.round(600000 / Math.max(rateHz, 1))} 秒）...
+                  </div>
+                )}
                 {/* uPlot 波形图 */}
                 <div className="min-h-0 flex-1 overflow-hidden rounded border border-border bg-background">
                   <WaveformChart
@@ -425,6 +448,7 @@ export default function MonitorPage() {
                     onFollowChange={setFollow}
                     onCursorValueChange={setCursorData}
                     fitSignal={fitSignal}
+                    yNormalized={yNormalized}
                   />
                 </div>
                 {/* 游标测量结果 */}

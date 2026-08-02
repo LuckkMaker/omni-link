@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 import type { MonitorVariable, SamplePoint, MonitorVarType } from '@/services/monitor.service'
 
-/** 前端 ring buffer 容量上限（与后端对齐，5.2 阶段 uPlot 渲染用）
- *  30 万点 @2.8kHz ≈ 107s 历史（用户反馈 10 万点只够 36s，周期波形下旧数据被挤掉难以察觉） */
-const MAX_SAMPLES = 300000
+/** 前端 ring buffer 容量上限（与后端对齐；60 万点 @2.8kHz ≈ 3.5 分钟，
+ *  全览历史加载以该上限截取最近数据） */
+const MAX_SAMPLES = 600000
 
 /** 通道配置（5.2 阶段波形渲染用）
  *
@@ -79,6 +79,10 @@ interface MonitorState {
   /** 数据版本号：每批量提交一次 +1，用于驱动订阅方重渲染 */
   samplesVersion: number
   totalSamples: number
+  /** 全览历史加载中（磁盘数据正在拉取） */
+  historyLoading: boolean
+  /** 全览历史加载失败信息（null=无错误） */
+  historyError: string | null
 
   // ── 显示配置 ──
   follow: boolean
@@ -87,6 +91,8 @@ interface MonitorState {
   /** 波形图渲染帧率（FPS），控制重绘频率，默认 30 */
   fps: number
   channels: ChannelConfig[]
+  /** Y 轴自动归一化：开启后每个通道按各自数据范围独立缩放（多量级通道共存时互不压缩） */
+  yNormalized: boolean
 
   // ── 目标设备状态 ──
   /** CPU 内核状态：running=运行中, halted=已暂停, unknown=未知/未连接 */
@@ -106,6 +112,7 @@ interface MonitorState {
   setFollow: (on: boolean) => void
   setTimebase: (t: number) => void
   setFps: (fps: number) => void
+  setYNormalized: (on: boolean) => void
   setCoreState: (state: 'running' | 'halted' | 'unknown') => void
 
   setElf: (path: string, count: number) => void
@@ -118,6 +125,10 @@ interface MonitorState {
   /** WS 推送采样点时调用，写入 ring buffer */
   appendSamples: (pts: SamplePoint[]) => void
   clearSamples: () => void
+  /** 设置历史加载状态（全览时拉取磁盘数据） */
+  setHistoryLoading: (loading: boolean) => void
+  /** 加载磁盘历史到样本缓冲（全览时替换/合并 buffer；segments 来自后端 read_record） */
+  loadHistory: (segments: { vars: { id: string; name: string; type: string; address: number }[]; samples: { t_ms: number; values: Record<string, number> }[] }[]) => void
 
   /** 同步通道配置（变量增删时） */
   syncChannels: () => void
@@ -137,6 +148,14 @@ interface MonitorState {
 
 /** 默认通道调色板（blue/green/orange/purple/cyan 循环） */
 const PALETTE = ['#2563eb', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#dc2626', '#db2777', '#65a30d']
+
+/**
+ * 通道颜色全局递增序号。
+ * 用"下一个未用颜色"而非 variables 数组位置分配：删除中间变量后重新添加，
+ * 新通道不会拿到与现有通道冲突的调色板颜色（位置索引方案下 var 重加会
+ * 与 s_cnt 同为 index 2 的颜色）。
+ */
+let channelColorSeq = 0
 
 // ── 采样点高频缓冲（消除每次 appendSamples 的全量数组拷贝）──
 // samplesBuffer：引用稳定的可变数组，直接暴露给订阅方（长度实时变化）
@@ -176,10 +195,10 @@ function clearSamplesBuffer(set: (partial: Partial<MonitorState>) => void, get: 
   set({ samplesVersion: get().samplesVersion + 1, totalSamples: 0 })
 }
 
-function makeChannel(varId: string, index: number): ChannelConfig {
+function makeChannel(varId: string): ChannelConfig {
   return {
     varId,
-    color: PALETTE[index % PALETTE.length],
+    color: PALETTE[channelColorSeq++ % PALETTE.length],
     visible: true,
     format: 'dec',
     min: null,
@@ -210,10 +229,13 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   samples: samplesBuffer,
   samplesVersion: 0,
   totalSamples: 0,
+  historyLoading: false,
+  historyError: null,
 
   follow: true,
   timebase: 1,
   fps: 30,
+  yNormalized: false,
   channels: [],
   arrayGroups: [],
   coreState: 'unknown',
@@ -228,6 +250,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   setFollow: (on) => set({ follow: on }),
   setTimebase: (t) => set({ timebase: t }),
   setFps: (fps) => set({ fps }),
+  setYNormalized: (on) => set({ yNormalized: on }),
   setCoreState: (state) => set({ coreState: state }),
 
   setElf: (path, count) => set({ elfPath: path, elfLoaded: true, symbolCount: count, elfChanged: false }),
@@ -263,10 +286,43 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
 
   clearSamples: () => clearSamplesBuffer(set, get),
 
+  setHistoryLoading: (loading) => set({ historyLoading: loading, historyError: loading ? null : get().historyError }),
+
+  loadHistory: (segments) => {
+    // 磁盘历史段展开为 SamplePoint[]（后端 values 是 {id:value} dict，转 [{id,value}]）
+    const hist: SamplePoint[] = []
+    let lastHistT = -Infinity
+    for (const seg of segments) {
+      for (const s of seg.samples) {
+        hist.push({
+          t_ms: s.t_ms,
+          values: Object.entries(s.values).map(([id, value]) => ({ id, value })),
+        })
+        if (s.t_ms > lastHistT) lastHistT = s.t_ms
+      }
+    }
+    // 保留当前缓冲中比历史更新（t_ms > lastHistT）的样本：
+    // 加载期间 WS 仍会推来新样本，避免替换时丢失
+    const tail = lastHistT >= 0 ? samplesBuffer.filter((p) => p.t_ms > lastHistT) : []
+    samplesBuffer.length = 0
+    samplesBuffer.push(...hist, ...tail)
+    if (samplesBuffer.length > MAX_SAMPLES) {
+      samplesBuffer.splice(0, samplesBuffer.length - MAX_SAMPLES)
+    }
+    pendingSamples = []
+    pendingTotal = 0
+    set({
+      samplesVersion: get().samplesVersion + 1,
+      totalSamples: samplesBuffer.length,
+      historyLoading: false,
+      historyError: null,
+    })
+  },
+
   syncChannels: () => set((s) => {
     const existing = new Map(s.channels.map((c) => [c.varId, c]))
-    const channels = s.variables.map((v, i) =>
-      existing.get(v.id) ?? makeChannel(v.id, i)
+    const channels = s.variables.map((v) =>
+      existing.get(v.id) ?? makeChannel(v.id)
     )
     return { channels }
   }),
@@ -309,6 +365,9 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
       channels: [],
       arrayGroups: [],
       coreState: 'unknown',
+      yNormalized: false,
+      historyLoading: false,
+      historyError: null,
     })
   },
 }))

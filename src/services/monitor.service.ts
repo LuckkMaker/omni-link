@@ -231,4 +231,18 @@ export const monitorService = {
     })
     return data
   },
+
+  /** 按时间范围读取磁盘落盘采样数据（历史无上限，供全览/历史查看） */
+  async readRecord(
+    uid: string,
+    opts?: { startMs?: number; endMs?: number; limit?: number },
+  ): Promise<{
+    success: boolean
+    segments: { vars: { id: string; name: string; type: string; address: number }[]; samples: { t_ms: number; values: Record<string, number> }[] }[]
+    error?: string
+  }> {
+    const client = await api()
+    const { data } = await client.get(`/api/probes/${uid}/monitor/record`, { params: opts ?? {} })
+    return data
+  },
 }

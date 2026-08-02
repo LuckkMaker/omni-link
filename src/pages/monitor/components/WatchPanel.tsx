@@ -114,6 +114,8 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
   // ── 通道实时统计（当前值/均值/峰峰值，基于全部已采数据，400ms 节流重算）──
   const [chanStats, setChanStats] = useState<Map<string, { cur: number | null; mean: number | null; pp: number | null }>>(new Map())
   const lastStatsAtRef = useRef(0)
+  /** Stats 列显示模式（表头下拉选择）：均值 or 峰峰值 */
+  const [statsMode, setStatsMode] = useState<'avg' | 'pp'>('avg')
   useEffect(() => {
     if (samplesVersion === 0) return
     const now = performance.now()
@@ -269,30 +271,6 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
         )}
       </div>
 
-      {/* 通道实时统计（当前值 / 均值 / 峰峰值，基于全部已采数据） */}
-      {chanStats.size > 0 && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-b border-border px-2 py-1">
-          {channels.filter((c) => c.visible).map((ch) => {
-            const st = chanStats.get(ch.varId)
-            if (!st) return null
-            const v = variables.find((x) => x.id === ch.varId)
-            return (
-              <div
-                key={ch.varId}
-                className="flex items-center gap-1 text-[10px] font-mono text-muted-foreground"
-                title={`${v?.name ?? ch.varId}：当前值 / 均值 / 峰峰值（全部已采数据）`}
-              >
-                <span className="size-2 shrink-0 rounded-full" style={{ background: ch.color }} />
-                <span className="text-foreground">{v?.name ?? ch.varId}</span>
-                <span>{st.cur !== null ? st.cur.toFixed(2) : '--'}</span>
-                <span>avg {st.mean !== null ? st.mean.toFixed(2) : '--'}</span>
-                <span>pp {st.pp !== null ? st.pp.toFixed(2) : '--'}</span>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
       {/* 表格（列多，横向滚动） */}
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full table-fixed border-collapse text-xs whitespace-nowrap">
@@ -309,6 +287,17 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Min</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Max</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">MA</th>
+              <th className="border border-border px-0.5 py-1 text-center font-medium w-20">
+                <select
+                  className="w-full bg-transparent text-center text-[11px] font-medium outline-none cursor-pointer"
+                  value={statsMode}
+                  onChange={(e) => setStatsMode(e.target.value as 'avg' | 'pp')}
+                  title="选择显示统计值：均值 或 峰峰值（均基于全部已采数据）"
+                >
+                  <option value="avg">均值</option>
+                  <option value="pp">峰峰值</option>
+                </select>
+              </th>
               <th className="border border-border px-1 py-1 text-center font-medium w-16">Y Res</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-36">Trigger</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-10">More</th>
@@ -317,7 +306,7 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
           <tbody>
             {variables.length === 0 ? (
               <tr>
-                <td colSpan={12} className="border border-border px-2 py-4 text-center text-muted-foreground">
+                <td colSpan={13} className="border border-border px-2 py-4 text-center text-muted-foreground">
                   暂无监视变量
                 </td>
               </tr>
@@ -334,6 +323,9 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
               // 数组分组查找：首元素显示展开按钮，非首元素缩进显示
               const arrGroup = arrayGroups.find((g) => g.firstElemId === v.id)
               const subElemGroup = !arrGroup ? arrayGroups.find((g) => g.elemIds.includes(v.id) && g.firstElemId !== v.id) : null
+              // 通道统计（当前值/均值/峰峰值，全部已采数据）
+              const st = chanStats.get(v.id)
+              const stFmt = (x: number | null | undefined) => (x !== null && x !== undefined ? x.toFixed(2) : '--')
               return (
                 <>
                 <tr
@@ -440,6 +432,13 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
                     {maWindow > 0
                       ? (maVal !== null ? maVal.toFixed(2) : '—')
                       : 'Off'}
+                  </td>
+                  {/* Stats（按表头下拉选择显示 均值 或 峰峰值；tooltip 含全部统计） */}
+                  <td
+                    className="border border-border px-1 py-1 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
+                    title={`${v.name} 统计（全部已采数据）：当前 ${stFmt(st?.cur)} / 均值 ${stFmt(st?.mean)} / 峰峰值 ${stFmt(st?.pp)}`}
+                  >
+                    {st ? stFmt(statsMode === 'avg' ? st.mean : st.pp) : '—'}
                   </td>
                   {/* Y Resolution（1-2-5 序列选择，0=自动）*/}
                   <td className="border border-border px-0.5 py-1">

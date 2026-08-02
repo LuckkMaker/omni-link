@@ -86,6 +86,8 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
   const setFollow = useMonitorStore((s) => s.setFollow)
   const setTimebase = useMonitorStore((s) => s.setTimebase)
   const setFps = useMonitorStore((s) => s.setFps)
+  const yNormalized = useMonitorStore((s) => s.yNormalized)
+  const setYNormalized = useMonitorStore((s) => s.setYNormalized)
   const setElf = useMonitorStore((s) => s.setElf)
   const addVariable = useMonitorStore((s) => s.addVariable)
   const removeVariable = useMonitorStore((s) => s.removeVariable)
@@ -704,6 +706,21 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
               title="导出当前采样数据为 CSV 文件（可选择时间范围）"
             >
               <Download className="size-3" /> 导出 CSV
+            </button>
+          </div>
+          {/* Y 轴自动归一化：每通道独立量程，多量级变量共存时互不压缩 */}
+          <div className="flex items-center gap-1.5">
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded border text-[11px] font-medium transition-colors',
+                yNormalized
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border text-muted-foreground hover:bg-muted/30 hover:text-foreground',
+              )}
+              onClick={() => setYNormalized(!yNormalized)}
+              title="Y 轴自动归一化：每个通道按各自数据范围独立缩放（如 s_cnt 0~4000 与 var -100~100 同时可见，互不压缩）"
+            >
+              <SlidersHorizontal className="size-3" /> Y 轴归一化
             </button>
           </div>
           {transport === 'rtt' && (
