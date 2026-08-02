@@ -36,6 +36,8 @@ interface Props {
   onFollowChange?: (follow: boolean) => void
   /** 鼠标游标值变化回调（JScope 风格：鼠标悬停时推送游标位置的采样值及采样点索引） */
   onCursorValueChange?: (data: { values: Map<string, number | null>; sampleIndex: number } | null) => void
+  /** 全览信号：数值递增时缩放显示全部已采数据（关闭 Follow + X 轴覆盖数据首尾 + Y 轴重新自适应） */
+  fitSignal?: number
 }
 
 // 降采样由 uPlot decimation 基于可视像素宽度完成（稳定分桶，无索引漂移伪影）
@@ -79,6 +81,7 @@ function niceTimeStep(span: number): number {
 export function WaveformChart({
   variables, channels, samples, samplesVersion, follow, paused = false,
   windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange, onFollowChange, onCursorValueChange,
+  fitSignal,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -474,6 +477,30 @@ export function WaveformChart({
     dirtyRef.current = true
     scheduleRender()
   }, [follow, scheduleRender])
+
+  // ── 全览：fitSignal 递增时，关闭 Follow + X 轴缩放覆盖全部已采数据 + Y 轴重新自适应 ──
+  const lastFitSignalRef = useRef(0)
+  useEffect(() => {
+    if (fitSignal === undefined || fitSignal === lastFitSignalRef.current) return
+    lastFitSignalRef.current = fitSignal
+    const plot = plotRef.current
+    if (!plot) return
+    const data = samplesRef.current
+    if (!data || data.length === 0) return
+    const first = data[0].t_ms / 1000
+    const last = data[data.length - 1].t_ms / 1000
+    if (!(last > first)) return
+    if (followRef.current) {
+      followRef.current = false
+      onFollowChangeRef.current?.(false)
+    }
+    yRangeRef.current = null
+    normYResetRef.current = true
+    plot.setScale('x', { min: first, max: last })
+    // Y 轴自适应在 doRender 内按新可见窗口重新计算
+    dirtyRef.current = true
+    scheduleRender()
+  }, [fitSignal, scheduleRender])
   useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, samplesVersion, scheduleRender])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables, scheduleRender])
   useEffect(() => {

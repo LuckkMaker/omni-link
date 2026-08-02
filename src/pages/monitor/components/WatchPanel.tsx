@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff, MoreVertical } from 'lucide-react'
 import { useMonitorStore, type ArrayGroup } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -110,6 +110,46 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+
+  // ── 通道实时统计（当前值/均值/峰峰值，基于全部已采数据，400ms 节流重算）──
+  const [chanStats, setChanStats] = useState<Map<string, { cur: number | null; mean: number | null; pp: number | null }>>(new Map())
+  const lastStatsAtRef = useRef(0)
+  useEffect(() => {
+    if (samplesVersion === 0) return
+    const now = performance.now()
+    if (now - lastStatsAtRef.current < 400) return
+    lastStatsAtRef.current = now
+    const buf = samples
+    if (buf.length === 0) {
+      setChanStats(new Map())
+      return
+    }
+    const stats = new Map<string, { cur: number | null; mean: number | null; pp: number | null }>()
+    for (const ch of channels) {
+      if (!ch.visible) continue
+      let sum = 0, cnt = 0
+      let min = Infinity, max = -Infinity
+      let cur: number | null = null
+      for (let i = 0; i < buf.length; i++) {
+        const vals = buf[i].values
+        let v: number | null = null
+        for (let k = 0; k < vals.length; k++) {
+          if (vals[k].id === ch.varId) { v = vals[k].value; break }
+        }
+        if (v === null || typeof v !== 'number') continue
+        sum += v; cnt++
+        if (v < min) min = v
+        if (v > max) max = v
+        cur = v
+      }
+      stats.set(ch.varId, {
+        cur,
+        mean: cnt > 0 ? sum / cnt : null,
+        pp: min !== Infinity && max !== -Infinity ? max - min : null,
+      })
+    }
+    setChanStats(stats)
+  }, [samplesVersion, samples, channels])
 
   // JScope 风格：Value 列只显示游标位置的采样值，不显示实时值
   // 鼠标离开波形图后保留最后游标位置的值（cursorData 不会被重置为 null）
@@ -228,6 +268,30 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
           </button>
         )}
       </div>
+
+      {/* 通道实时统计（当前值 / 均值 / 峰峰值，基于全部已采数据） */}
+      {chanStats.size > 0 && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-b border-border px-2 py-1">
+          {channels.filter((c) => c.visible).map((ch) => {
+            const st = chanStats.get(ch.varId)
+            if (!st) return null
+            const v = variables.find((x) => x.id === ch.varId)
+            return (
+              <div
+                key={ch.varId}
+                className="flex items-center gap-1 text-[10px] font-mono text-muted-foreground"
+                title={`${v?.name ?? ch.varId}：当前值 / 均值 / 峰峰值（全部已采数据）`}
+              >
+                <span className="size-2 shrink-0 rounded-full" style={{ background: ch.color }} />
+                <span className="text-foreground">{v?.name ?? ch.varId}</span>
+                <span>{st.cur !== null ? st.cur.toFixed(2) : '--'}</span>
+                <span>avg {st.mean !== null ? st.mean.toFixed(2) : '--'}</span>
+                <span>pp {st.pp !== null ? st.pp.toFixed(2) : '--'}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* 表格（列多，横向滚动） */}
       <div className="min-h-0 flex-1 overflow-auto">

@@ -3,7 +3,7 @@ import {
   Plus, Eye, EyeOff, FileUp, Search, Loader2,
   Radio, Zap, AlertTriangle, Trash2, Play, Square, Gauge,
   ChevronRight, ChevronDown, SlidersHorizontal,
-  Pause, RotateCcw,
+  Pause, RotateCcw, Download, Maximize2,
 } from 'lucide-react'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -25,6 +25,12 @@ interface Props {
   onToggleDevice: () => void
   onReset: () => void
   coreState: 'running' | 'halted' | 'unknown'
+  /** 导出采样数据为 CSV（可选时间范围：mode=all/recent/custom；缺省导出全部） */
+  onExportCsv: (range?: { mode?: 'all' | 'recent' | 'custom'; recentSeconds?: number; startMs?: number; endMs?: number }) => void
+  /** 清空已采集的波形数据 */
+  onClear: () => void
+  /** 全览：关闭 Follow，缩放显示全部已采数据 */
+  onFitAll: () => void
 }
 
 /** 手动地址输入支持的数据类型 */
@@ -57,7 +63,7 @@ const TRIGGER_MODES: { value: ChannelTriggerMode; label: string }[] = [
   { value: 'level', label: '电平' },
 ]
 
-export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleDevice, onReset, coreState }: Props) {
+export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleDevice, onReset, coreState, onExportCsv, onClear, onFitAll }: Props) {
   const variables = useMonitorStore((s) => s.variables)
   const channels = useMonitorStore((s) => s.channels)
   // samples 引用稳定（高频可变缓冲），依赖版本号触发重渲染以读取最新数据
@@ -109,6 +115,13 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
   const [manualAddr, setManualAddr] = useState('')
   const [manualType, setManualType] = useState<MonitorVarType>('uint32')
   const [manualErr, setManualErr] = useState<string | null>(null)
+
+  // CSV 导出范围对话框
+  const [showExportDialog, setShowExportDialog] = useState(false)
+  const [exportMode, setExportMode] = useState<'all' | 'recent' | 'custom'>('all')
+  const [exportRecentSec, setExportRecentSec] = useState(30)
+  const [exportStartSec, setExportStartSec] = useState('0')
+  const [exportEndSec, setExportEndSec] = useState('60')
 
   // ELF 文件变化通知去重：避免每次轮询都推通知，仅在首次检测到变化时推送一次
   const elfChangeNotifiedRef = useRef(false)
@@ -492,6 +505,24 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
     }
   }, [uid, manualName, manualAddr, manualType, variables, addVariable, pushNotification])
 
+  /** 确认 CSV 导出：按所选范围回调父组件导出 */
+  const handleExportConfirm = useCallback(() => {
+    setShowExportDialog(false)
+    if (exportMode === 'all') {
+      onExportCsv()
+    } else if (exportMode === 'recent') {
+      onExportCsv({ mode: 'recent', recentSeconds: exportRecentSec })
+    } else {
+      const s = Number(exportStartSec)
+      const e = Number(exportEndSec)
+      if (Number.isFinite(s) && Number.isFinite(e) && e > s) {
+        onExportCsv({ mode: 'custom', startMs: Math.round(s * 1000), endMs: Math.round(e * 1000) })
+      } else {
+        onExportCsv()
+      }
+    }
+  }, [exportMode, exportRecentSec, exportStartSec, exportEndSec, onExportCsv])
+
   return (
     <div className="flex h-full flex-col">
       {/* ① 采样控制 */}
@@ -650,6 +681,30 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
             >
               {TIMEBASE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
+          </div>
+          {/* 波形操作：全览 / 清空 / 导出 CSV */}
+          <div className="flex items-center gap-1.5 pt-0.5">
+            <button
+              className="flex h-7 flex-1 items-center justify-center gap-1 rounded border border-border text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              onClick={onFitAll}
+              title="全览：关闭 Follow，缩放显示全部已采数据"
+            >
+              <Maximize2 className="size-3" /> 全览
+            </button>
+            <button
+              className="flex h-7 flex-1 items-center justify-center gap-1 rounded border border-border text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              onClick={onClear}
+              title="清空已采集的波形数据（不影响采样运行）"
+            >
+              <Trash2 className="size-3" /> 清空
+            </button>
+            <button
+              className="flex h-7 flex-1 items-center justify-center gap-1 rounded border border-border text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              onClick={() => setShowExportDialog(true)}
+              title="导出当前采样数据为 CSV 文件（可选择时间范围）"
+            >
+              <Download className="size-3" /> 导出 CSV
+            </button>
           </div>
           {transport === 'rtt' && (
             <div className="flex items-start gap-1 rounded border border-amber-500/30 bg-amber-500/10 p-1.5 text-[10px] text-amber-600">
@@ -934,6 +989,87 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
             <Button onClick={handleAddManual} disabled={!manualName.trim() || !manualAddr.trim()}>
               <Plus className="size-4" />
               添加
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* CSV 导出范围对话框 */}
+      <Dialog open={showExportDialog} onOpenChange={setShowExportDialog}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>导出 CSV</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-muted-foreground">导出范围</label>
+              <div className="flex gap-1.5">
+                {([
+                  { v: 'all', label: '全部数据' },
+                  { v: 'recent', label: '最近时段' },
+                  { v: 'custom', label: '自定义' },
+                ] as const).map((o) => (
+                  <button
+                    key={o.v}
+                    className={cn(
+                      'h-7 flex-1 rounded border border-border text-[11px] font-medium transition-colors',
+                      exportMode === o.v
+                        ? 'border-primary bg-primary/10 text-primary'
+                        : 'text-muted-foreground hover:bg-muted/30 hover:text-foreground',
+                    )}
+                    onClick={() => setExportMode(o.v)}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {exportMode === 'recent' && (
+              <div className="flex items-center gap-1.5">
+                <span className="shrink-0 w-14 text-[11px] text-muted-foreground">最近</span>
+                <select
+                  className="h-7 flex-1 rounded border border-border bg-background px-1 text-[11px]"
+                  value={exportRecentSec}
+                  onChange={(e) => setExportRecentSec(Number(e.target.value))}
+                >
+                  {[5, 10, 30, 60, 120, 300].map((s) => (
+                    <option key={s} value={s}>{s} 秒</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {exportMode === 'custom' && (
+              <div className="flex items-center gap-1.5">
+                <span className="shrink-0 text-[11px] text-muted-foreground">从</span>
+                <input
+                  type="number" min={0} step={0.1}
+                  className="h-7 w-16 rounded border border-border bg-background px-1 text-[11px] font-mono"
+                  value={exportStartSec}
+                  onChange={(e) => setExportStartSec(e.target.value)}
+                  title="起始时间（秒，相对采样起点）"
+                />
+                <span className="text-[11px] text-muted-foreground">s 到</span>
+                <input
+                  type="number" min={0} step={0.1}
+                  className="h-7 w-16 rounded border border-border bg-background px-1 text-[11px] font-mono"
+                  value={exportEndSec}
+                  onChange={(e) => setExportEndSec(e.target.value)}
+                  title="结束时间（秒，相对采样起点）"
+                />
+                <span className="text-[11px] text-muted-foreground">s</span>
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">
+              {exportMode === 'all' && '导出本次采样的全部数据。'}
+              {exportMode === 'recent' && '导出距当前最近 N 秒的数据（按最新采样点向前推算）。'}
+              {exportMode === 'custom' && '时间相对采样起点（t_ms/1000），超出实际数据范围的部分自动忽略。'}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowExportDialog(false)}>取消</Button>
+            <Button onClick={handleExportConfirm}>
+              <Download className="size-4" />
+              导出
             </Button>
           </DialogFooter>
         </DialogContent>

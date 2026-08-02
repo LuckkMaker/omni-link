@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Activity, Download, X } from 'lucide-react'
+import { Activity, X } from 'lucide-react'
 import { useProbeStore } from '@/stores/probe.store'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -60,6 +60,8 @@ export default function MonitorPage() {
   const [cursorMeasure, setCursorMeasure] = useState<CursorMeasurement | null>(null)
   /** 鼠标游标位置的采样值及索引（JScope 风格：鼠标悬停波形图时显示对应位置的值） */
   const [cursorData, setCursorData] = useState<{ values: Map<string, number | null>; sampleIndex: number } | null>(null)
+  /** 全览信号：递增时波形图缩放显示全部已采数据（关闭 Follow + X 轴覆盖数据首尾） */
+  const [fitSignal, setFitSignal] = useState(0)
   const notifIdRef = useRef<string | null>(null)
 
   // ── 初始化：拉取状态与变量列表 ──
@@ -333,11 +335,13 @@ export default function MonitorPage() {
     setWatchHeight((h) => Math.max(0, Math.min(window.innerHeight / 2, h - deltaY)))
   }, [])
 
-  // ── CSV 导出 ──
-  const handleExportCsv = useCallback(async () => {
+  // ── CSV 导出（支持时间范围）──
+  const handleExportCsv = useCallback(async (
+    range?: { mode?: 'all' | 'recent' | 'custom'; recentSeconds?: number; startMs?: number; endMs?: number },
+  ) => {
     if (!uid) return
     try {
-      const result = await monitorService.exportCsv(uid)
+      const result = await monitorService.exportCsv(uid, range)
       if (result.success && result.csv) {
         const blob = new Blob([result.csv], { type: 'text/csv;charset=utf-8' })
         const url = URL.createObjectURL(blob)
@@ -364,6 +368,12 @@ export default function MonitorPage() {
       })
     }
   }, [uid, pushNotification])
+
+  // ── 全览：关闭 Follow 并递增信号，波形图缩放显示全部已采数据 ──
+  const handleFitAll = useCallback(() => {
+    setFollow(false)
+    setFitSignal((n) => n + 1)
+  }, [setFollow])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -398,23 +408,6 @@ export default function MonitorPage() {
               </div>
             ) : (
               <div className="flex h-full flex-col">
-                {/* 波形工具条 */}
-                <div className="mb-1 flex items-center justify-end gap-3 px-1">
-                  <button
-                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                    onClick={handleExportCsv}
-                    title="导出 CSV"
-                  >
-                    <Download className="size-3" />
-                    CSV
-                  </button>
-                  <button
-                    className="text-xs text-primary hover:underline"
-                    onClick={clearSamples}
-                  >
-                    清空
-                  </button>
-                </div>
                 {/* uPlot 波形图 */}
                 <div className="min-h-0 flex-1 overflow-hidden rounded border border-border bg-background">
                   <WaveformChart
@@ -431,6 +424,7 @@ export default function MonitorPage() {
                     onTimebaseChange={setTimebase}
                     onFollowChange={setFollow}
                     onCursorValueChange={setCursorData}
+                    fitSignal={fitSignal}
                   />
                 </div>
                 {/* 游标测量结果 */}
@@ -501,6 +495,9 @@ export default function MonitorPage() {
             onToggleDevice={handleToggleDevice}
             onReset={handleReset}
             coreState={coreState}
+            onExportCsv={handleExportCsv}
+            onClear={clearSamples}
+            onFitAll={handleFitAll}
           />
         </div>
       </div>

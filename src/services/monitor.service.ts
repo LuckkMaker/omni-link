@@ -165,7 +165,7 @@ export const monitorService = {
     const client = await api()
     const { data } = await client.post(`/api/probes/${uid}/monitor/start`, {
       rate_hz: opts.rate_hz ?? 1000,
-      max_points: opts.max_points ?? 100000,
+      max_points: opts.max_points ?? 300000,
       transport: opts.transport ?? 'swd',
     })
     return data
@@ -220,11 +220,14 @@ export const monitorService = {
     return data
   },
 
-  /** 导出录制数据为 CSV */
-  async exportCsv(uid: string): Promise<{ success: boolean; csv: string; count: number }> {
+  /** 导出录制数据为 CSV（可指定时间范围；缺省导出全部） */
+  async exportCsv(
+    uid: string,
+    opts?: { mode?: 'all' | 'recent' | 'custom'; recentSeconds?: number; startMs?: number; endMs?: number },
+  ): Promise<{ success: boolean; csv: string; count: number }> {
     const client = await api()
     const { data } = await client.get(`/api/probes/${uid}/monitor/record/export`, {
-      params: { format: 'csv' },
+      params: { format: 'csv', ...(opts ?? {}) },
     })
     return data
   },

@@ -11,6 +11,7 @@
 - Flash/Commander 操作时自动暂停采样，操作完成后恢复。
 """
 
+import os
 import time
 import struct
 import array
@@ -22,6 +23,10 @@ from dataclasses import dataclass, field
 
 from core.pyocd_backend import backend
 from core.events import event_manager
+from core.session_recorder import SessionRecorder
+
+# 采样落盘目录（用户主目录下，跨重启持久化；历史无上限，全览/CSV 从磁盘读）
+SESSION_DIR = os.path.join(os.path.expanduser("~"), ".omni-work", "monitor-sessions")
 
 # pyOCD AP/DP 寄存器级常量（用于跨 Block 流水线批量读）
 # 借鉴 plink: 直接操作 AP/DP 层，将多个 Block 的 DAP 命令一次 flush 发出，
@@ -99,7 +104,7 @@ class RingBuffer:
     高频采样时自动覆盖最旧数据。支持暂停后回看、CSV 导出。
     """
 
-    def __init__(self, max_points: int = 100000):
+    def __init__(self, max_points: int = 300000):
         self._buf: deque = deque(maxlen=max_points)
         self._lock = threading.Lock()
 
@@ -152,6 +157,8 @@ class MonitorBackend:
         self._sample_counter_time: dict[str, float] = {}
         # uid -> RingBuffer
         self._ring_buffers: dict[str, RingBuffer] = {}
+        # uid -> 采样落盘器（实时追加到磁盘，历史无上限、跨重启持久化）
+        self._recorders: dict[str, SessionRecorder] = {}
         # uid -> ELF 符号解码器（缓存）
         self._elf_decoders: dict[str, object] = {}
         # uid -> ELF 文件句柄（保持打开以复用 decoder）
@@ -192,7 +199,7 @@ class MonitorBackend:
     # ── 采样控制 ──────────────────────────────────────────────
 
     def start(self, uid: str, rate_hz: float = 1000.0,
-              max_points: int = 100000, transport: str = "swd") -> dict:
+              max_points: int = 300000, transport: str = "swd") -> dict:
         """启动采样
 
         Args:
@@ -254,6 +261,15 @@ class MonitorBackend:
             self._start_wall[uid] = time.time()  # 记录采样启动系统时间（CSV 导出用）
 
         variables = self._variables.get(uid, [])
+        # 创建会话录制器：本次采样的数据实时顺序落盘（变量集固定，变量增删时轮转文件）
+        try:
+            rec = self._recorders.get(uid)
+            if rec is None:
+                rec = SessionRecorder(SESSION_DIR, uid)
+                self._recorders[uid] = rec
+            rec.open_session(variables)
+        except OSError as e:
+            logger.warning(f"Monitor: 采样落盘初始化失败，本次会话不落盘: {e}")
         event_manager.log("info",
                           f"Monitor: 启动采样 (rate={rate_hz}Hz, vars={len(variables)}, "
                           f"transport={transport}, probe_transport={self._get_transport_type(uid)})")
@@ -531,6 +547,14 @@ class MonitorBackend:
                     if rb is not None:
                         rb.push(t_ms, {item["id"]: item["value"] for item in values})
 
+                    # 实时落盘（顺序追加，buffered 写；失败仅告警不影响采样）
+                    rec = self._recorders.get(uid)
+                    if rec is not None:
+                        try:
+                            rec.append(t_ms, {item["id"]: item["value"] for item in values})
+                        except OSError as e:
+                            logger.warning(f"Monitor: 落盘写入失败: {e}")
+
                     # 批量推送，降低 WS 消息数（阈值随采样率动态放大）
                     if len(pending_samples) >= push_batch:
                         self._emit_samples(uid, pending_samples)
@@ -561,6 +585,13 @@ class MonitorBackend:
         # 线程退出前刷出残留样本
         if pending_samples:
             self._emit_samples(uid, pending_samples)
+        # 落盘文件 flush + 关闭（文件保留供历史读取/CSV 导出）
+        rec = self._recorders.get(uid)
+        if rec is not None:
+            try:
+                rec.close()
+            except OSError as e:
+                logger.warning(f"Monitor: 落盘文件关闭失败: {e}")
         event_manager.log("info", f"Monitor: 采样线程退出 (probe {uid[:16]})")
 
     def _read_variables(self, uid: str) -> list:
@@ -1016,6 +1047,13 @@ class MonitorBackend:
                     pass
             with self._global_lock:
                 self._rtt_cbs.pop(uid, None)
+            # 落盘文件 flush + 关闭（文件保留供历史读取/CSV 导出）
+            rec = self._recorders.get(uid)
+            if rec is not None:
+                try:
+                    rec.close()
+                except OSError as e:
+                    logger.warning(f"Monitor: 落盘文件关闭失败: {e}")
 
     def _parse_rtt_frames(self, uid: str, buf: bytearray, pending_samples: list):
         """从字节缓冲区解析 RTT 数据帧
@@ -1115,6 +1153,7 @@ class MonitorBackend:
         with self._global_lock:
             self._variables.setdefault(uid, []).append(var)
             self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
+            self._sync_recorder_vars(uid)
 
         return {"success": True, "variable": self._var_to_dict(var)}
 
@@ -1126,7 +1165,20 @@ class MonitorBackend:
             removed = before - len(self._variables[uid])
             if removed:
                 self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
+                self._sync_recorder_vars(uid)
         return {"success": removed > 0}
+
+    def _sync_recorder_vars(self, uid: str):
+        """采样运行中变量集变化：同步到落盘器（轮转新文件写新 Header）。
+        调用方须持有 _global_lock。"""
+        rec = self._recorders.get(uid)
+        running = self._running.get(uid)
+        if rec is None or running is None or not running.is_set():
+            return
+        try:
+            rec.sync_variables(self._variables.get(uid, []))
+        except OSError as e:
+            logger.warning(f"Monitor: 落盘变量轮转失败: {e}")
 
     def get_variables(self, uid: str) -> list:
         with self._global_lock:
@@ -1546,36 +1598,114 @@ class MonitorBackend:
 
     # ── 录制导出 ──────────────────────────────────────────────
 
-    def export_csv(self, uid: str) -> dict:
-        """导出 RingBuffer 数据为 CSV 字符串
+    def export_csv(self, uid: str, mode: str = "all",
+                   recent_seconds: float | None = None,
+                   start_ms: float | None = None,
+                   end_ms: float | None = None) -> dict:
+        """导出采样数据为 CSV 字符串（数据源：优先落盘文件，无上限）
 
         t_ms 为相对采样起点的毫秒时间戳；额外提供"time"列（系统时间，
         由采样启动时刻 + t_ms 换算），便于与外部工具/日志按时间对齐。
+
+        时间范围（mode）：
+        - all     ：全部数据（默认）
+        - recent  ：最近 N 秒（recent_seconds，按最新采样点向前推算）
+        - custom  ：自定义区间 [start_ms, end_ms]（相对采样起点，ms）
+
+        无落盘时回退 RingBuffer（旧路径，受容量上限）。
         """
         import datetime as _dt
 
-        rb = self._ring_buffers.get(uid)
-        if not rb:
+        variables = self._variables.get(uid, [])
+        if not variables:
             return {"success": False, "error": "无录制数据"}
 
-        variables = self._variables.get(uid, [])
-        var_map = {v.id: v for v in variables}
+        # 换算 t_ms 过滤范围
+        t_start = t_end = None
+        if mode == "recent" and recent_seconds:
+            latest = None
+            rec = self._recorders.get(uid)
+            if rec is not None:
+                latest = rec.latest_t_ms()
+            if latest is None:
+                rb = self._ring_buffers.get(uid)
+                if rb and len(rb) > 0:
+                    latest = rb.get_all()[-1].t_ms
+            if latest is not None:
+                t_end = latest
+                t_start = max(0.0, latest - float(recent_seconds) * 1000.0)
+        elif mode == "custom":
+            if start_ms is not None:
+                t_start = max(0.0, float(start_ms))
+            if end_ms is not None:
+                t_end = float(end_ms)
+
         start_wall = self._start_wall.get(uid)
 
         lines = ["t_ms,time," + ",".join(v.name for v in variables)]
-        for pt in rb.get_all():
-            row = [f"{pt.t_ms:.3f}"]
-            if start_wall is not None:
-                wt = _dt.datetime.fromtimestamp(start_wall + pt.t_ms / 1000.0)
-                row.append(wt.strftime("%H:%M:%S.") + f"{wt.microsecond // 1000:03d}")
-            else:
-                row.append("")
-            for v in variables:
-                val = pt.values.get(v.id, "")
-                row.append(str(val) if val is not None else "")
-            lines.append(",".join(row))
+        rec = self._recorders.get(uid)
+        if rec is not None:
+            # 落盘数据（分段，每段变量集可能不同；统一按当前变量列表输出列，
+            # 段内缺失的变量留空，保证表头一致）
+            segments = rec.read_range(t_start, t_end)
+            for seg in segments:
+                for t_ms, values in seg["samples"]:
+                    row = [f"{t_ms:.3f}"]
+                    if start_wall is not None:
+                        wt = _dt.datetime.fromtimestamp(start_wall + t_ms / 1000.0)
+                        row.append(wt.strftime("%H:%M:%S.") + f"{wt.microsecond // 1000:03d}")
+                    else:
+                        row.append("")
+                    for v in variables:
+                        val = values.get(v.id)
+                        row.append(str(val) if val is not None else "")
+                    lines.append(",".join(row))
+        else:
+            # 回退 RingBuffer（无落盘）
+            rb = self._ring_buffers.get(uid)
+            if not rb:
+                return {"success": False, "error": "无录制数据"}
+            var_map = {v.id: v for v in variables}
+            for pt in rb.get_all():
+                if t_start is not None and pt.t_ms < t_start:
+                    continue
+                if t_end is not None and pt.t_ms > t_end:
+                    continue
+                row = [f"{pt.t_ms:.3f}"]
+                if start_wall is not None:
+                    wt = _dt.datetime.fromtimestamp(start_wall + pt.t_ms / 1000.0)
+                    row.append(wt.strftime("%H:%M:%S.") + f"{wt.microsecond // 1000:03d}")
+                else:
+                    row.append("")
+                for v in variables:
+                    val = pt.values.get(v.id, "")
+                    row.append(str(val) if val is not None else "")
+                lines.append(",".join(row))
 
         return {"success": True, "csv": "\n".join(lines), "count": len(lines) - 1}
+
+    def read_record(self, uid: str, start_ms=None, end_ms=None, limit=None) -> dict:
+        """从落盘文件按时间范围读取样本（无上限，供前端全览/历史加载）
+
+        返回 {success, segments: [{vars:[{id,name,type,address}], samples:[{t_ms, values}]}]}
+        """
+        rec = self._recorders.get(uid)
+        if rec is None:
+            return {"success": False, "error": "无落盘数据"}
+        try:
+            segments = rec.read_range(start_ms, end_ms, limit)
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+        out = []
+        for seg in segments:
+            out.append({
+                "vars": [
+                    {"id": vid, "name": name, "type": typ, "address": addr}
+                    for vid, name, typ, addr in seg["vars"]
+                ],
+                "samples": [{"t_ms": t, "values": vals} for t, vals in seg["samples"]],
+            })
+        return {"success": True, "segments": out}
 
     # ── 工具 ──────────────────────────────────────────────
 
@@ -1674,6 +1804,13 @@ class MonitorBackend:
                 pass
         self._rtt_cbs.clear()
         self._transport.clear()
+        # 关闭并释放所有落盘器（会话文件保留在磁盘）
+        for rec in self._recorders.values():
+            try:
+                rec.close()
+            except Exception:
+                pass
+        self._recorders.clear()
 
 
 # 全局单例

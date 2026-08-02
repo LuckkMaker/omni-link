@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import type { MonitorVariable, SamplePoint, MonitorVarType } from '@/services/monitor.service'
 
-/** 前端 ring buffer 容量上限（与后端对齐，5.2 阶段 uPlot 渲染用） */
-const MAX_SAMPLES = 100000
+/** 前端 ring buffer 容量上限（与后端对齐，5.2 阶段 uPlot 渲染用）
+ *  30 万点 @2.8kHz ≈ 107s 历史（用户反馈 10 万点只够 36s，周期波形下旧数据被挤掉难以察觉） */
+const MAX_SAMPLES = 300000
 
 /** 通道配置（5.2 阶段波形渲染用）
  *
