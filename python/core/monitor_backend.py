@@ -622,7 +622,15 @@ class MonitorBackend:
 
         返回 {page_addr: raw_bytes}，key 为每个子页的起始地址。
         """
-        ap = target.ap
+        # 获取 MEM-AP：标准 CortexM target 暴露 .ap；CoreSightTarget 直接子类
+        # （如 APM32F407xG 等 CMSIS-Pack/自定义 target）没有 .ap，但有 .first_ap
+        ap = getattr(target, 'ap', None)
+        if ap is None:
+            ap = getattr(target, 'first_ap', None)
+        if ap is None:
+            raise AttributeError(
+                f"target {type(target).__name__} has no accessible AP"
+            )
         dp = ap.dp
         ap_base = ap.address.address + getattr(ap, '_reg_offset', 0)
         page_size = getattr(ap, 'auto_increment_page_size', 0x400)
