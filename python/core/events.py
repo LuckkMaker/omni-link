@@ -10,6 +10,20 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 
+def _infer_log_source(message: str) -> str:
+    """根据日志消息内容推断来源页面（monitor/flash/rtt/commander/system）"""
+    msg = message or ""
+    if "Monitor" in msg:
+        return "monitor"
+    if "RTT" in msg:
+        return "rtt"
+    if "Commander" in msg:
+        return "commander"
+    if any(k in msg for k in ("Flash", "烧录", "擦除", "Program", "Erase", "Verify", "Read Back", "Check Blank", "固件")):
+        return "flash"
+    return "system"
+
+
 class EventManager:
     """WebSocket 事件推送管理器"""
 
@@ -91,11 +105,20 @@ class EventManager:
                 self._connections.remove(ws)
 
     def log(self, level: str, message: str):
-        """推送日志事件"""
+        """推送日志事件
+
+        source 由消息内容推断（集中处理，调用方无需改动）：
+        - 含 "Monitor"      -> monitor
+        - 含 "RTT"          -> rtt
+        - 含 "Commander"    -> commander
+        - 含 Flash/烧录/擦除等 -> flash
+        - 其他（连接/目标等）  -> system
+        """
         self.emit("log", {
             "timestamp": datetime.now().isoformat(timespec="milliseconds"),
             "level": level,
             "message": message,
+            "source": _infer_log_source(message),
         })
 
     @property

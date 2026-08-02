@@ -4,14 +4,12 @@ import { ConfigPanel } from './components/ConfigPanel'
 import { InputBar } from './components/InputBar'
 import { RttTabBar } from './components/RttTabBar'
 import { MultiStringDialog } from './components/MultiStringDialog'
-import { LogConsole, ResizeHandle } from '@/components/LogConsole'
+import { ResizeHandle } from '@/components/LogConsole'
 import { useRecordToFile } from './hooks/useRecordToFile'
 import { useProbeStore } from '@/stores/probe.store'
 import { useRttStore } from '@/stores/rtt.store'
 import { useUiStore } from '@/stores/ui.store'
 
-const LOG_MIN_HEIGHT = 0 // 0 = 完全隐藏
-const LOG_DEFAULT_EXPANDED = 220
 const SIDEBAR_MAX_RATIO = 0.25 // 最大尺寸 = 窗口宽度 1/4
 const SIDEBAR_DEFAULT_WIDTH = 288 // w-72
 
@@ -21,8 +19,6 @@ function getSidebarMaxWidth(): number {
 
 export default function RttPage() {
   const terminalRef = useRef<RttTerminalApi | null>(null)
-  const [bottomHeight, setBottomHeight] = useState(LOG_MIN_HEIGHT)
-  const lastExpandedHeight = useRef(LOG_DEFAULT_EXPANDED)
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH)
   const [showMultiString, setShowMultiString] = useState(false)
 
@@ -35,8 +31,6 @@ export default function RttPage() {
 
   const running = useRttStore((s) => s.running)
   const activeTabId = useRttStore((s) => s.activeTabId)
-  const logs = useRttStore((s) => s.logs)
-  const clearLogs = useRttStore((s) => s.clearLogs)
   const terminalTheme = useUiStore((s) => s.terminalTheme)
   const inputMode = useRttStore((s) => s.inputMode)
   const localEcho = useRttStore((s) => s.localEcho)
@@ -61,21 +55,6 @@ export default function RttPage() {
 
   const handleToggleSidebar = useCallback(() => {
     setSidebarWidth((w) => (w > 0 ? 0 : getSidebarMaxWidth()))
-  }, [])
-
-  const handleResize = useCallback((deltaY: number) => {
-    setBottomHeight((h) => {
-      const next = Math.max(LOG_MIN_HEIGHT, Math.min(window.innerHeight / 2, h - deltaY))
-      if (next > LOG_MIN_HEIGHT) lastExpandedHeight.current = next
-      return next
-    })
-  }, [])
-
-  const handleToggleLog = useCallback(() => {
-    setBottomHeight((h) => {
-      if (h > LOG_MIN_HEIGHT) return LOG_MIN_HEIGHT
-      return lastExpandedHeight.current
-    })
   }, [])
 
   /** 获取发送目标 down channel（供 InputBar/MultiStringDialog 使用） */
@@ -125,21 +104,6 @@ export default function RttPage() {
             running={running}
           />
         )}
-
-        {/* 可拖拽分隔（双击完全隐藏/恢复） */}
-        <ResizeHandle
-          onResize={handleResize}
-          onToggle={handleToggleLog}
-          expanded={bottomHeight > LOG_MIN_HEIGHT}
-        />
-
-        {/* 底部日志 */}
-        <div
-          className={bottomHeight > LOG_MIN_HEIGHT ? 'shrink-0 border-t border-border' : 'hidden'}
-          style={bottomHeight > LOG_MIN_HEIGHT ? { height: bottomHeight } : undefined}
-        >
-          <LogConsole logs={logs} onClear={clearLogs} title="RTT 日志" />
-        </div>
       </div>
 
       {/* 水平拖拽分隔条 */}

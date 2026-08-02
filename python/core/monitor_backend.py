@@ -232,7 +232,7 @@ class MonitorBackend:
             self._rate_hz[uid] = rate_hz
             self._actual_rate_hz[uid] = 0.0
             self._sample_counter[uid] = 0
-            self._sample_counter_time[uid] = time.monotonic()
+            self._sample_counter_time[uid] = time.perf_counter()
             self._ring_buffers[uid] = RingBuffer(max_points)
             self._transport[uid] = transport
             # 新采样会话：重置流水线降级标志，给流水线读取一次机会
@@ -244,12 +244,12 @@ class MonitorBackend:
             paused.set()  # 初始未暂停
             self._paused[uid] = paused
             self._locks[uid] = threading.Lock()
-            self._start_time[uid] = time.monotonic()
+            self._start_time[uid] = time.perf_counter()
 
         variables = self._variables.get(uid, [])
         event_manager.log("info",
                           f"Monitor: 启动采样 (rate={rate_hz}Hz, vars={len(variables)}, "
-                          f"transport={transport})")
+                          f"transport={transport}, probe_transport={self._get_transport_type(uid)})")
         event_manager.emit("monitor.started", {
             "uid": uid,
             "rate_hz": rate_hz,
@@ -322,7 +322,7 @@ class MonitorBackend:
         paused = self._paused.get(uid)
         if paused and paused.is_set():
             paused.clear()
-            self._pause_start[uid] = time.monotonic()
+            self._pause_start[uid] = time.perf_counter()
             event_manager.emit("monitor.info", {
                 "uid": uid, "paused": True, "reason": "flash/commander 操作",
             })
@@ -343,7 +343,7 @@ class MonitorBackend:
             #    这样恢复后的 t_ms = (now - start_time) * 1000 不包含暂停时长
             pause_start = self._pause_start.pop(uid, None)
             if pause_start is not None:
-                pause_duration = time.monotonic() - pause_start
+                pause_duration = time.perf_counter() - pause_start
                 start_time = self._start_time.get(uid)
                 if start_time is not None:
                     self._start_time[uid] = start_time + pause_duration
@@ -478,7 +478,7 @@ class MonitorBackend:
                 event_manager.emit("monitor.stopped", {"uid": uid, "reason": "disconnected"})
                 break
 
-            t0 = time.monotonic()
+            t0 = time.perf_counter()
 
             # 暂停状态：跳过采样但保持线程存活
             paused = self._paused.get(uid)
@@ -504,7 +504,7 @@ class MonitorBackend:
                     # 更新实际采样率统计
                     cnt = self._sample_counter.get(uid, 0) + 1
                     self._sample_counter[uid] = cnt
-                    now = time.monotonic()
+                    now = time.perf_counter()
                     last_t = self._sample_counter_time.get(uid, now)
                     elapsed = now - last_t
                     if elapsed >= 1.0:
@@ -536,11 +536,17 @@ class MonitorBackend:
                 time.sleep(min(MAX_BACKOFF, interval * (2 ** consecutive_errors)))
                 continue
 
-            # 精确间隔控制
-            elapsed = time.monotonic() - t0
+            # 精确间隔控制：混合节流（先 sleep 大部分时间，最后忙等微调）
+            # Windows 上 time.sleep 最小精度约 1ms，直接 sleep(interval-elapsed) 会把
+            # 每帧额外撑长 ~1ms（实测设定 1kHz 只剩 ~500Hz）；忙等消除该精度损耗，
+            # 让实际采样率贴近读取硬上限。
+            elapsed = time.perf_counter() - t0
             sleep_time = interval - elapsed
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                if sleep_time > 0.002:
+                    time.sleep(sleep_time - 0.001)
+                while time.perf_counter() - t0 < interval:
+                    pass
 
         # 线程退出前刷出残留样本
         if pending_samples:
@@ -604,6 +610,8 @@ class MonitorBackend:
                 f"Monitor pipelined read failed, disable pipelining for probe "
                 f"{uid[:16]}: {e}"
             )
+            event_manager.log("warning",
+                              f"Monitor: 流水线读取失败，已降级为串行读取 ({e})")
             self._pipeline_disabled[uid] = True
             results = self._read_variables_serial(target, groups)
 

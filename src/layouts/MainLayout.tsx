@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -11,7 +11,13 @@ import { DeviceSwitcher } from '@/components/layout/DeviceSwitcher'
 import { InfoPanel } from '@/pages/flash/components/InfoPanel'
 import { StatusBar } from '@/components/layout/StatusBar'
 import { NotificationContainer } from '@/components/NotificationContainer'
+import { ResizeHandle } from '@/components/LogConsole'
+import { GlobalLogArea } from '@/components/GlobalLogConsole'
 import CommanderPage from '@/pages/commander'
+
+/** 全局日志区最小高度（0 = 完全隐藏）与默认展开高度 */
+const LOG_MIN_HEIGHT = 0
+const LOG_DEFAULT_EXPANDED = 200
 
 const navItems = [
   { to: '/flash', label: 'Flash', icon: Download },
@@ -51,6 +57,20 @@ export default function MainLayout() {
       return () => clearTimeout(timer)
     }
   }, [isOnCommander])
+
+  // ── 全局日志区：高度拖拽/折叠（双击恢复/隐藏，记录上次展开高度）──
+  const [logHeight, setLogHeight] = useState(LOG_MIN_HEIGHT)
+  const lastLogExpandedHeight = useRef(LOG_DEFAULT_EXPANDED)
+  const handleLogResize = useCallback((deltaY: number) => {
+    setLogHeight((h) => {
+      const next = Math.max(0, Math.min(window.innerHeight / 2, h - deltaY))
+      if (next > 0) lastLogExpandedHeight.current = next
+      return next
+    })
+  }, [])
+  const handleToggleLog = useCallback(() => {
+    setLogHeight((h) => (h > 0 ? 0 : lastLogExpandedHeight.current))
+  }, [])
 
   // 路由变化到 tools 时自动展开
   useEffect(() => {
@@ -157,15 +177,33 @@ export default function MainLayout() {
             <InfoPanel />
           </div>
         </aside>
-        <main className="relative flex-1 overflow-auto">
-          {/* 非 Commander 页面：正常路由渲染 */}
-          {!isOnCommander && <Outlet />}
-          {/* Commander 页面：keep-alive 常驻，切走仅隐藏 */}
-          {commanderMounted && (
-            <div className={cn('absolute inset-0', isOnCommander ? 'block' : 'hidden')}>
-              <CommanderPage />
-            </div>
-          )}
+        <main className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+          {/* 页面内容区（滚动） */}
+          <div className="relative flex-1 min-h-0 overflow-auto">
+            {/* 非 Commander 页面：正常路由渲染 */}
+            {!isOnCommander && <Outlet />}
+            {/* Commander 页面：keep-alive 常驻，切走仅隐藏 */}
+            {commanderMounted && (
+              <div className={cn('absolute inset-0', isOnCommander ? 'block' : 'hidden')}>
+                <CommanderPage />
+              </div>
+            )}
+          </div>
+
+          {/* 可拖拽分隔（双击完全隐藏/恢复） */}
+          <ResizeHandle
+            onResize={handleLogResize}
+            onToggle={handleToggleLog}
+            expanded={logHeight > LOG_MIN_HEIGHT}
+          />
+
+          {/* 底部：全局日志区（高度为 0 时完全隐藏，避免残留 border） */}
+          <div
+            className={logHeight > LOG_MIN_HEIGHT ? 'shrink-0 border-t border-border' : 'hidden'}
+            style={logHeight > LOG_MIN_HEIGHT ? { height: logHeight } : undefined}
+          >
+            <GlobalLogArea />
+          </div>
         </main>
       </div>
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { wsClient } from '@/services/ws'
 import { useRttStore } from '@/stores/rtt.store'
+import { useLogStore } from '@/stores/log.store'
 import { useProbeStore } from '@/stores/probe.store'
 import { rttService } from '@/services/rtt.service'
 
@@ -16,9 +17,10 @@ import { rttService } from '@/services/rtt.service'
 export function useRttSession() {
   const setRunning = useRttStore((s) => s.setRunning)
   const reset = useRttStore((s) => s.reset)
-  const addLog = useRttStore((s) => s.addLog)
   const appendTabData = useRttStore((s) => s.appendTabData)
   const addBytesReceived = useRttStore((s) => s.addBytesReceived)
+  // RTT 会话状态日志进全局日志区（带 RTT 来源筛选）
+  const logEvent = useLogStore((s) => s.addLog)
 
   // 当前选中的探针 UID
   const selectedUid = useProbeStore((s) => s.selectedUid)
@@ -40,14 +42,14 @@ export function useRttSession() {
       const payload = data as { uid: string }
       if (payload.uid !== uidRef.current) return
       setRunning(true)
-      addLog({ level: 'info', message: 'RTT 会话已启动', timestamp: new Date().toISOString() })
+      logEvent({ level: 'info', message: 'RTT 会话已启动', timestamp: new Date().toISOString() })
     })
 
     const unsubStopped = wsClient.on('rtt.stopped', (data: unknown) => {
       const payload = data as { uid: string; reason: string }
       if (payload.uid !== uidRef.current) return
       setRunning(false)
-      addLog({ level: 'info', message: `RTT 会话已停止 (${payload.reason})`, timestamp: new Date().toISOString() })
+      logEvent({ level: 'info', message: `RTT 会话已停止 (${payload.reason})`, timestamp: new Date().toISOString() })
       if (payload.reason === 'disconnected') {
         reset()
       }
@@ -56,7 +58,7 @@ export function useRttSession() {
     const unsubError = wsClient.on('rtt.error', (data: unknown) => {
       const payload = data as { uid: string; error: string }
       if (payload.uid !== uidRef.current) return
-      addLog({ level: 'error', message: payload.error, timestamp: new Date().toISOString() })
+      logEvent({ level: 'error', message: payload.error, timestamp: new Date().toISOString() })
     })
 
     // 全局订阅 rtt.data，按通道分发到对应 Tab
@@ -93,7 +95,7 @@ export function useRttSession() {
       unsubError()
       unsubData()
     }
-  }, [selectedUid, setRunning, reset, addLog, appendTabData, addBytesReceived])
+  }, [selectedUid, setRunning, reset, logEvent, appendTabData, addBytesReceived])
 
   // 探针断开时停止 RTT（全局监听，不依赖页面挂载）
   const isConnected = useProbeStore((s) => {
