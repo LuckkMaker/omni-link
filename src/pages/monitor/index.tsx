@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Activity, Download, X } from 'lucide-react'
+import { Activity, X, Loader2, AlertTriangle } from 'lucide-react'
 import { useProbeStore } from '@/stores/probe.store'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -32,9 +32,13 @@ export default function MonitorPage() {
   const rateHz = useMonitorStore((s) => s.rateHz)
   const variables = useMonitorStore((s) => s.variables)
   const samples = useMonitorStore((s) => s.samples)
+  // samples 引用稳定（高频可变缓冲），依赖版本号触发重渲染以读取最新数据
+  const samplesVersion = useMonitorStore((s) => s.samplesVersion)
   const channels = useMonitorStore((s) => s.channels)
+  const historyLoading = useMonitorStore((s) => s.historyLoading)
   const follow = useMonitorStore((s) => s.follow)
   const setFollow = useMonitorStore((s) => s.setFollow)
+  const yNormalized = useMonitorStore((s) => s.yNormalized)
   const timebase = useMonitorStore((s) => s.timebase)
   const setTimebase = useMonitorStore((s) => s.setTimebase)
   const fps = useMonitorStore((s) => s.fps)
@@ -58,6 +62,10 @@ export default function MonitorPage() {
   const [cursorMeasure, setCursorMeasure] = useState<CursorMeasurement | null>(null)
   /** 鼠标游标位置的采样值及索引（JScope 风格：鼠标悬停波形图时显示对应位置的值） */
   const [cursorData, setCursorData] = useState<{ values: Map<string, number | null>; sampleIndex: number } | null>(null)
+  /** 全览信号：递增时波形图缩放显示全部已采数据（关闭 Follow + X 轴覆盖数据首尾） */
+  const [fitSignal, setFitSignal] = useState(0)
+  /** 全览截断提示（数据超过前端缓冲上限时显示） */
+  const [fitNotice, setFitNotice] = useState<string | null>(null)
   const notifIdRef = useRef<string | null>(null)
 
   // ── 初始化：拉取状态与变量列表 ──
@@ -106,9 +114,29 @@ export default function MonitorPage() {
     if (!uid) return
 
     const offSample = wsClient.on('monitor.sample', (data: unknown) => {
-      const payload = data as { uid: string; samples: SamplePoint[] }
+      const payload = data as {
+        uid: string
+        samples?: SamplePoint[]
+        // 结构减重格式：ids 只发一次，t/v 为数组
+        ids?: string[]
+        t?: number[]
+        v?: number[][]
+      }
       if (payload.uid !== uid) return
-      appendSamples(payload.samples)
+      if (payload.samples) {
+        // 旧格式（向后兼容）
+        appendSamples(payload.samples)
+      } else if (payload.ids && payload.t && payload.v) {
+        // 新格式：展开为 SamplePoint[] 后统一走 store（内部仍是 SamplePoint[]）
+        const pts: SamplePoint[] = payload.t.map((tMs, i) => ({
+          t_ms: tMs,
+          values: payload.ids!.map((id, j) => ({
+            id,
+            value: payload.v![i]?.[j] ?? null,
+          })),
+        }))
+        appendSamples(pts)
+      }
     })
 
     const offStarted = wsClient.on('monitor.started', (data: unknown) => {
@@ -311,17 +339,23 @@ export default function MonitorPage() {
     setWatchHeight((h) => Math.max(0, Math.min(window.innerHeight / 2, h - deltaY)))
   }, [])
 
-  // ── CSV 导出 ──
-  const handleExportCsv = useCallback(async () => {
+  // ── CSV 导出（支持时间范围）──
+  const handleExportCsv = useCallback(async (
+    range?: { mode?: 'all' | 'recent' | 'custom'; recentSeconds?: number; startMs?: number; endMs?: number },
+  ) => {
     if (!uid) return
     try {
-      const result = await monitorService.exportCsv(uid)
+      const result = await monitorService.exportCsv(uid, range)
       if (result.success && result.csv) {
         const blob = new Blob([result.csv], { type: 'text/csv;charset=utf-8' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `monitor_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`
+        // 文件名用本地时间（toISOString 是 UTC，会比系统时间少 8 小时）
+        const now = new Date()
+        const p = (n: number) => String(n).padStart(2, '0')
+        const ts = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}-${p(now.getMinutes())}-${p(now.getSeconds())}`
+        a.download = `monitor_${ts}.csv`
         a.click()
         URL.revokeObjectURL(url)
         pushNotification({
@@ -338,6 +372,34 @@ export default function MonitorPage() {
       })
     }
   }, [uid, pushNotification])
+
+  // ── 全览：关闭 Follow + 从磁盘加载全量历史（降采样覆盖全部时长，不设点上限），再缩放到全部数据 ──
+  const handleFitAll = useCallback(async () => {
+    if (!uid) return
+    setFollow(false)
+    setFitNotice(null)
+    // 拉取磁盘历史：maxPoints 超限时后端均匀抽稀，保证覆盖采样起点到当前的全部时长
+    useMonitorStore.getState().setHistoryLoading(true)
+    try {
+      const hist = await monitorService.readRecord(uid, { startMs: 0, maxPoints: 600000 })
+      if (hist.success && hist.segments && hist.segments.length > 0) {
+        useMonitorStore.getState().loadHistory(hist.segments)
+      } else {
+        useMonitorStore.getState().setHistoryLoading(false)
+      }
+    } catch {
+      useMonitorStore.getState().setHistoryLoading(false)
+    }
+    // 历史加载完成（或失败）后缩放到当前缓冲首尾
+    setFitSignal((n) => n + 1)
+    // 截断提示：若缓冲首点 t_ms > 0（起点数据未被包含，受前端缓冲上限限制），
+    // 明确告知用户当前全览覆盖的时长范围与导出途径
+    const buf = useMonitorStore.getState().samples
+    if (buf.length > 1 && buf[0].t_ms > 500) {
+      const secs = Math.max(1, Math.round((buf[buf.length - 1].t_ms - buf[0].t_ms) / 1000))
+      setFitNotice(`采样数据超过显示上限：波形仅覆盖最近约 ${secs} 秒，完整数据请使用「导出 CSV」获取`)
+    }
+  }, [uid, setFollow])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -372,29 +434,27 @@ export default function MonitorPage() {
               </div>
             ) : (
               <div className="flex h-full flex-col">
-                {/* 波形工具条 */}
-                <div className="mb-1 flex items-center justify-end gap-3 px-1">
-                  <button
-                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                    onClick={handleExportCsv}
-                    title="导出 CSV"
-                  >
-                    <Download className="size-3" />
-                    CSV
-                  </button>
-                  <button
-                    className="text-xs text-primary hover:underline"
-                    onClick={clearSamples}
-                  >
-                    清空
-                  </button>
-                </div>
+                {/* 全览历史加载中提示 */}
+                {historyLoading && (
+                  <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    正在加载全部历史数据...
+                  </div>
+                )}
+                {/* 全览截断提示（数据超过前端缓冲上限） */}
+                {fitNotice && (
+                  <div className="mb-1 flex items-center gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600">
+                    <AlertTriangle className="size-3 shrink-0" />
+                    {fitNotice}
+                  </div>
+                )}
                 {/* uPlot 波形图 */}
                 <div className="min-h-0 flex-1 overflow-hidden rounded border border-border bg-background">
                   <WaveformChart
                     variables={variables}
                     channels={channels}
                     samples={samples}
+                    samplesVersion={samplesVersion}
                     follow={follow}
                     paused={paused}
                     windowSec={timebase}
@@ -404,6 +464,8 @@ export default function MonitorPage() {
                     onTimebaseChange={setTimebase}
                     onFollowChange={setFollow}
                     onCursorValueChange={setCursorData}
+                    fitSignal={fitSignal}
+                    yNormalized={yNormalized}
                   />
                 </div>
                 {/* 游标测量结果 */}
@@ -474,6 +536,9 @@ export default function MonitorPage() {
             onToggleDevice={handleToggleDevice}
             onReset={handleReset}
             coreState={coreState}
+            onExportCsv={handleExportCsv}
+            onClear={clearSamples}
+            onFitAll={handleFitAll}
           />
         </div>
       </div>

@@ -1,8 +1,10 @@
 import { create } from 'zustand'
 import type { MonitorVariable, SamplePoint, MonitorVarType } from '@/services/monitor.service'
+import { useNotificationStore } from '@/stores/notification.store'
 
-/** 前端 ring buffer 容量上限（与后端对齐，5.2 阶段 uPlot 渲染用） */
-const MAX_SAMPLES = 100000
+/** 前端 ring buffer 容量上限（与后端对齐；60 万点 @2.8kHz ≈ 3.5 分钟，
+ *  全览历史加载以该上限截取最近数据） */
+const MAX_SAMPLES = 600000
 
 /** 通道配置（5.2 阶段波形渲染用）
  *
@@ -59,7 +61,6 @@ interface MonitorState {
   rateHz: number
   actualRateHz: number  // 实际采样率（由后端统计，用于诊断 HSS 性能）
   transport: 'swd' | 'rtt'
-
   // ── ELF ──
   elfPath: string | null
   elfLoaded: boolean
@@ -71,8 +72,18 @@ interface MonitorState {
   variables: MonitorVariable[]
 
   // ── 采样数据（前端 ring buffer）──
+  /**
+   * 采样点数组。引用保持稳定（内部可变），高频追加时不做全量拷贝；
+   * 订阅方须同时依赖 samplesVersion 触发重渲染（见 appendSamples 分帧提交）。
+   */
   samples: SamplePoint[]
+  /** 数据版本号：每批量提交一次 +1，用于驱动订阅方重渲染 */
+  samplesVersion: number
   totalSamples: number
+  /** 全览历史加载中（磁盘数据正在拉取） */
+  historyLoading: boolean
+  /** 全览历史加载失败信息（null=无错误） */
+  historyError: string | null
 
   // ── 显示配置 ──
   follow: boolean
@@ -81,6 +92,8 @@ interface MonitorState {
   /** 波形图渲染帧率（FPS），控制重绘频率，默认 30 */
   fps: number
   channels: ChannelConfig[]
+  /** Y 轴自动归一化：开启后每个通道按各自数据范围独立缩放（多量级通道共存时互不压缩） */
+  yNormalized: boolean
 
   // ── 目标设备状态 ──
   /** CPU 内核状态：running=运行中, halted=已暂停, unknown=未知/未连接 */
@@ -100,6 +113,7 @@ interface MonitorState {
   setFollow: (on: boolean) => void
   setTimebase: (t: number) => void
   setFps: (fps: number) => void
+  setYNormalized: (on: boolean) => void
   setCoreState: (state: 'running' | 'halted' | 'unknown') => void
 
   setElf: (path: string, count: number) => void
@@ -112,6 +126,10 @@ interface MonitorState {
   /** WS 推送采样点时调用，写入 ring buffer */
   appendSamples: (pts: SamplePoint[]) => void
   clearSamples: () => void
+  /** 设置历史加载状态（全览时拉取磁盘数据） */
+  setHistoryLoading: (loading: boolean) => void
+  /** 加载磁盘历史到样本缓冲（全览时替换/合并 buffer；segments 来自后端 read_record） */
+  loadHistory: (segments: { vars: { id: string; name: string; type: string; address: number }[]; samples: { t_ms: number; values: Record<string, number> }[] }[]) => void
 
   /** 同步通道配置（变量增删时） */
   syncChannels: () => void
@@ -132,10 +150,56 @@ interface MonitorState {
 /** 默认通道调色板（blue/green/orange/purple/cyan 循环） */
 const PALETTE = ['#2563eb', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#dc2626', '#db2777', '#65a30d']
 
-function makeChannel(varId: string, index: number): ChannelConfig {
+/**
+ * 通道颜色全局递增序号。
+ * 用"下一个未用颜色"而非 variables 数组位置分配：删除中间变量后重新添加，
+ * 新通道不会拿到与现有通道冲突的调色板颜色（位置索引方案下 var 重加会
+ * 与 s_cnt 同为 index 2 的颜色）。
+ */
+let channelColorSeq = 0
+
+// ── 采样点高频缓冲（消除每次 appendSamples 的全量数组拷贝）──
+// samplesBuffer：引用稳定的可变数组，直接暴露给订阅方（长度实时变化）
+// pendingSamples：WS 消息到达时先入队，每 ~16ms 批量提交一次（分帧合并 set，
+//   把高频采样下的 set/重渲染频率从"每消息一次"降到 ~60 次/秒）
+const samplesBuffer: SamplePoint[] = []
+let pendingSamples: SamplePoint[] = []
+let pendingTotal = 0
+let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushPending(set: (partial: Partial<MonitorState>) => void, get: () => MonitorState) {
+  flushTimer = null
+  if (pendingSamples.length === 0) return
+  samplesBuffer.push(...pendingSamples)
+  if (samplesBuffer.length > MAX_SAMPLES) {
+    samplesBuffer.splice(0, samplesBuffer.length - MAX_SAMPLES)
+  }
+  const added = pendingTotal
+  pendingSamples = []
+  pendingTotal = 0
+  set({ samplesVersion: get().samplesVersion + 1, totalSamples: get().totalSamples + added })
+}
+
+function scheduleFlush(set: (partial: Partial<MonitorState>) => void, get: () => MonitorState) {
+  if (flushTimer !== null) return
+  flushTimer = setTimeout(() => flushPending(set, get), 16)
+}
+
+function clearSamplesBuffer(set: (partial: Partial<MonitorState>) => void, get: () => MonitorState) {
+  samplesBuffer.length = 0
+  pendingSamples = []
+  pendingTotal = 0
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+  set({ samplesVersion: get().samplesVersion + 1, totalSamples: 0 })
+}
+
+function makeChannel(varId: string): ChannelConfig {
   return {
     varId,
-    color: PALETTE[index % PALETTE.length],
+    color: PALETTE[channelColorSeq++ % PALETTE.length],
     visible: true,
     format: 'dec',
     min: null,
@@ -145,6 +209,28 @@ function makeChannel(varId: string, index: number): ChannelConfig {
     triggerMode: 'none',
     triggerLevel: 0,
   }
+}
+
+/**
+ * 自动归一化状态：可见变量通道 > 1 时自动开启（每通道独立缩放，多量级变量互不压扁），
+ * 且**只自动开启、不自动关闭**——变量减少/隐藏到 ≤1 个时保持当前状态（尊重用户选择），
+ * 由用户手动关闭（≤1 个通道时按钮可操作）。
+ */
+function computeAutoNormalize(prevYNorm: boolean, channels: ChannelConfig[]): boolean {
+  const visibleCount = channels.filter((c) => c.visible).length
+  if (visibleCount > 1) {
+    if (!prevYNorm) {
+      useNotificationStore.getState().push({
+        type: 'info',
+        title: 'Y 轴归一化已开启',
+        message: `当前 ${visibleCount} 个可见变量通道，每个通道按各自数据范围独立缩放显示（Min/Max 量程设置在此模式下不生效）`,
+        autoClose: true,
+        autoCloseDelay: 3000,
+      })
+    }
+    return true
+  }
+  return prevYNorm
 }
 
 export const useMonitorStore = create<MonitorState>((set, get) => ({
@@ -163,12 +249,16 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
 
   variables: [],
 
-  samples: [],
+  samples: samplesBuffer,
+  samplesVersion: 0,
   totalSamples: 0,
+  historyLoading: false,
+  historyError: null,
 
   follow: true,
   timebase: 1,
   fps: 30,
+  yNormalized: false,
   channels: [],
   arrayGroups: [],
   coreState: 'unknown',
@@ -183,6 +273,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   setFollow: (on) => set({ follow: on }),
   setTimebase: (t) => set({ timebase: t }),
   setFps: (fps) => set({ fps }),
+  setYNormalized: (on) => set({ yNormalized: on }),
   setCoreState: (state) => set({ coreState: state }),
 
   setElf: (path, count) => set({ elfPath: path, elfLoaded: true, symbolCount: count, elfChanged: false }),
@@ -199,38 +290,80 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   },
 
   removeVariable: (id) => {
-    set((s) => ({
-      variables: s.variables.filter((v) => v.id !== id),
-      channels: s.channels.filter((c) => c.varId !== id),
-    }))
+    const s = get()
+    const variables = s.variables.filter((v) => v.id !== id)
+    const channels = s.channels.filter((c) => c.varId !== id)
+    // 删除变量后重算自动归一化（可见通道 ≤1 时恢复共享量程并通知）
+    const yNormalized = computeAutoNormalize(s.yNormalized, channels)
+    set({ variables, channels, yNormalized })
   },
 
   updateVariable: (id, patch) => set((s) => ({
     variables: s.variables.map((v) => (v.id === id ? { ...v, ...patch } : v)),
   })),
 
-  appendSamples: (pts) => set((s) => {
-    const next = [...s.samples, ...pts]
-    // 超限时丢弃最旧数据（slice 比 shift 高效）
-    if (next.length > MAX_SAMPLES) {
-      next.splice(0, next.length - MAX_SAMPLES)
+  appendSamples: (pts) => {
+    // 高频路径：先入待提交队列，分帧批量合并（避免每消息一次全量拷贝+set）
+    pendingSamples.push(...pts)
+    pendingTotal += pts.length
+    scheduleFlush(set, get)
+  },
+
+  clearSamples: () => clearSamplesBuffer(set, get),
+
+  setHistoryLoading: (loading) => set({ historyLoading: loading, historyError: loading ? null : get().historyError }),
+
+  loadHistory: (segments) => {
+    // 磁盘历史段展开为 SamplePoint[]（后端 values 是 {id:value} dict，转 [{id,value}]）
+    const hist: SamplePoint[] = []
+    let lastHistT = -Infinity
+    for (const seg of segments) {
+      for (const s of seg.samples) {
+        hist.push({
+          t_ms: s.t_ms,
+          values: Object.entries(s.values).map(([id, value]) => ({ id, value })),
+        })
+        if (s.t_ms > lastHistT) lastHistT = s.t_ms
+      }
     }
-    return { samples: next, totalSamples: s.totalSamples + pts.length }
-  }),
+    // 保留当前缓冲中比历史更新（t_ms > lastHistT）的样本：
+    // 加载期间 WS 仍会推来新样本，避免替换时丢失
+    const tail = lastHistT >= 0 ? samplesBuffer.filter((p) => p.t_ms > lastHistT) : []
+    samplesBuffer.length = 0
+    samplesBuffer.push(...hist, ...tail)
+    if (samplesBuffer.length > MAX_SAMPLES) {
+      samplesBuffer.splice(0, samplesBuffer.length - MAX_SAMPLES)
+    }
+    pendingSamples = []
+    pendingTotal = 0
+    set({
+      samplesVersion: get().samplesVersion + 1,
+      totalSamples: samplesBuffer.length,
+      historyLoading: false,
+      historyError: null,
+    })
+  },
 
-  clearSamples: () => set({ samples: [], totalSamples: 0 }),
-
-  syncChannels: () => set((s) => {
+  syncChannels: () => {
+    const s = get()
     const existing = new Map(s.channels.map((c) => [c.varId, c]))
-    const channels = s.variables.map((v, i) =>
-      existing.get(v.id) ?? makeChannel(v.id, i)
+    const channels = s.variables.map((v) =>
+      existing.get(v.id) ?? makeChannel(v.id)
     )
-    return { channels }
-  }),
+    // 自动归一化：可见通道 > 1 开启、≤1 恢复（变化时全局通知）
+    const yNormalized = computeAutoNormalize(s.yNormalized, channels)
+    set({ channels, yNormalized })
+  },
 
-  setChannel: (varId, patch) => set((s) => ({
-    channels: s.channels.map((c) => (c.varId === varId ? { ...c, ...patch } : c)),
-  })),
+  setChannel: (varId, patch) => {
+    const s = get()
+    const channels = s.channels.map((c) => (c.varId === varId ? { ...c, ...patch } : c))
+    // 仅 visible（隐藏/显示通道）变化时重算自动归一化；其他配置修改不影响
+    const yNormalized = patch.visible !== undefined
+      ? computeAutoNormalize(s.yNormalized, channels)
+      : s.yNormalized
+    set({ channels, yNormalized })
+  },
 
   registerArrayGroup: (g) => set((s) => ({
     arrayGroups: [...s.arrayGroups, { ...g, expanded: false, elemIds: [g.firstElemId] }],
@@ -256,15 +389,19 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     arrayGroups: s.arrayGroups.filter((g) => g.baseName !== baseName),
   })),
 
-  reset: () => set({
-    running: false,
-    paused: false,
-    starting: false,
-    error: null,
-    samples: [],
-    totalSamples: 0,
-    channels: [],
-    arrayGroups: [],
-    coreState: 'unknown',
-  }),
+  reset: () => {
+    clearSamplesBuffer(set, get)
+    set({
+      running: false,
+      paused: false,
+      starting: false,
+      error: null,
+      channels: [],
+      arrayGroups: [],
+      coreState: 'unknown',
+      yNormalized: false,
+      historyLoading: false,
+      historyError: null,
+    })
+  },
 }))

@@ -293,8 +293,11 @@ export function StatusBar() {
             </div>
             <div className="flex items-center gap-1 px-2" title={`采样率：${monRateHz} Hz（实际 ${monActualRateHz.toFixed(1)} Hz）`}>
               <span className="text-white/60 text-[10px]">{monRateHz >= 1000 ? `${monRateHz / 1000}kHz` : `${monRateHz}Hz`}</span>
-              {monActualRateHz > 0 && monActualRateHz < monRateHz * 0.8 && (
-                <span className="text-amber-300 text-[10px]" title="实际采样率低于设定值，HSS 模式可能受 SWD 带宽限制">
+              {monActualRateHz > 0 && (
+                <span
+                  className={cn('text-[10px]', monActualRateHz < monRateHz * 0.8 ? 'text-amber-300' : 'text-white/60')}
+                  title={monActualRateHz < monRateHz * 0.8 ? '实际采样率低于设定值，HSS 模式可能受 SWD 带宽限制' : '实际采样率'}
+                >
                   (实际{monActualRateHz >= 1000 ? `${(monActualRateHz / 1000).toFixed(1)}kHz` : `${monActualRateHz.toFixed(0)}Hz`})
                 </span>
               )}

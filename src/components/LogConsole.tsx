@@ -70,7 +70,11 @@ export function LogConsole({ logs, onClear, title = '日志' }: LogConsoleProps)
 
   const handleSave = async () => {
     if (logs.length === 0) return
-    const savePath = await window.electron?.saveFileDialog?.(`log_${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.log`)
+    // 文件名用本地时间（toISOString 是 UTC，会比系统时间少 8 小时）
+    const now = new Date()
+    const p = (n: number) => String(n).padStart(2, '0')
+    const ts = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
+    const savePath = await window.electron?.saveFileDialog?.(`log_${ts}.log`)
     if (!savePath) return
 
     const content = logs.map((log) =>

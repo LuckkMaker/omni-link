@@ -11,6 +11,7 @@
 - Flash/Commander 操作时自动暂停采样，操作完成后恢复。
 """
 
+import os
 import time
 import struct
 import array
@@ -22,6 +23,28 @@ from dataclasses import dataclass, field
 
 from core.pyocd_backend import backend
 from core.events import event_manager
+from core.session_recorder import SessionRecorder
+
+# 采样落盘目录（用户主目录下，跨重启持久化；历史无上限，全览/CSV 从磁盘读）
+SESSION_DIR = os.path.join(os.path.expanduser("~"), ".omni-work", "monitor-sessions")
+
+# pyOCD AP/DP 寄存器级常量（用于跨 Block 流水线批量读）
+# 借鉴 plink: 直接操作 AP/DP 层，将多个 Block 的 DAP 命令一次 flush 发出，
+# 减少 USB 往返次数（deferred_transfers=True 时命令先缓冲、flush 才发送）。
+try:
+    from pyocd.coresight.ap import (
+        MEM_AP_CSW,
+        MEM_AP_TAR,
+        MEM_AP_DRW,
+        CSW_SIZE32,
+        DEFAULT_CSW_VALUE,
+    )
+except Exception:  # pragma: no cover - 编译环境可能无 pyocd，运行时有
+    MEM_AP_CSW = 0x00
+    MEM_AP_TAR = 0x04
+    MEM_AP_DRW = 0x0C
+    CSW_SIZE32 = 0x00000002
+    DEFAULT_CSW_VALUE = 0x00000010
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +60,19 @@ TYPE_MAP = {
 }
 
 # 批量读合并阈值：相邻变量地址间隔 <= 此值时合并为一次 USB 事务（字节）
-# 16 字节：合并更多变量组为单次读取，减少 USB 往返（高频采样下每往返 ~1-2ms）
-MERGE_GAP = 16
+# 64KB：合并条件退化为纯 Block 大小约束（"带宽换时间"，USB 延迟与往返次数
+# 成正比、与数据量几乎无关），变量分散时也能聚成少量 Block。
+MERGE_GAP = 64 * 1024
+# Block 覆盖字节上限（按探针传输类型区分，避免单个 Block 过大）
+# - Bulk (CMSIS-DAP v2 / WinUSB)：单包可携带更多命令，2048B = 512 words
+# - HID (CMSIS-DAP v1)：包小，1024B 更稳妥
+# - unknown：保守 512B
+BLOCK_MAX_BYTES_BULK = 2048
+BLOCK_MAX_BYTES_HID = 1024
+BLOCK_MAX_BYTES_DEFAULT = 512
+# Block 最小有效载荷比例：合并后有效变量字节 / 覆盖总字节 低于此值则不合并，
+# 避免为少量变量读取大段无关 RAM（防止带宽浪费）
+MIN_PAYLOAD_RATIO = 0.20
 # 高频推送批量阈值：当待推送样本数达到此值时打包一次 WS 推送
 PUSH_BATCH = 8
 # 错误退避上限
@@ -70,7 +104,7 @@ class RingBuffer:
     高频采样时自动覆盖最旧数据。支持暂停后回看、CSV 导出。
     """
 
-    def __init__(self, max_points: int = 100000):
+    def __init__(self, max_points: int = 300000):
         self._buf: deque = deque(maxlen=max_points)
         self._lock = threading.Lock()
 
@@ -123,6 +157,8 @@ class MonitorBackend:
         self._sample_counter_time: dict[str, float] = {}
         # uid -> RingBuffer
         self._ring_buffers: dict[str, RingBuffer] = {}
+        # uid -> 采样落盘器（实时追加到磁盘，历史无上限、跨重启持久化）
+        self._recorders: dict[str, SessionRecorder] = {}
         # uid -> ELF 符号解码器（缓存）
         self._elf_decoders: dict[str, object] = {}
         # uid -> ELF 文件句柄（保持打开以复用 decoder）
@@ -136,8 +172,10 @@ class MonitorBackend:
         self._elf_mtimes: dict[str, float] = {}
         # uid -> 已加载 ELF 文件路径（用于检测文件变化）
         self._elf_paths: dict[str, str] = {}
-        # uid -> 采样起点（monotonic）
+        # uid -> 采样起点（perf_counter）
         self._start_time: dict[str, float] = {}
+        # uid -> 采样启动的系统时间（time.time，用于 CSV 导出对齐系统时间）
+        self._start_wall: dict[str, float] = {}
         # uid -> 暂停起始时间（monotonic），用于恢复时消除时间间隙
         self._pause_start: dict[str, float] = {}
         # uid -> 传输模式（"swd" 轮询 / "rtt" 同步）
@@ -148,13 +186,20 @@ class MonitorBackend:
         self._vars_cache: dict[str, tuple] = {}
         # uid -> 变量列表版本号（add/remove 时递增，用于缓存失效）
         self._vars_version: dict[str, int] = {}
+        # uid -> 探针传输类型缓存（"bulk" / "hid" / "unknown"），用于选择 Block 合并参数
+        self._transport_type: dict[str, str] = {}
+        # uid -> 流水线读取降级标志：失败一次即置 True，后续走串行读取
+        # （防止"每帧尝试流水线失败 + 整批串行重读"的双倍开销导致采样率暴跌）
+        self._pipeline_disabled: dict[str, bool] = {}
+        # AP 对象 id -> 已写入的 CSW 值（缓存避免每帧重复写 CSW + DP SELECT）
+        self._pipelined_csw: dict[int, int] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
 
     # ── 采样控制 ──────────────────────────────────────────────
 
     def start(self, uid: str, rate_hz: float = 1000.0,
-              max_points: int = 100000, transport: str = "swd") -> dict:
+              max_points: int = 300000, transport: str = "swd") -> dict:
         """启动采样
 
         Args:
@@ -198,9 +243,13 @@ class MonitorBackend:
             self._rate_hz[uid] = rate_hz
             self._actual_rate_hz[uid] = 0.0
             self._sample_counter[uid] = 0
-            self._sample_counter_time[uid] = time.monotonic()
+            self._sample_counter_time[uid] = time.perf_counter()
             self._ring_buffers[uid] = RingBuffer(max_points)
             self._transport[uid] = transport
+            # 新采样会话：重置流水线降级标志，给流水线读取一次机会
+            self._pipeline_disabled.pop(uid, None)
+            # 清空 CSW 缓存：确保新会话首帧重写 CSW（其他探针受影响也仅多写一次，无害）
+            self._pipelined_csw.clear()
             running = threading.Event()
             running.set()
             self._running[uid] = running
@@ -208,12 +257,22 @@ class MonitorBackend:
             paused.set()  # 初始未暂停
             self._paused[uid] = paused
             self._locks[uid] = threading.Lock()
-            self._start_time[uid] = time.monotonic()
+            self._start_time[uid] = time.perf_counter()
+            self._start_wall[uid] = time.time()  # 记录采样启动系统时间（CSV 导出用）
 
         variables = self._variables.get(uid, [])
+        # 创建会话录制器：本次采样的数据实时顺序落盘（变量集固定，变量增删时轮转文件）
+        try:
+            rec = self._recorders.get(uid)
+            if rec is None:
+                rec = SessionRecorder(SESSION_DIR, uid)
+                self._recorders[uid] = rec
+            rec.open_session(variables)
+        except OSError as e:
+            logger.warning(f"Monitor: 采样落盘初始化失败，本次会话不落盘: {e}")
         event_manager.log("info",
                           f"Monitor: 启动采样 (rate={rate_hz}Hz, vars={len(variables)}, "
-                          f"transport={transport})")
+                          f"transport={transport}, probe_transport={self._get_transport_type(uid)})")
         event_manager.emit("monitor.started", {
             "uid": uid,
             "rate_hz": rate_hz,
@@ -286,7 +345,7 @@ class MonitorBackend:
         paused = self._paused.get(uid)
         if paused and paused.is_set():
             paused.clear()
-            self._pause_start[uid] = time.monotonic()
+            self._pause_start[uid] = time.perf_counter()
             event_manager.emit("monitor.info", {
                 "uid": uid, "paused": True, "reason": "flash/commander 操作",
             })
@@ -307,7 +366,7 @@ class MonitorBackend:
             #    这样恢复后的 t_ms = (now - start_time) * 1000 不包含暂停时长
             pause_start = self._pause_start.pop(uid, None)
             if pause_start is not None:
-                pause_duration = time.monotonic() - pause_start
+                pause_duration = time.perf_counter() - pause_start
                 start_time = self._start_time.get(uid)
                 if start_time is not None:
                     self._start_time[uid] = start_time + pause_duration
@@ -424,6 +483,9 @@ class MonitorBackend:
         """
         rate = self._rate_hz.get(uid, 1000.0)
         interval = 1.0 / rate if rate > 0 else 0.01
+        # 推送批量阈值：随采样率动态放大，把 WS 消息数控制在 ~rate/batch 条/秒
+        # （5kHz -> 100 条/s，1kHz -> 20 条/s），减少 JSON 序列化与前端消息处理开销
+        push_batch = max(PUSH_BATCH, int(rate // 50))
         consecutive_errors = 0
         pending_samples: list = []  # 批量推送缓冲
         last_t_ms = 0.0  # 上一个采样点时间戳，确保严格单调递增（uPlot 要求）
@@ -442,7 +504,7 @@ class MonitorBackend:
                 event_manager.emit("monitor.stopped", {"uid": uid, "reason": "disconnected"})
                 break
 
-            t0 = time.monotonic()
+            t0 = time.perf_counter()
 
             # 暂停状态：跳过采样但保持线程存活
             paused = self._paused.get(uid)
@@ -468,7 +530,7 @@ class MonitorBackend:
                     # 更新实际采样率统计
                     cnt = self._sample_counter.get(uid, 0) + 1
                     self._sample_counter[uid] = cnt
-                    now = time.monotonic()
+                    now = time.perf_counter()
                     last_t = self._sample_counter_time.get(uid, now)
                     elapsed = now - last_t
                     if elapsed >= 1.0:
@@ -485,8 +547,16 @@ class MonitorBackend:
                     if rb is not None:
                         rb.push(t_ms, {item["id"]: item["value"] for item in values})
 
-                    # 批量推送，降低 WS 消息数
-                    if len(pending_samples) >= PUSH_BATCH:
+                    # 实时落盘（顺序追加，buffered 写；失败仅告警不影响采样）
+                    rec = self._recorders.get(uid)
+                    if rec is not None:
+                        try:
+                            rec.append(t_ms, {item["id"]: item["value"] for item in values})
+                        except OSError as e:
+                            logger.warning(f"Monitor: 落盘写入失败: {e}")
+
+                    # 批量推送，降低 WS 消息数（阈值随采样率动态放大）
+                    if len(pending_samples) >= push_batch:
                         self._emit_samples(uid, pending_samples)
                         pending_samples.clear()
 
@@ -500,15 +570,28 @@ class MonitorBackend:
                 time.sleep(min(MAX_BACKOFF, interval * (2 ** consecutive_errors)))
                 continue
 
-            # 精确间隔控制
-            elapsed = time.monotonic() - t0
+            # 精确间隔控制：混合节流（先 sleep 大部分时间，最后忙等微调）
+            # Windows 上 time.sleep 最小精度约 1ms，直接 sleep(interval-elapsed) 会把
+            # 每帧额外撑长 ~1ms（实测设定 1kHz 只剩 ~500Hz）；忙等消除该精度损耗，
+            # 让实际采样率贴近读取硬上限。
+            elapsed = time.perf_counter() - t0
             sleep_time = interval - elapsed
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                if sleep_time > 0.002:
+                    time.sleep(sleep_time - 0.001)
+                while time.perf_counter() - t0 < interval:
+                    pass
 
         # 线程退出前刷出残留样本
         if pending_samples:
             self._emit_samples(uid, pending_samples)
+        # 落盘文件 flush + 关闭（文件保留供历史读取/CSV 导出）
+        rec = self._recorders.get(uid)
+        if rec is not None:
+            try:
+                rec.close()
+            except OSError as e:
+                logger.warning(f"Monitor: 落盘文件关闭失败: {e}")
         event_manager.log("info", f"Monitor: 采样线程退出 (probe {uid[:16]})")
 
     def _read_variables(self, uid: str) -> list:
@@ -517,8 +600,9 @@ class MonitorBackend:
         按地址排序后合并邻近变量为批量读取，减少 SWD 事务。
         优化：
         - 缓存排序+分组结果，变量列表未变更时复用（避免每帧重复排序）
-        - 4字节对齐时用 read_memory_block32（比 block8 快 2-3 倍）
-        关键：直接用 session.target.read_memory_block8/block32，绝不 halt。
+        - 跨 Block 流水线读取：多个分组的 DAP 命令一次性打包发出（减少 USB 往返）
+        - 失败自动回退到逐组串行读取（read_memory_block32/block8），保证兼容性
+        关键：直接用 session.target 读取，绝不 halt。
         """
         variables = self._variables.get(uid, [])
         if not variables:
@@ -529,16 +613,146 @@ class MonitorBackend:
             return []
         target = session.target
 
+        max_bytes = self._block_max_bytes(uid)
+
         # 检查缓存：变量列表未变更时复用已排序+分组的结构
         current_version = self._vars_version.get(uid, 0)
         cached = self._vars_cache.get(uid)
         if cached is None or cached[0] != current_version:
             sorted_vars = sorted(variables, key=lambda v: v.address)
-            groups = self._build_read_groups(sorted_vars)
+            groups = self._build_read_groups(sorted_vars, max_bytes)
             self._vars_cache[uid] = (current_version, groups)
         else:
             groups = cached[1]
 
+        # 仅 Bulk (CMSIS-DAP v2/WinUSB) 探针启用流水线：
+        # - HID 探针 pipeline_depth=1，命令本就是逐条往返，流水线无收益还可能引入风险
+        # - 流水线此前失败过则降级为串行（避免每帧重试+重读的双倍开销）
+        transport = self._get_transport_type(uid)
+        if transport != "bulk" or self._pipeline_disabled.get(uid):
+            return self._read_variables_serial(target, groups)
+
+        results: list = []
+        try:
+            raw_map = self._pipelined_read(target, groups)
+            for group in groups:
+                raw = self._group_words_to_raw(raw_map, group)
+                for v in group['vars']:
+                    offset = v.address - group['start']
+                    val_bytes = raw[offset:offset + v.size]
+                    if len(val_bytes) < v.size:
+                        continue
+                    value = self._decode(val_bytes, v.type)
+                    results.append({"id": v.id, "value": value})
+        except Exception as e:
+            # 流水线失败（个别探针兼容性问题等）：降级为串行读取并禁止重试，
+            # 保证最差性能回到改动前，而不是每帧"失败+整批重读"拖垮采样率
+            logger.warning(
+                f"Monitor pipelined read failed, disable pipelining for probe "
+                f"{uid[:16]}: {e}"
+            )
+            event_manager.log("warning",
+                              f"Monitor: 流水线读取失败，已降级为串行读取 ({e})")
+            self._pipeline_disabled[uid] = True
+            results = self._read_variables_serial(target, groups)
+
+        return results
+
+    def _pipelined_read(self, target, groups: list) -> dict:
+        """跨 Block 流水线读取：将多个 Block 的 DAP 命令一次打包发出
+
+        借鉴 plink 的 _pipelined_batch_read：
+        - 直接操作 AP/DP 层（比 target 层更底层，跳过 CortexM 的事务边界）
+        - 依赖 pyOCD deferred transfers（连接时 cmsis_dap.deferred_transfers=True），
+          命令先缓冲进 _crnt_cmd，一次 flush() 才真正发送
+        - 效果：N 个 Block 串行 N 次 USB 往返 -> 一次往返（Bulk V2 下 pipeline_depth=6+）
+        - 按 MEM-AP auto-increment 页边界（默认 1KB）拆分，防止 TAR 自增跨页读错
+          （与 pyOCD _read_memory_block32 内部 _read_block32_page 行为一致）
+
+        注意：曾尝试单 AP 目标走 probe 层直连（跳过 dp._select_ap）以省 Python 开销，
+        实测引入偶发"读 0"毛刺（probe 层不管理 DP SELECT/APSEL，pyocd 内部
+        SELECT 状态变化时读到错误 AP 的 DRW），且无性能收益（USB 往返占大头），
+        已彻底弃用，统一走 dp 层。
+
+        返回 {page_addr: raw_bytes}，key 为每个子页的起始地址。
+        """
+        # 获取 MEM-AP：标准 CortexM target 暴露 .ap；CoreSightTarget 直接子类
+        # （如 APM32F407xG 等 CMSIS-Pack/自定义 target）没有 .ap，但有 .first_ap
+        ap = getattr(target, 'ap', None)
+        if ap is None:
+            ap = getattr(target, 'first_ap', None)
+        if ap is None:
+            raise AttributeError(
+                f"target {type(target).__name__} has no accessible AP"
+            )
+        dp = ap.dp
+        ap_base = ap.address.address + getattr(ap, '_reg_offset', 0)
+        page_size = getattr(ap, 'auto_increment_page_size', 0x400)
+
+        # 无任何数据要读时直接返回（不写 CSW，避免空转）
+        total_words = sum(g['length'] for g in groups) // 4
+        if total_words <= 0:
+            return {}
+
+        # 1. 设置 CSW 为 32 位传输（保留原 CSW 其余控制位）
+        #    缓存已写入值：CSW 一旦设好就保持不变，每帧重复写会多一次 AP 写 + DP SELECT。
+        #    CSW 走 dp 层写：确保首次同时完成 APSEL 选择（probe 层不管理 APSEL）。
+        csw = getattr(ap, '_csw', DEFAULT_CSW_VALUE) | CSW_SIZE32
+        ap_key = id(ap)
+        if self._pipelined_csw.get(ap_key) != csw:
+            dp.write_ap(ap_base + MEM_AP_CSW, csw)
+            dp.flush()
+            self._pipelined_csw[ap_key] = csw
+
+        # 2. 排队写 TAR/DRW 统一走 dp 层（曾尝试 probe 直连，见函数 docstring，
+        #    因偶发读 0 毛刺且无性能收益已弃用）
+        # 3. 为每个 Block（按页拆分子块）排队：写 TAR + 批量读 DRW（延迟执行）
+        deferred = []  # [(page_addr, word_count, callback)]
+        for group in groups:
+            start = group['start']
+            end = start + group['length']
+            addr = start
+            while addr < end:
+                page_avail = page_size - (addr & (page_size - 1))
+                chunk = min(page_avail, end - addr)
+                word_count = chunk // 4
+                if word_count > 0:
+                    dp.write_ap(ap_base + MEM_AP_TAR, addr)
+                    cb = dp.read_ap_multiple(
+                        ap_base + MEM_AP_DRW, word_count, now=False)
+                    deferred.append((addr, word_count, cb))
+                addr += chunk
+
+        if not deferred:
+            return {}
+
+        # 4. 一次 flush，同时发出所有命令
+        dp.flush()
+
+        # 5. 逐个取回结果，组装为字节序列
+        raw_map = {}
+        for addr, word_count, cb in deferred:
+            raw_map[addr] = array.array('I', cb()).tobytes()
+        return raw_map
+
+    @staticmethod
+    def _group_words_to_raw(raw_map: dict, group: dict) -> bytes:
+        """将分组对应的各子页原始字节按地址顺序拼接"""
+        start = group['start']
+        length = group['length']
+        out = bytearray()
+        addr = start
+        end = start + length
+        while addr < end:
+            raw = raw_map.get(addr)
+            if raw is None:
+                return b""
+            out += raw
+            addr += len(raw)
+        return bytes(out[:length])
+
+    def _read_variables_serial(self, target, groups: list) -> list:
+        """逐组串行读取（流水线失败时的回退路径）"""
         results: list = []
         for group in groups:
             start_addr = group['start']
@@ -563,28 +777,79 @@ class MonitorBackend:
             except Exception as e:
                 logger.debug(f"Monitor read failed @0x{start_addr:08X}: {e}")
                 raise
-
         return results
 
-    @staticmethod
-    def _build_read_groups(sorted_vars: list) -> list:
-        """将已排序的变量合并为读取组，返回 [{start, length, vars}, ...]"""
+    def _get_transport_type(self, uid: str) -> str:
+        """检测探针传输类型（bulk/hid/unknown），用于选择 Block 合并参数。带缓存。
+
+        - bulk:  CMSIS-DAP v2 (WinUSB bulk)，单包可携带多个 DAP 命令
+        - hid:   CMSIS-DAP v1 (HID)
+        """
+        cached = self._transport_type.get(uid)
+        if cached:
+            return cached
+        t = "unknown"
+        try:
+            session = backend._get_session(uid)
+            if session is not None:
+                probe = getattr(session, 'probe', None)
+                link = getattr(probe, '_link', None)
+                interface = getattr(link, '_interface', None)
+                if interface is not None:
+                    t = "bulk" if getattr(interface, 'is_bulk', False) else "hid"
+        except Exception:
+            t = "unknown"
+        self._transport_type[uid] = t
+        return t
+
+    def _block_max_bytes(self, uid: str) -> int:
+        """按探针传输类型返回 Block 覆盖字节上限"""
+        transport = self._get_transport_type(uid)
+        if transport == "bulk":
+            return BLOCK_MAX_BYTES_BULK
+        if transport == "hid":
+            return BLOCK_MAX_BYTES_HID
+        return BLOCK_MAX_BYTES_DEFAULT
+
+    def _build_read_groups(self, sorted_vars: list, max_bytes: int) -> list:
+        """将已排序的变量合并为读取组，返回 [{start, length, vars}, ...]
+
+        合并条件（借鉴 plink 聚合读取引擎）：
+        - gap <= MERGE_GAP（64KB）：相邻变量不因间距拆块（带宽换时间）
+        - 覆盖字节数 <= max_bytes：按传输类型限制单块大小
+        - payload_ratio >= MIN_PAYLOAD_RATIO：有效字节占比不足时拆块
+        返回的 start 向下对齐 4、length 向上对齐 4（保证 32 位传输可用）。
+        """
         groups = []
         i = 0
         n = len(sorted_vars)
         while i < n:
-            # 合并邻近变量为一组（gap <= MERGE_GAP 字节）
+            # 合并邻近变量为一组
             j = i
-            group_end = sorted_vars[i].address + sorted_vars[i].size
-            while j + 1 < n and sorted_vars[j + 1].address - group_end <= MERGE_GAP:
+            raw_start = sorted_vars[i].address
+            raw_end = sorted_vars[i].address + sorted_vars[i].size
+            while j + 1 < n:
+                gap = sorted_vars[j + 1].address - raw_end
+                if gap > MERGE_GAP:
+                    break
+                candidate_end = max(raw_end,
+                                    sorted_vars[j + 1].address + sorted_vars[j + 1].size)
+                if candidate_end - raw_start > max_bytes:
+                    break
+                # 有效载荷比检查：避免为稀疏变量读取大段无关 RAM
+                payload = sum(v.size for v in sorted_vars[i:j + 2])
+                covered = candidate_end - raw_start
+                if covered > 0 and payload / covered < MIN_PAYLOAD_RATIO:
+                    break
                 j += 1
-                group_end = max(group_end, sorted_vars[j].address + sorted_vars[j].size)
+                raw_end = candidate_end
 
-            start_addr = sorted_vars[i].address
-            length = group_end - start_addr
+            # 32 位对齐（block32 比 block8 快 2-3 倍，流水线也要求 32 位对齐）
+            start_addr = raw_start & ~3
+            aligned_end = (raw_end + 3) & ~3
             groups.append({
                 'start': start_addr,
-                'length': length,
+                'length': aligned_end - start_addr,
                 'vars': sorted_vars[i:j + 1],
             })
             i = j + 1
@@ -599,8 +864,34 @@ class MonitorBackend:
             return None
 
     def _emit_samples(self, uid: str, samples: list):
-        """批量推送采样点到前端"""
-        event_manager.emit("monitor.sample", {"uid": uid, "samples": samples})
+        """批量推送采样点到前端（结构减重：ids 只发一次，时间戳/值改为数组）
+
+        旧格式：{"uid", "samples": [{t_ms, values: [{id, value}]}]}
+        新格式：{"uid", "ids": [...], "t": [t_ms...], "v": [[value...]...]}
+          - ids: 本批次变量 id 列表（每帧 values 顺序一致时只发一次）
+          - t:   本批次各采样点相对时间戳
+          - v:   值矩阵，v[i][j] = 第 i 个采样点中 ids[j] 的值
+        变量中途增删时按 id 序列拆分为多个子批次，保证每个子批次内 ids 一致。
+        """
+        # 按变量 id 序列分组（同一批次内变量增删时拆批，保证子批次内 ids 一致）
+        sub_batches: list = []  # [{ids, samples}]
+        cur_ids: tuple = ()
+        for s in samples:
+            ids = tuple(v["id"] for v in s["values"])
+            if ids != cur_ids:
+                sub_batches.append({"ids": ids, "samples": []})
+                cur_ids = ids
+            sub_batches[-1]["samples"].append(s)
+
+        for batch in sub_batches:
+            if not batch["ids"]:
+                continue
+            event_manager.emit("monitor.sample", {
+                "uid": uid,
+                "ids": list(batch["ids"]),
+                "t": [s["t_ms"] for s in batch["samples"]],
+                "v": [[v["value"] for v in s["values"]] for s in batch["samples"]],
+            })
 
     # ── RTT 同步采样循环 ──────────────────────────────────────
 
@@ -756,6 +1047,13 @@ class MonitorBackend:
                     pass
             with self._global_lock:
                 self._rtt_cbs.pop(uid, None)
+            # 落盘文件 flush + 关闭（文件保留供历史读取/CSV 导出）
+            rec = self._recorders.get(uid)
+            if rec is not None:
+                try:
+                    rec.close()
+                except OSError as e:
+                    logger.warning(f"Monitor: 落盘文件关闭失败: {e}")
 
     def _parse_rtt_frames(self, uid: str, buf: bytearray, pending_samples: list):
         """从字节缓冲区解析 RTT 数据帧
@@ -855,6 +1153,7 @@ class MonitorBackend:
         with self._global_lock:
             self._variables.setdefault(uid, []).append(var)
             self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
+            self._sync_recorder_vars(uid)
 
         return {"success": True, "variable": self._var_to_dict(var)}
 
@@ -866,7 +1165,20 @@ class MonitorBackend:
             removed = before - len(self._variables[uid])
             if removed:
                 self._vars_version[uid] = self._vars_version.get(uid, 0) + 1
+                self._sync_recorder_vars(uid)
         return {"success": removed > 0}
+
+    def _sync_recorder_vars(self, uid: str):
+        """采样运行中变量集变化：同步到落盘器（轮转新文件写新 Header）。
+        调用方须持有 _global_lock。"""
+        rec = self._recorders.get(uid)
+        running = self._running.get(uid)
+        if rec is None or running is None or not running.is_set():
+            return
+        try:
+            rec.sync_variables(self._variables.get(uid, []))
+        except OSError as e:
+            logger.warning(f"Monitor: 落盘变量轮转失败: {e}")
 
     def get_variables(self, uid: str) -> list:
         with self._global_lock:
@@ -1007,6 +1319,7 @@ class MonitorBackend:
                 elem_size = int(ti["elem_size"])
                 # 数组时 type 设为 elem_type，size 仍为整个符号大小（向后兼容）
                 sym_type_str = elem_type
+                is_guess = False
             else:
                 # 无 DWARF 或类型解析失败：回退 size 猜测，但仍保留 source_file
                 is_array = False
@@ -1014,6 +1327,17 @@ class MonitorBackend:
                 elem_count = 1
                 elem_size = info.size if info.size else TYPE_MAP[elem_type][1]
                 sym_type_str = elem_type
+                is_guess = False
+                # 保守猜测数组：无调试信息且 size >= 16、能被 4 整除的大符号，
+                # 按 uint32 数组展示（嵌入式常量表最常见；size=8 的符号可能是
+                # struct/double/函数指针等，不猜以免误导）。元素类型可能不准确，
+                # 以 is_guess=True 标记供前端提示。
+                if info.size and info.size >= 16 and info.size % 4 == 0:
+                    is_array = True
+                    elem_type = "uint32"
+                    elem_count = info.size // 4
+                    elem_size = 4
+                    is_guess = True
 
             symbols.append({
                 "name": name,
@@ -1025,6 +1349,7 @@ class MonitorBackend:
                 "elem_count": elem_count,
                 "elem_size": elem_size,
                 "source_file": source_file,
+                "is_guess": is_guess,
             })
 
         # 排序：按地址
@@ -1179,6 +1504,9 @@ class MonitorBackend:
                 return "int16"
             if bs == 4:
                 return "int32"
+        elif enc == 0x06:      # DW_ATE_signed_char
+            if bs == 1:
+                return "int8"
         elif enc == 0x07:      # DW_ATE_unsigned
             if bs == 1:
                 return "uint8"
@@ -1186,6 +1514,9 @@ class MonitorBackend:
                 return "uint16"
             if bs == 4:
                 return "uint32"
+        elif enc == 0x08:      # DW_ATE_unsigned_char（GCC 对 char/uint8_t 数组用此编码）
+            if bs == 1:
+                return "uint8"
         elif enc == 0x04:      # DW_ATE_float
             if bs == 4:
                 return "float"
@@ -1267,24 +1598,149 @@ class MonitorBackend:
 
     # ── 录制导出 ──────────────────────────────────────────────
 
-    def export_csv(self, uid: str) -> dict:
-        """导出 RingBuffer 数据为 CSV 字符串"""
-        rb = self._ring_buffers.get(uid)
-        if not rb:
-            return {"success": False, "error": "无录制数据"}
+    def export_csv(self, uid: str, mode: str = "all",
+                   recent_seconds: float | None = None,
+                   start_ms: float | None = None,
+                   end_ms: float | None = None) -> dict:
+        """导出采样数据为 CSV 字符串（数据源：优先落盘文件，无上限）
+
+        t_ms 为相对采样起点的毫秒时间戳；额外提供"time"列（系统时间，
+        由采样启动时刻 + t_ms 换算），便于与外部工具/日志按时间对齐。
+
+        时间范围（mode）：
+        - all     ：全部数据（默认）
+        - recent  ：最近 N 秒（recent_seconds，按最新采样点向前推算）
+        - custom  ：自定义区间 [start_ms, end_ms]（相对采样起点，ms）
+
+        无落盘时回退 RingBuffer（旧路径，受容量上限）。
+        """
+        import datetime as _dt
 
         variables = self._variables.get(uid, [])
-        var_map = {v.id: v for v in variables}
+        if not variables:
+            return {"success": False, "error": "无录制数据"}
 
-        lines = ["t_ms," + ",".join(v.name for v in variables)]
-        for pt in rb.get_all():
-            row = [f"{pt.t_ms:.3f}"]
-            for v in variables:
-                val = pt.values.get(v.id, "")
-                row.append(str(val) if val is not None else "")
-            lines.append(",".join(row))
+        # 换算 t_ms 过滤范围
+        t_start = t_end = None
+        if mode == "recent" and recent_seconds:
+            latest = None
+            rec = self._recorders.get(uid)
+            if rec is not None:
+                latest = rec.latest_t_ms()
+            if latest is None:
+                rb = self._ring_buffers.get(uid)
+                if rb and len(rb) > 0:
+                    latest = rb.get_all()[-1].t_ms
+            if latest is not None:
+                t_end = latest
+                t_start = max(0.0, latest - float(recent_seconds) * 1000.0)
+        elif mode == "custom":
+            if start_ms is not None:
+                t_start = max(0.0, float(start_ms))
+            if end_ms is not None:
+                t_end = float(end_ms)
+
+        start_wall = self._start_wall.get(uid)
+
+        lines = ["t_ms,time," + ",".join(v.name for v in variables)]
+        rec = self._recorders.get(uid)
+        if rec is not None:
+            # 落盘数据（分段，每段变量集可能不同；统一按当前变量列表输出列，
+            # 段内缺失的变量留空，保证表头一致）
+            segments = rec.read_range(t_start, t_end)
+            for seg in segments:
+                for t_ms, values in seg["samples"]:
+                    row = [f"{t_ms:.3f}"]
+                    if start_wall is not None:
+                        wt = _dt.datetime.fromtimestamp(start_wall + t_ms / 1000.0)
+                        row.append(wt.strftime("%H:%M:%S.") + f"{wt.microsecond // 1000:03d}")
+                    else:
+                        row.append("")
+                    for v in variables:
+                        val = values.get(v.id)
+                        row.append(str(val) if val is not None else "")
+                    lines.append(",".join(row))
+        else:
+            # 回退 RingBuffer（无落盘）
+            rb = self._ring_buffers.get(uid)
+            if not rb:
+                return {"success": False, "error": "无录制数据"}
+            var_map = {v.id: v for v in variables}
+            for pt in rb.get_all():
+                if t_start is not None and pt.t_ms < t_start:
+                    continue
+                if t_end is not None and pt.t_ms > t_end:
+                    continue
+                row = [f"{pt.t_ms:.3f}"]
+                if start_wall is not None:
+                    wt = _dt.datetime.fromtimestamp(start_wall + pt.t_ms / 1000.0)
+                    row.append(wt.strftime("%H:%M:%S.") + f"{wt.microsecond // 1000:03d}")
+                else:
+                    row.append("")
+                for v in variables:
+                    val = pt.values.get(v.id, "")
+                    row.append(str(val) if val is not None else "")
+                lines.append(",".join(row))
 
         return {"success": True, "csv": "\n".join(lines), "count": len(lines) - 1}
+
+    def read_record(self, uid: str, start_ms=None, end_ms=None, limit=None,
+                    max_points: int | None = None) -> dict:
+        """从落盘文件按时间范围读取样本（历史无上限，供前端全览/历史加载）
+
+        max_points：全览降采样上限。当范围数据总点数超过该值时，按段均匀抽稀，
+        保证覆盖全时长（每段取首尾点保真），避免超大 JSON 传输/前端内存爆炸。
+        适合全览"看整体轮廓"；精细查看请缩小窗口或用 CSV 导出。
+
+        返回 {success, segments: [{vars:[{id,name,type,address}], samples:[{t_ms, values}]}]}
+        """
+        rec = self._recorders.get(uid)
+        if rec is None:
+            return {"success": False, "error": "无落盘数据"}
+        try:
+            segments = rec.read_range(start_ms, end_ms, limit)
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+        if max_points and max_points > 0:
+            segments = self._decimate_segments(segments, max_points)
+        out = []
+        for seg in segments:
+            out.append({
+                "vars": [
+                    {"id": vid, "name": name, "type": typ, "address": addr}
+                    for vid, name, typ, addr in seg["vars"]
+                ],
+                "samples": [{"t_ms": t, "values": vals} for t, vals in seg["samples"]],
+            })
+        return {"success": True, "segments": out}
+
+    @staticmethod
+    def _decimate_segments(segments: list, max_points: int) -> list:
+        """按段均匀抽稀到约 max_points 点（每段按占比分配，保留首尾点）
+
+        segments: [{vars, samples: [(t_ms, values), ...]}]
+        """
+        total = sum(len(s["samples"]) for s in segments)
+        if total <= max_points:
+            return segments
+        out = []
+        for seg in segments:
+            samples = seg["samples"]
+            n = len(samples)
+            if n <= 1:
+                out.append(seg)
+                continue
+            target = max(1, round(n * max_points / total))
+            if n <= target:
+                out.append(seg)
+                continue
+            step = n / target
+            picked = [samples[min(int(i * step), n - 1)] for i in range(target)]
+            # 保尾点：确保时间轴覆盖到数据末尾
+            if picked[-1] != samples[-1]:
+                picked.append(samples[-1])
+            out.append({**seg, "samples": picked})
+        return out
 
     # ── 工具 ──────────────────────────────────────────────
 
@@ -1356,6 +1812,8 @@ class MonitorBackend:
             except Exception:
                 pass
         self._transport.pop(uid, None)
+        self._transport_type.pop(uid, None)  # 探针断开后清除传输类型缓存，重连时重新检测
+        self._pipeline_disabled.pop(uid, None)  # 同步清除流水线降级标志
         self._variables.pop(uid, None)
         self._ring_buffers.pop(uid, None)
 
@@ -1381,6 +1839,13 @@ class MonitorBackend:
                 pass
         self._rtt_cbs.clear()
         self._transport.clear()
+        # 关闭并释放所有落盘器（会话文件保留在磁盘）
+        for rec in self._recorders.values():
+            try:
+                rec.close()
+            except Exception:
+                pass
+        self._recorders.clear()
 
 
 # 全局单例

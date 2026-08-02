@@ -18,6 +18,8 @@ interface Props {
   variables: MonitorVariable[]
   channels: ChannelConfig[]
   samples: SamplePoint[]
+  /** 采样数据版本号：samples 引用稳定（高频可变缓冲），版本号变化驱动重绘 */
+  samplesVersion?: number
   follow: boolean
   /** 采样是否暂停（暂停时波形以最后采样值继续向右绘制） */
   paused?: boolean
@@ -34,10 +36,13 @@ interface Props {
   onFollowChange?: (follow: boolean) => void
   /** 鼠标游标值变化回调（JScope 风格：鼠标悬停时推送游标位置的采样值及采样点索引） */
   onCursorValueChange?: (data: { values: Map<string, number | null>; sampleIndex: number } | null) => void
+  /** 全览信号：数值递增时缩放显示全部已采数据（关闭 Follow + X 轴覆盖数据首尾 + Y 轴重新自适应） */
+  fitSignal?: number
+  /** Y 轴自动归一化：开启后每个通道按各自数据范围独立缩放（等价于所有通道都设了 yResolution） */
+  yNormalized?: boolean
 }
 
-/** 最大渲染点数（超过时做 min/max 降采样保留波形形状） */
-const MAX_RENDER_POINTS = 20000
+// 降采样由 uPlot decimation 基于可视像素宽度完成（稳定分桶，无索引漂移伪影）
 /** Y 轴自适应的边距比例（上下各留 10%） */
 const Y_PADDING = 0.1
 /** Y 轴 hysteresis：新范围与旧范围重叠超过此比例时不更新，避免频繁跳动 */
@@ -76,8 +81,9 @@ function niceTimeStep(span: number): number {
 }
 
 export function WaveformChart({
-  variables, channels, samples, follow, paused = false,
+  variables, channels, samples, samplesVersion, follow, paused = false,
   windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange, onFollowChange, onCursorValueChange,
+  fitSignal, yNormalized = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -92,8 +98,8 @@ export function WaveformChart({
   const fpsRef = useRef(fps)
   // Y 轴 hysteresis：记录上次设置的 Y 范围
   const yRangeRef = useRef<{ min: number; max: number } | null>(null)
-  // Y 轴配置变化检测：yResolution/min/max 变化时重置 yRangeRef，强制重新计算 Y 轴
-  const prevYConfigRef = useRef<Map<string, { yRes: number; min: number | null; max: number | null }>>(new Map())
+  // Y 轴配置变化检测：yResolution/min/max/visible 变化时重置 yRangeRef，强制重新计算 Y 轴
+  const prevYConfigRef = useRef<Map<string, { yRes: number; min: number | null; max: number | null; visible: boolean }>>(new Map())
   // 逐通道 Y 归一化参数（示波器模式：每通道独立 Y 量程，共享 0..GRID_DIVS 网格）
   // key = varId, value = { yRes: 每格数值, center: 数据中心 }
   const normParamsRef = useRef<Map<string, { yRes: number; center: number }>>(new Map())
@@ -113,6 +119,13 @@ export function WaveformChart({
   // 游标值变化回调 ref（JScope 风格）
   const onCursorValueRef = useRef(onCursorValueChange)
   useEffect(() => { onCursorValueRef.current = onCursorValueChange }, [onCursorValueChange])
+  // Y 轴自动归一化开关 ref（buildPlotData 是 useCallback，需经 ref 读取最新值）
+  const yNormRef = useRef(yNormalized)
+  useEffect(() => { yNormRef.current = yNormalized }, [yNormalized])
+  // 自动归一化判定缓存：多通道量级差异大时自动启用逐通道独立量程。
+  // 范围计算全量遍历数据，用 500ms 节流避免每帧重算（60 万点 × 通道数）。
+  const autoNormRef = useRef(false)
+  const autoNormAtRef = useRef(0)
 
   // ── 构建可见通道列表（visible=true 的通道）──
   const getVisibleSeries = useCallback(() => {
@@ -174,74 +187,91 @@ export function WaveformChart({
       }
     }
 
-    // 2) min/max 降采样：点数超过上限时按桶取 min+max（同一时间戳输出两点，
-    //    uPlot 绘制垂直线，保真波形包络，不产生人为折线锯齿）
-    let fTimes: number[] = times
-    let valArrays: (number | null)[][]
-    let downsampled = false
-    if (times.length > MAX_RENDER_POINTS) {
-      const bucketSize = Math.ceil(times.length / MAX_RENDER_POINTS)
-      const ot: number[] = []
-      const ov: (number | null)[][] = series.map(() => [])
-      for (let b = 0; b < times.length; b += bucketSize) {
-        const end = Math.min(b + bucketSize, times.length)
-        const tMid = times[Math.min(end - 1, b + ((end - b) >> 1))]
-        ot.push(tMid, tMid)
-        for (let si = 0; si < nSer; si++) {
-          let min: number | null = null
-          let max: number | null = null
-          for (let j = b; j < end; j++) {
-            const v = rows[j][si]
-            if (v === null || typeof v !== 'number') continue
-            if (min === null || v < min) min = v
-            if (max === null || v > max) max = v
-          }
-          ov[si].push(min, max)
-        }
-      }
-      fTimes = ot
-      valArrays = ov
-      downsampled = true
-    } else {
-      // 未降采样：rows 是 [pointIdx][seriesIdx]，转置为 [seriesIdx][pointIdx]
-      valArrays = series.map((_, si) => rows.map((r) => r[si]))
-    }
+    // 2) 数据透传：不再做自研索引分桶降采样 —— 桶边界随总点数变化（bucketSize 取整
+    //    漂移），重绘时已绘制波形的 min/max 尖峰位置会整体移动，表现为"毛刺/已绘波形
+    //    被后续采样影响"。改由 uPlot 内置 decimation（基于可视像素宽度分桶，稳定无漂移）
+    //    负责降采样。rows 是 [pointIdx][seriesIdx]，转置为 [seriesIdx][pointIdx]。
+    const fTimes: number[] = times
+    const valArrays: (number | null)[][] = series.map((_, si) => rows.map((r) => r[si]))
 
     // 3) 滑动平均（按通道窗口大小）：对 movingAverage > 0 的通道做居中窗口平均，
     //    平滑噪声。null 值跳过（不参与平均，保持 null）。
-    //    降采样后的数据已为包络极值，不再做平均。
-    if (!downsampled) {
-      const anyMA = series.some((s) => (s.channel.movingAverage ?? 0) > 0)
-      if (anyMA) {
-        for (let si = 0; si < nSer; si++) {
-          const w = series[si].channel.movingAverage ?? 0
-          if (!w || w < 1) continue
-          const half = Math.floor(w / 2)
-          const src = valArrays[si]
-          const out: (number | null)[] = new Array(src.length)
-          for (let i = 0; i < src.length; i++) {
-            let sum = 0, cnt = 0
-            for (let k = -half; k <= half; k++) {
-              const idx = i + k
-              if (idx < 0 || idx >= src.length) continue
-              const v = src[idx]
-              if (v !== null && typeof v === 'number') { sum += v; cnt++ }
-            }
-            out[i] = cnt > 0 ? sum / cnt : src[i]
+    //    用前缀和 O(n) 实现：数据量增大到全量透传后，O(n*w) 双重循环会拖慢渲染。
+    const anyMA = series.some((s) => (s.channel.movingAverage ?? 0) > 0)
+    if (anyMA) {
+      for (let si = 0; si < nSer; si++) {
+        const w = series[si].channel.movingAverage ?? 0
+        if (!w || w < 1) continue
+        const half = Math.floor(w / 2)
+        const src = valArrays[si]
+        const n = src.length
+        // 前缀和：preSum[i] = src[0..i-1] 的数值和，preCnt[i] = 其中有效值个数
+        const preSum = new Float64Array(n + 1)
+        const preCnt = new Int32Array(n + 1)
+        for (let i = 0; i < n; i++) {
+          const v = src[i]
+          preSum[i + 1] = preSum[i]
+          preCnt[i + 1] = preCnt[i]
+          if (v !== null && typeof v === 'number') {
+            preSum[i + 1] += v
+            preCnt[i + 1] += 1
           }
-          valArrays[si] = out
         }
+        const out: (number | null)[] = new Array(n)
+        for (let i = 0; i < n; i++) {
+          const lo = Math.max(0, i - half)
+          const hi = Math.min(n - 1, i + half)
+          const cnt = preCnt[hi + 1] - preCnt[lo]
+          out[i] = cnt > 0 ? (preSum[hi + 1] - preSum[lo]) / cnt : src[i]
+        }
+        valArrays[si] = out
       }
     }
 
     // 4) 逐通道 Y 归一化（示波器模式）
-    // 当任意通道设置了 yResolution > 0 时，所有通道数据归一化到 0..GRID_DIVS 网格。
-    // 每通道独立缩放：yResolution 决定每格代表的数值，数据中心对齐网格中心。
-    // 改变某通道 Y Res 只影响该通道波形幅度，不影响坐标系 Y 轴范围（始终 0..GRID_DIVS）。
-    // 未设 yResolution 的通道自动按数据范围计算等效 yResolution，填满网格。
+    // 触发条件：任意通道设置了 yResolution > 0、全局开启"Y 轴自动归一化"，
+    // 或自动判定（多通道量级差异 >8 倍时自动启用，避免大数值变量加入后
+    // 压扁小数值变量波形，如 s_cnt 0~4000 与 var -100~100 同时可见）。
+    // 开启后所有通道数据归一化到 0..GRID_DIVS 网格，每通道独立缩放：
+    // yResolution 决定每格代表的数值（未设置的通道按自身数据范围自动计算）。
     const anyYRes = series.some((s) => (s.channel.yResolution ?? 0) > 0)
-    normalizedRef.current = anyYRes
-    if (anyYRes) {
+    let autoNorm = autoNormRef.current
+    if (!anyYRes && !yNormRef.current && nSer >= 2) {
+      const now = performance.now()
+      if (now - autoNormAtRef.current > 500) {
+        autoNormAtRef.current = now
+        // 计算各通道数据范围（全量，500ms 节流）
+        const ranges: { min: number; max: number }[] = []
+        for (let si = 0; si < nSer; si++) {
+          const arr = valArrays[si]
+          let mn = Infinity, mx = -Infinity
+          for (let i = 0; i < arr.length; i++) {
+            const v = arr[i]
+            if (v !== null && typeof v === 'number') {
+              if (v < mn) mn = v
+              if (v > mx) mx = v
+            }
+          }
+          if (mn !== Infinity && mx !== -Infinity) ranges.push({ min: mn, max: mx })
+        }
+        if (ranges.length >= 2) {
+          const maxRange = Math.max(...ranges.map((r) => r.max - r.min))
+          const minRange = Math.min(...ranges.map((r) => r.max - r.min))
+          autoNormRef.current = minRange > 0 && maxRange / minRange > 8
+        } else {
+          autoNormRef.current = false
+        }
+      }
+      autoNorm = autoNormRef.current
+    }
+    const prevNorm = normalizedRef.current
+    normalizedRef.current = anyYRes || yNormRef.current || autoNorm
+    // 模式切换（共享量程 <-> 归一化）：重置 Y 轴与量程缓存，避免坐标系停留旧模式
+    if (normalizedRef.current !== prevNorm) {
+      normYResetRef.current = true
+      yRangeRef.current = null
+    }
+    if (normalizedRef.current) {
       const normParams = normParamsRef.current
       const halfGrid = GRID_DIVS / 2
       for (let si = 0; si < nSer; si++) {
@@ -492,19 +522,61 @@ export function WaveformChart({
     dirtyRef.current = true
     scheduleRender()
   }, [follow, scheduleRender])
-  useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, scheduleRender])
+
+  // Y 轴自动归一化开关切换：清空归一化参数与 Y 轴缓存，强制按新模式重算
+  // （归一化模式 <-> 共享量程模式）
+  useEffect(() => {
+    normYResetRef.current = true
+    normParamsRef.current.clear()
+    yRangeRef.current = null
+    dirtyRef.current = true
+    scheduleRender()
+  }, [yNormalized, scheduleRender])
+
+  // ── 全览：fitSignal 递增时，关闭 Follow + X 轴缩放覆盖全部已采数据 + Y 轴重新自适应 ──
+  const lastFitSignalRef = useRef(0)
+  useEffect(() => {
+    if (fitSignal === undefined || fitSignal === lastFitSignalRef.current) return
+    lastFitSignalRef.current = fitSignal
+    const plot = plotRef.current
+    if (!plot) return
+    const data = samplesRef.current
+    if (!data || data.length === 0) return
+    const first = data[0].t_ms / 1000
+    const last = data[data.length - 1].t_ms / 1000
+    if (!(last > first)) return
+    if (followRef.current) {
+      followRef.current = false
+      onFollowChangeRef.current?.(false)
+    }
+    yRangeRef.current = null
+    normYResetRef.current = true
+    plot.setScale('x', { min: first, max: last })
+    // Y 轴自适应在 doRender 内按新可见窗口重新计算
+    dirtyRef.current = true
+    scheduleRender()
+  }, [fitSignal, scheduleRender])
+  useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, samplesVersion, scheduleRender])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables, scheduleRender])
   useEffect(() => {
-    // 检测 Y 轴配置变化（yResolution/min/max），变化时重置 yRangeRef 强制重新计算
+    // 检测 Y 轴配置变化（yResolution/min/max/visible）或通道数量变化（增删变量），
+    // 变化时重置 yRangeRef 强制重新计算。
+    // - visible：隐藏/显示通道后可见数据范围变化，需重新适配 Y 轴
+    // - 通道数量：删除变量后 channels 变少，若仅比较现有通道配置则检测不到变化，
+    //   Y 轴停留在包含已删通道的范围，剩余通道波形可能不可见
     const prevMap = prevYConfigRef.current
+    const prevCount = prevMap.size   // 遍历前记录旧通道数（遍历中会新增 key）
     let yConfigChanged = false
     for (const ch of channels) {
       const prev = prevMap.get(ch.varId)
-      const curr = { yRes: ch.yResolution ?? 0, min: ch.min, max: ch.max }
-      if (prev && (prev.yRes !== curr.yRes || prev.min !== curr.min || prev.max !== curr.max)) {
+      const curr = { yRes: ch.yResolution ?? 0, min: ch.min, max: ch.max, visible: ch.visible ?? true }
+      if (prev && (prev.yRes !== curr.yRes || prev.min !== curr.min || prev.max !== curr.max || prev.visible !== curr.visible)) {
         yConfigChanged = true
       }
       prevMap.set(ch.varId, curr)
+    }
+    if (prevCount !== channels.length) {
+      yConfigChanged = true
     }
     if (yConfigChanged) {
       yRangeRef.current = null
@@ -660,7 +732,13 @@ export function WaveformChart({
           // 不是 Unix 时间戳。设为 true 会导致 uPlot 按 1970 纪元日期格式化。
           time: false,
         },
+        // Y 轴：归一化模式下固定 0..GRID_DIVS（每通道独立缩放到该网格），
+        // 必须设 auto:false，否则 uPlot setData 后会自动缩放 Y 轴覆盖我们的 setScale，
+        // 导致归一化模式下波形被压扁或看似"空白"。
+        y: { auto: !normalizedRef.current },
       },
+      // 注：uPlot 1.6 内置像素桶降采样（可视窗口点数 ≥ 4×像素宽时自动 min/max 分桶），
+      // 桶基于像素列、稳定无漂移；因此前端不再做自研索引分桶降采样（见 buildPlotData）。
     }
 
     const plot = new uPlot(opts, [[]], containerRef.current)
@@ -812,6 +890,8 @@ export function WaveformChart({
     variables.map((v) => v.id).join(','),
     channels.filter((c) => c.visible).map((c) => c.varId).join(','),
     channels.map((c) => c.color).join(','),
+    // 归一化状态变化时重建 uPlot（scales.y.auto 需在创建时设置）
+    yNormalized ? 'on' : (autoNormRef.current ? 'auto' : 'off'),
   ])
 
   return <div ref={containerRef} className={className} style={{ width: '100%', height: '100%' }} />

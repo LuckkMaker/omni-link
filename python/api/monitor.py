@@ -35,7 +35,7 @@ class WriteVariableRequest(BaseModel):
 
 class StartSamplingRequest(BaseModel):
     rate_hz: float = 1000.0
-    max_points: int = 100000
+    max_points: int = 300000
     transport: str = "swd"             # swd | rtt
 
 
@@ -186,11 +186,33 @@ def device_state(uid: str):
 # ── 录制导出 ──────────────────────────────────────────────
 
 @router.get("/probes/{uid}/monitor/record/export")
-def export_record(uid: str, format: str = "csv"):
-    """导出录制数据"""
+def export_record(uid: str, format: str = "csv",
+                  mode: str = "all",
+                  recent_seconds: float | None = None,
+                  start_ms: float | None = None,
+                  end_ms: float | None = None):
+    """导出录制数据（支持时间范围：mode=all/recent/custom；数据源=落盘文件，无上限）"""
     if format != "csv":
         raise HTTPException(status_code=400, detail="Only csv format supported")
-    result = monitor_backend.export_csv(uid)
+    result = monitor_backend.export_csv(
+        uid, mode=mode, recent_seconds=recent_seconds,
+        start_ms=start_ms, end_ms=end_ms,
+    )
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "Export failed"))
+    return result
+
+
+@router.get("/probes/{uid}/monitor/record")
+def read_record(uid: str, start_ms: float | None = None,
+                end_ms: float | None = None, limit: int | None = None,
+                max_points: int | None = None):
+    """按时间范围读取落盘采样数据（历史无上限；max_points 全览降采样上限）
+
+    返回 {success, segments: [{vars, samples:[{t_ms, values}]}]}
+    """
+    result = monitor_backend.read_record(uid, start_ms=start_ms, end_ms=end_ms,
+                                         limit=limit, max_points=max_points)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read failed"))
     return result

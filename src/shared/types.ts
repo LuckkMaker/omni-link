@@ -150,6 +150,8 @@ export interface LogEvent {
   timestamp: string
   level: 'info' | 'warning' | 'error'
   message: string
+  /** 日志来源（后端按消息内容推断）：monitor / flash / rtt / commander / system */
+  source?: string
 }
 
 /** WebSocket 事件通用结构 */

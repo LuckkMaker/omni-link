@@ -145,38 +145,56 @@ def read_hex(file_path: str):
 
 
 def read_elf(file_path: str):
-    """读取 ELF/AXF 文件，提取可加载段数据"""
+    """读取 ELF/AXF 文件，提取可加载段数据
+
+    只提取有文件数据的 PT_LOAD 段（跳过 BSS），按连续性分组，
+    返回最大的连续组（通常是 Flash 区域），避免 Flash 和 RAM 之间的大间隙
+    导致分配数百 MB 的填充缓冲区。
+    """
     try:
         from elftools.elf.elffile import ELFFile
 
         with open(file_path, "rb") as f:
             elf = ELFFile(f)
-            # 合并所有 PT_LOAD 段
-            min_addr = None
-            max_addr = None
-            segments = []
-
+            # 收集所有有文件数据的 PT_LOAD 段（跳过 BSS: filesz==0）
+            loadable = []
             for segment in elf.iter_segments():
                 if segment.header.p_type != "PT_LOAD":
                     continue
+                filesz = segment.header.p_filesz
+                if filesz == 0:
+                    continue
                 vaddr = segment.header.p_vaddr
-                memsz = segment.header.p_memsz
                 data = segment.data()
-                segments.append((vaddr, data))
-                if min_addr is None or vaddr < min_addr:
-                    min_addr = vaddr
-                if max_addr is None or vaddr + memsz > max_addr:
-                    max_addr = vaddr + memsz
+                loadable.append((vaddr, vaddr + filesz, data))
 
-            if min_addr is None:
+            if not loadable:
                 return {"format": "elf", "base_address": 0, "data": "", "size": 0, "mtime": os.path.getmtime(file_path)}
 
+            # 按地址排序，分组连续段（间隙 > 4KB 视为不同内存区域）
+            loadable.sort(key=lambda x: x[0])
+            groups = []
+            current_group = [loadable[0]]
+            for i in range(1, len(loadable)):
+                prev_end = current_group[-1][1]
+                curr_start = loadable[i][0]
+                if curr_start - prev_end > 0x1000:
+                    groups.append(current_group)
+                    current_group = [loadable[i]]
+                else:
+                    current_group.append(loadable[i])
+            groups.append(current_group)
+
+            # 选择数据量最大的组（通常是 Flash）
+            best_group = max(groups, key=lambda g: sum(len(s[2]) for s in g))
+
+            min_addr = best_group[0][0]
+            max_addr = max(s[1] for s in best_group)
             total = max_addr - min_addr
             raw = bytearray([0xFF] * total)
-            for vaddr, data in segments:
-                for i, b in enumerate(data):
-                    if vaddr + i - min_addr < total:
-                        raw[vaddr + i - min_addr] = b
+            for vaddr, _, data in best_group:
+                offset = vaddr - min_addr
+                raw[offset:offset + len(data)] = data
 
             return {
                 "format": "elf",

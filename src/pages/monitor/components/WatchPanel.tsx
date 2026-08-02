@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Trash2, ChevronRight, ChevronDown, Eye, EyeOff, MoreVertical } from 'lucide-react'
 import { useMonitorStore, type ArrayGroup } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -96,6 +96,8 @@ interface Props {
 export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
   const variables = useMonitorStore((s) => s.variables)
   const channels = useMonitorStore((s) => s.channels)
+  // samples 引用稳定（高频可变缓冲），依赖版本号触发重渲染以读取最新数据
+  const samplesVersion = useMonitorStore((s) => s.samplesVersion)
   const samples = useMonitorStore((s) => s.samples)
   const removeVariable = useMonitorStore((s) => s.removeVariable)
   const addVariable = useMonitorStore((s) => s.addVariable)
@@ -104,10 +106,53 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
   const expandArrayGroup = useMonitorStore((s) => s.expandArrayGroup)
   const collapseArrayGroup = useMonitorStore((s) => s.collapseArrayGroup)
   const removeArrayGroup = useMonitorStore((s) => s.removeArrayGroup)
+  const yNormalized = useMonitorStore((s) => s.yNormalized)
   const pushNotification = useNotificationStore((s) => s.push)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+
+  // ── 通道实时统计（当前值/均值/峰峰值，基于全部已采数据，400ms 节流重算）──
+  const [chanStats, setChanStats] = useState<Map<string, { cur: number | null; mean: number | null; pp: number | null }>>(new Map())
+  const lastStatsAtRef = useRef(0)
+  /** Stats 列显示模式（表头下拉选择）：均值 or 峰峰值 */
+  const [statsMode, setStatsMode] = useState<'avg' | 'pp'>('avg')
+  useEffect(() => {
+    if (samplesVersion === 0) return
+    const now = performance.now()
+    if (now - lastStatsAtRef.current < 400) return
+    lastStatsAtRef.current = now
+    const buf = samples
+    if (buf.length === 0) {
+      setChanStats(new Map())
+      return
+    }
+    const stats = new Map<string, { cur: number | null; mean: number | null; pp: number | null }>()
+    for (const ch of channels) {
+      if (!ch.visible) continue
+      let sum = 0, cnt = 0
+      let min = Infinity, max = -Infinity
+      let cur: number | null = null
+      for (let i = 0; i < buf.length; i++) {
+        const vals = buf[i].values
+        let v: number | null = null
+        for (let k = 0; k < vals.length; k++) {
+          if (vals[k].id === ch.varId) { v = vals[k].value; break }
+        }
+        if (v === null || typeof v !== 'number') continue
+        sum += v; cnt++
+        if (v < min) min = v
+        if (v > max) max = v
+        cur = v
+      }
+      stats.set(ch.varId, {
+        cur,
+        mean: cnt > 0 ? sum / cnt : null,
+        pp: min !== Infinity && max !== -Infinity ? max - min : null,
+      })
+    }
+    setChanStats(stats)
+  }, [samplesVersion, samples, channels])
 
   // JScope 风格：Value 列只显示游标位置的采样值，不显示实时值
   // 鼠标离开波形图后保留最后游标位置的值（cursorData 不会被重置为 null）
@@ -243,6 +288,17 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Min</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">Max</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-14">MA</th>
+              <th className="border border-border px-0.5 py-1 text-center font-medium w-20">
+                <select
+                  className="w-full bg-transparent text-center text-[11px] font-medium outline-none cursor-pointer"
+                  value={statsMode}
+                  onChange={(e) => setStatsMode(e.target.value as 'avg' | 'pp')}
+                  title="选择显示统计值：均值 或 峰峰值（均基于全部已采数据）"
+                >
+                  <option value="avg">均值</option>
+                  <option value="pp">峰峰值</option>
+                </select>
+              </th>
               <th className="border border-border px-1 py-1 text-center font-medium w-16">Y Res</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-36">Trigger</th>
               <th className="border border-border px-1 py-1 text-center font-medium w-10">More</th>
@@ -251,7 +307,7 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
           <tbody>
             {variables.length === 0 ? (
               <tr>
-                <td colSpan={12} className="border border-border px-2 py-4 text-center text-muted-foreground">
+                <td colSpan={13} className="border border-border px-2 py-4 text-center text-muted-foreground">
                   暂无监视变量
                 </td>
               </tr>
@@ -268,6 +324,9 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
               // 数组分组查找：首元素显示展开按钮，非首元素缩进显示
               const arrGroup = arrayGroups.find((g) => g.firstElemId === v.id)
               const subElemGroup = !arrGroup ? arrayGroups.find((g) => g.elemIds.includes(v.id) && g.firstElemId !== v.id) : null
+              // 通道统计（当前值/均值/峰峰值，全部已采数据）
+              const st = chanStats.get(v.id)
+              const stFmt = (x: number | null | undefined) => (x !== null && x !== undefined ? x.toFixed(2) : '--')
               return (
                 <>
                 <tr
@@ -342,26 +401,38 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
                       />
                     ) : !hasCursor ? '—' : val === null ? 'N/A' : val}
                   </td>
-                  {/* Min（null=自适应） */}
+                  {/* Min（null=自适应；归一化模式下不参与显示，禁用编辑） */}
                   <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                      className={cn(
+                        'h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none rounded',
+                        yNormalized
+                          ? 'cursor-not-allowed opacity-40'
+                          : 'focus:bg-background focus:ring-1 focus:ring-primary',
+                      )}
                       value={ch?.min ?? ''}
                       onChange={(e) => setChannel(v.id, { min: e.target.value === '' ? null : Number(e.target.value) })}
+                      disabled={yNormalized}
                       placeholder="自动"
-                      title="Y 轴最小值（空=跟随自适应）"
+                      title={yNormalized ? 'Y 轴归一化模式下按通道独立缩放，Min/Max 不生效（关闭归一化后可编辑）' : 'Y 轴最小值（空=跟随自适应）'}
                     />
                   </td>
-                  {/* Max（null=自适应） */}
+                  {/* Max（null=自适应；归一化模式下不参与显示，禁用编辑） */}
                   <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                      className={cn(
+                        'h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none rounded',
+                        yNormalized
+                          ? 'cursor-not-allowed opacity-40'
+                          : 'focus:bg-background focus:ring-1 focus:ring-primary',
+                      )}
                       value={ch?.max ?? ''}
                       onChange={(e) => setChannel(v.id, { max: e.target.value === '' ? null : Number(e.target.value) })}
+                      disabled={yNormalized}
                       placeholder="自动"
-                      title="Y 轴最大值（空=跟随自适应）"
+                      title={yNormalized ? 'Y 轴归一化模式下按通道独立缩放，Min/Max 不生效（关闭归一化后可编辑）' : 'Y 轴最大值（空=跟随自适应）'}
                     />
                   </td>
                   {/* Moving Average（显示游标位置处的 SMA 计算值；窗口配置在"更多"菜单） */}
@@ -374,6 +445,13 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
                     {maWindow > 0
                       ? (maVal !== null ? maVal.toFixed(2) : '—')
                       : 'Off'}
+                  </td>
+                  {/* Stats（按表头下拉选择显示 均值 或 峰峰值；tooltip 含全部统计） */}
+                  <td
+                    className="border border-border px-1 py-1 text-right font-mono text-[11px] tabular-nums text-muted-foreground"
+                    title={`${v.name} 统计（全部已采数据）：当前 ${stFmt(st?.cur)} / 均值 ${stFmt(st?.mean)} / 峰峰值 ${stFmt(st?.pp)}`}
+                  >
+                    {st ? stFmt(statsMode === 'avg' ? st.mean : st.pp) : '—'}
                   </td>
                   {/* Y Resolution（1-2-5 序列选择，0=自动）*/}
                   <td className="border border-border px-0.5 py-1">
