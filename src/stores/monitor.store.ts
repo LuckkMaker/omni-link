@@ -59,7 +59,6 @@ interface MonitorState {
   rateHz: number
   actualRateHz: number  // 实际采样率（由后端统计，用于诊断 HSS 性能）
   transport: 'swd' | 'rtt'
-
   // ── ELF ──
   elfPath: string | null
   elfLoaded: boolean
@@ -71,7 +70,13 @@ interface MonitorState {
   variables: MonitorVariable[]
 
   // ── 采样数据（前端 ring buffer）──
+  /**
+   * 采样点数组。引用保持稳定（内部可变），高频追加时不做全量拷贝；
+   * 订阅方须同时依赖 samplesVersion 触发重渲染（见 appendSamples 分帧提交）。
+   */
   samples: SamplePoint[]
+  /** 数据版本号：每批量提交一次 +1，用于驱动订阅方重渲染 */
+  samplesVersion: number
   totalSamples: number
 
   // ── 显示配置 ──
@@ -132,6 +137,44 @@ interface MonitorState {
 /** 默认通道调色板（blue/green/orange/purple/cyan 循环） */
 const PALETTE = ['#2563eb', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#dc2626', '#db2777', '#65a30d']
 
+// ── 采样点高频缓冲（消除每次 appendSamples 的全量数组拷贝）──
+// samplesBuffer：引用稳定的可变数组，直接暴露给订阅方（长度实时变化）
+// pendingSamples：WS 消息到达时先入队，每 ~16ms 批量提交一次（分帧合并 set，
+//   把高频采样下的 set/重渲染频率从"每消息一次"降到 ~60 次/秒）
+const samplesBuffer: SamplePoint[] = []
+let pendingSamples: SamplePoint[] = []
+let pendingTotal = 0
+let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushPending(set: (partial: Partial<MonitorState>) => void, get: () => MonitorState) {
+  flushTimer = null
+  if (pendingSamples.length === 0) return
+  samplesBuffer.push(...pendingSamples)
+  if (samplesBuffer.length > MAX_SAMPLES) {
+    samplesBuffer.splice(0, samplesBuffer.length - MAX_SAMPLES)
+  }
+  const added = pendingTotal
+  pendingSamples = []
+  pendingTotal = 0
+  set({ samplesVersion: get().samplesVersion + 1, totalSamples: get().totalSamples + added })
+}
+
+function scheduleFlush(set: (partial: Partial<MonitorState>) => void, get: () => MonitorState) {
+  if (flushTimer !== null) return
+  flushTimer = setTimeout(() => flushPending(set, get), 16)
+}
+
+function clearSamplesBuffer(set: (partial: Partial<MonitorState>) => void, get: () => MonitorState) {
+  samplesBuffer.length = 0
+  pendingSamples = []
+  pendingTotal = 0
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+  set({ samplesVersion: get().samplesVersion + 1, totalSamples: 0 })
+}
+
 function makeChannel(varId: string, index: number): ChannelConfig {
   return {
     varId,
@@ -163,7 +206,8 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
 
   variables: [],
 
-  samples: [],
+  samples: samplesBuffer,
+  samplesVersion: 0,
   totalSamples: 0,
 
   follow: true,
@@ -209,16 +253,14 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     variables: s.variables.map((v) => (v.id === id ? { ...v, ...patch } : v)),
   })),
 
-  appendSamples: (pts) => set((s) => {
-    const next = [...s.samples, ...pts]
-    // 超限时丢弃最旧数据（slice 比 shift 高效）
-    if (next.length > MAX_SAMPLES) {
-      next.splice(0, next.length - MAX_SAMPLES)
-    }
-    return { samples: next, totalSamples: s.totalSamples + pts.length }
-  }),
+  appendSamples: (pts) => {
+    // 高频路径：先入待提交队列，分帧批量合并（避免每消息一次全量拷贝+set）
+    pendingSamples.push(...pts)
+    pendingTotal += pts.length
+    scheduleFlush(set, get)
+  },
 
-  clearSamples: () => set({ samples: [], totalSamples: 0 }),
+  clearSamples: () => clearSamplesBuffer(set, get),
 
   syncChannels: () => set((s) => {
     const existing = new Map(s.channels.map((c) => [c.varId, c]))
@@ -256,15 +298,16 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     arrayGroups: s.arrayGroups.filter((g) => g.baseName !== baseName),
   })),
 
-  reset: () => set({
-    running: false,
-    paused: false,
-    starting: false,
-    error: null,
-    samples: [],
-    totalSamples: 0,
-    channels: [],
-    arrayGroups: [],
-    coreState: 'unknown',
-  }),
+  reset: () => {
+    clearSamplesBuffer(set, get)
+    set({
+      running: false,
+      paused: false,
+      starting: false,
+      error: null,
+      channels: [],
+      arrayGroups: [],
+      coreState: 'unknown',
+    })
+  },
 }))

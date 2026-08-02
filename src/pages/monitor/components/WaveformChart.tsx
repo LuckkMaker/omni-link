@@ -18,6 +18,8 @@ interface Props {
   variables: MonitorVariable[]
   channels: ChannelConfig[]
   samples: SamplePoint[]
+  /** 采样数据版本号：samples 引用稳定（高频可变缓冲），版本号变化驱动重绘 */
+  samplesVersion?: number
   follow: boolean
   /** 采样是否暂停（暂停时波形以最后采样值继续向右绘制） */
   paused?: boolean
@@ -76,7 +78,7 @@ function niceTimeStep(span: number): number {
 }
 
 export function WaveformChart({
-  variables, channels, samples, follow, paused = false,
+  variables, channels, samples, samplesVersion, follow, paused = false,
   windowSec = 10, fps = 30, className, onCursorSelect, onTimebaseChange, onFollowChange, onCursorValueChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -492,7 +494,7 @@ export function WaveformChart({
     dirtyRef.current = true
     scheduleRender()
   }, [follow, scheduleRender])
-  useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, scheduleRender])
+  useEffect(() => { samplesRef.current = samples; dirtyRef.current = true; scheduleRender() }, [samples, samplesVersion, scheduleRender])
   useEffect(() => { varsRef.current = variables; dirtyRef.current = true; scheduleRender() }, [variables, scheduleRender])
   useEffect(() => {
     // 检测 Y 轴配置变化（yResolution/min/max），变化时重置 yRangeRef 强制重新计算

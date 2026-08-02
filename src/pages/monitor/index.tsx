@@ -32,6 +32,8 @@ export default function MonitorPage() {
   const rateHz = useMonitorStore((s) => s.rateHz)
   const variables = useMonitorStore((s) => s.variables)
   const samples = useMonitorStore((s) => s.samples)
+  // samples 引用稳定（高频可变缓冲），依赖版本号触发重渲染以读取最新数据
+  const samplesVersion = useMonitorStore((s) => s.samplesVersion)
   const channels = useMonitorStore((s) => s.channels)
   const follow = useMonitorStore((s) => s.follow)
   const setFollow = useMonitorStore((s) => s.setFollow)
@@ -395,6 +397,7 @@ export default function MonitorPage() {
                     variables={variables}
                     channels={channels}
                     samples={samples}
+                    samplesVersion={samplesVersion}
                     follow={follow}
                     paused={paused}
                     windowSec={timebase}

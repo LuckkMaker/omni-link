@@ -101,10 +101,11 @@ mb = MonitorBackend()
 UID = "test-probe"
 
 def reset():
-    """每个用例独立：清空跨用例状态（降级标志/传输类型/分组缓存）"""
+    """每个用例独立：清空跨用例状态（降级标志/传输类型/分组缓存/CSW 缓存）"""
     mb._pipeline_disabled.pop(UID, None)
     mb._transport_type.pop(UID, None)
     mb._vars_cache.pop(UID, None)
+    mb._pipelined_csw.clear()
 
 # ── 用例1: 流水线成功，密集变量合并 1 组 ──────────────────
 print("== 用例1: 流水线成功 (3 个连续 int32) ==")

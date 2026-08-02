@@ -60,6 +60,8 @@ const TRIGGER_MODES: { value: ChannelTriggerMode; label: string }[] = [
 export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleDevice, onReset, coreState }: Props) {
   const variables = useMonitorStore((s) => s.variables)
   const channels = useMonitorStore((s) => s.channels)
+  // samples 引用稳定（高频可变缓冲），依赖版本号触发重渲染以读取最新数据
+  const samplesVersion = useMonitorStore((s) => s.samplesVersion)
   const samples = useMonitorStore((s) => s.samples)
   const running = useMonitorStore((s) => s.running)
   const paused = useMonitorStore((s) => s.paused)

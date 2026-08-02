@@ -182,6 +182,8 @@ class MonitorBackend:
         # uid -> 流水线读取降级标志：失败一次即置 True，后续走串行读取
         # （防止"每帧尝试流水线失败 + 整批串行重读"的双倍开销导致采样率暴跌）
         self._pipeline_disabled: dict[str, bool] = {}
+        # AP 对象 id -> 已写入的 CSW 值（缓存避免每帧重复写 CSW + DP SELECT）
+        self._pipelined_csw: dict[int, int] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
 
@@ -237,6 +239,8 @@ class MonitorBackend:
             self._transport[uid] = transport
             # 新采样会话：重置流水线降级标志，给流水线读取一次机会
             self._pipeline_disabled.pop(uid, None)
+            # 清空 CSW 缓存：确保新会话首帧重写 CSW（其他探针受影响也仅多写一次，无害）
+            self._pipelined_csw.clear()
             running = threading.Event()
             running.set()
             self._running[uid] = running
@@ -460,6 +464,9 @@ class MonitorBackend:
         """
         rate = self._rate_hz.get(uid, 1000.0)
         interval = 1.0 / rate if rate > 0 else 0.01
+        # 推送批量阈值：随采样率动态放大，把 WS 消息数控制在 ~rate/batch 条/秒
+        # （5kHz -> 100 条/s，1kHz -> 20 条/s），减少 JSON 序列化与前端消息处理开销
+        push_batch = max(PUSH_BATCH, int(rate // 50))
         consecutive_errors = 0
         pending_samples: list = []  # 批量推送缓冲
         last_t_ms = 0.0  # 上一个采样点时间戳，确保严格单调递增（uPlot 要求）
@@ -521,8 +528,8 @@ class MonitorBackend:
                     if rb is not None:
                         rb.push(t_ms, {item["id"]: item["value"] for item in values})
 
-                    # 批量推送，降低 WS 消息数
-                    if len(pending_samples) >= PUSH_BATCH:
+                    # 批量推送，降低 WS 消息数（阈值随采样率动态放大）
+                    if len(pending_samples) >= push_batch:
                         self._emit_samples(uid, pending_samples)
                         pending_samples.clear()
 
@@ -644,8 +651,12 @@ class MonitorBackend:
         page_size = getattr(ap, 'auto_increment_page_size', 0x400)
 
         # 1. 设置 CSW 为 32 位传输（保留原 CSW 其余控制位）
+        #    缓存已写入值：CSW 一旦设好就保持不变，每帧重复写会多一次 AP 写 + DP SELECT
         csw = getattr(ap, '_csw', DEFAULT_CSW_VALUE) | CSW_SIZE32
-        dp.write_ap(ap_base + MEM_AP_CSW, csw)
+        ap_key = id(ap)
+        if self._pipelined_csw.get(ap_key) != csw:
+            dp.write_ap(ap_base + MEM_AP_CSW, csw)
+            self._pipelined_csw[ap_key] = csw
 
         # 2. 为每个 Block（按页拆分子块）排队：写 TAR + 批量读 DRW（延迟执行）
         deferred = []  # [(page_addr, word_count, callback)]
