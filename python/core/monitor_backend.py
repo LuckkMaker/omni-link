@@ -1684,8 +1684,13 @@ class MonitorBackend:
 
         return {"success": True, "csv": "\n".join(lines), "count": len(lines) - 1}
 
-    def read_record(self, uid: str, start_ms=None, end_ms=None, limit=None) -> dict:
-        """从落盘文件按时间范围读取样本（无上限，供前端全览/历史加载）
+    def read_record(self, uid: str, start_ms=None, end_ms=None, limit=None,
+                    max_points: int | None = None) -> dict:
+        """从落盘文件按时间范围读取样本（历史无上限，供前端全览/历史加载）
+
+        max_points：全览降采样上限。当范围数据总点数超过该值时，按段均匀抽稀，
+        保证覆盖全时长（每段取首尾点保真），避免超大 JSON 传输/前端内存爆炸。
+        适合全览"看整体轮廓"；精细查看请缩小窗口或用 CSV 导出。
 
         返回 {success, segments: [{vars:[{id,name,type,address}], samples:[{t_ms, values}]}]}
         """
@@ -1696,6 +1701,8 @@ class MonitorBackend:
             segments = rec.read_range(start_ms, end_ms, limit)
         except OSError as e:
             return {"success": False, "error": str(e)}
+        if max_points and max_points > 0:
+            segments = self._decimate_segments(segments, max_points)
         out = []
         for seg in segments:
             out.append({
@@ -1706,6 +1713,34 @@ class MonitorBackend:
                 "samples": [{"t_ms": t, "values": vals} for t, vals in seg["samples"]],
             })
         return {"success": True, "segments": out}
+
+    @staticmethod
+    def _decimate_segments(segments: list, max_points: int) -> list:
+        """按段均匀抽稀到约 max_points 点（每段按占比分配，保留首尾点）
+
+        segments: [{vars, samples: [(t_ms, values), ...]}]
+        """
+        total = sum(len(s["samples"]) for s in segments)
+        if total <= max_points:
+            return segments
+        out = []
+        for seg in segments:
+            samples = seg["samples"]
+            n = len(samples)
+            if n <= 1:
+                out.append(seg)
+                continue
+            target = max(1, round(n * max_points / total))
+            if n <= target:
+                out.append(seg)
+                continue
+            step = n / target
+            picked = [samples[min(int(i * step), n - 1)] for i in range(target)]
+            # 保尾点：确保时间轴覆盖到数据末尾
+            if picked[-1] != samples[-1]:
+                picked.append(samples[-1])
+            out.append({**seg, "samples": picked})
+        return out
 
     # ── 工具 ──────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Activity, X, Loader2 } from 'lucide-react'
+import { Activity, X, Loader2, AlertTriangle } from 'lucide-react'
 import { useProbeStore } from '@/stores/probe.store'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -64,6 +64,8 @@ export default function MonitorPage() {
   const [cursorData, setCursorData] = useState<{ values: Map<string, number | null>; sampleIndex: number } | null>(null)
   /** 全览信号：递增时波形图缩放显示全部已采数据（关闭 Follow + X 轴覆盖数据首尾） */
   const [fitSignal, setFitSignal] = useState(0)
+  /** 全览截断提示（数据超过前端缓冲上限时显示） */
+  const [fitNotice, setFitNotice] = useState<string | null>(null)
   const notifIdRef = useRef<string | null>(null)
 
   // ── 初始化：拉取状态与变量列表 ──
@@ -371,14 +373,15 @@ export default function MonitorPage() {
     }
   }, [uid, pushNotification])
 
-  // ── 全览：关闭 Follow + 从磁盘加载全量历史（阶段2：历史无上限），再缩放到全部数据 ──
+  // ── 全览：关闭 Follow + 从磁盘加载全量历史（降采样覆盖全部时长，不设点上限），再缩放到全部数据 ──
   const handleFitAll = useCallback(async () => {
     if (!uid) return
     setFollow(false)
-    // 拉取磁盘历史（最多 MAX_SAMPLES 点，超过取最近一段；失败静默——前端缓冲仍可全览）
+    setFitNotice(null)
+    // 拉取磁盘历史：maxPoints 超限时后端均匀抽稀，保证覆盖采样起点到当前的全部时长
     useMonitorStore.getState().setHistoryLoading(true)
     try {
-      const hist = await monitorService.readRecord(uid, { startMs: 0, limit: 600000 })
+      const hist = await monitorService.readRecord(uid, { startMs: 0, maxPoints: 600000 })
       if (hist.success && hist.segments && hist.segments.length > 0) {
         useMonitorStore.getState().loadHistory(hist.segments)
       } else {
@@ -389,6 +392,13 @@ export default function MonitorPage() {
     }
     // 历史加载完成（或失败）后缩放到当前缓冲首尾
     setFitSignal((n) => n + 1)
+    // 截断提示：若缓冲首点 t_ms > 0（起点数据未被包含，受前端缓冲上限限制），
+    // 明确告知用户当前全览覆盖的时长范围与导出途径
+    const buf = useMonitorStore.getState().samples
+    if (buf.length > 1 && buf[0].t_ms > 500) {
+      const secs = Math.max(1, Math.round((buf[buf.length - 1].t_ms - buf[0].t_ms) / 1000))
+      setFitNotice(`采样数据超过显示上限：波形仅覆盖最近约 ${secs} 秒，完整数据请使用「导出 CSV」获取`)
+    }
   }, [uid, setFollow])
 
   return (
@@ -428,7 +438,14 @@ export default function MonitorPage() {
                 {historyLoading && (
                   <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
                     <Loader2 className="size-3 animate-spin" />
-                    正在加载全部历史数据（最近 {Math.round(600000 / Math.max(rateHz, 1))} 秒）...
+                    正在加载全部历史数据...
+                  </div>
+                )}
+                {/* 全览截断提示（数据超过前端缓冲上限） */}
+                {fitNotice && (
+                  <div className="mb-1 flex items-center gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600">
+                    <AlertTriangle className="size-3 shrink-0" />
+                    {fitNotice}
                   </div>
                 )}
                 {/* uPlot 波形图 */}

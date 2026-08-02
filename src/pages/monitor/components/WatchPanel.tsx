@@ -106,6 +106,7 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
   const expandArrayGroup = useMonitorStore((s) => s.expandArrayGroup)
   const collapseArrayGroup = useMonitorStore((s) => s.collapseArrayGroup)
   const removeArrayGroup = useMonitorStore((s) => s.removeArrayGroup)
+  const yNormalized = useMonitorStore((s) => s.yNormalized)
   const pushNotification = useNotificationStore((s) => s.push)
 
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -400,26 +401,38 @@ export function WatchPanel({ uid, onCollapse, cursorData }: Props) {
                       />
                     ) : !hasCursor ? '—' : val === null ? 'N/A' : val}
                   </td>
-                  {/* Min（null=自适应） */}
+                  {/* Min（null=自适应；归一化模式下不参与显示，禁用编辑） */}
                   <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                      className={cn(
+                        'h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none rounded',
+                        yNormalized
+                          ? 'cursor-not-allowed opacity-40'
+                          : 'focus:bg-background focus:ring-1 focus:ring-primary',
+                      )}
                       value={ch?.min ?? ''}
                       onChange={(e) => setChannel(v.id, { min: e.target.value === '' ? null : Number(e.target.value) })}
+                      disabled={yNormalized}
                       placeholder="自动"
-                      title="Y 轴最小值（空=跟随自适应）"
+                      title={yNormalized ? 'Y 轴归一化模式下按通道独立缩放，Min/Max 不生效（关闭归一化后可编辑）' : 'Y 轴最小值（空=跟随自适应）'}
                     />
                   </td>
-                  {/* Max（null=自适应） */}
+                  {/* Max（null=自适应；归一化模式下不参与显示，禁用编辑） */}
                   <td className="border border-border px-0.5 py-1">
                     <input
                       type="number"
-                      className="h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none focus:bg-background focus:ring-1 focus:ring-primary rounded"
+                      className={cn(
+                        'h-5 w-full bg-transparent text-center font-mono text-[11px] outline-none rounded',
+                        yNormalized
+                          ? 'cursor-not-allowed opacity-40'
+                          : 'focus:bg-background focus:ring-1 focus:ring-primary',
+                      )}
                       value={ch?.max ?? ''}
                       onChange={(e) => setChannel(v.id, { max: e.target.value === '' ? null : Number(e.target.value) })}
+                      disabled={yNormalized}
                       placeholder="自动"
-                      title="Y 轴最大值（空=跟随自适应）"
+                      title={yNormalized ? 'Y 轴归一化模式下按通道独立缩放，Min/Max 不生效（关闭归一化后可编辑）' : 'Y 轴最大值（空=跟随自适应）'}
                     />
                   </td>
                   {/* Moving Average（显示游标位置处的 SMA 计算值；窗口配置在"更多"菜单） */}

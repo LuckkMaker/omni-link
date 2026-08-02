@@ -88,6 +88,9 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
   const setFps = useMonitorStore((s) => s.setFps)
   const yNormalized = useMonitorStore((s) => s.yNormalized)
   const setYNormalized = useMonitorStore((s) => s.setYNormalized)
+  // 归一化强制状态：可见通道 >1（按钮禁用）；≤1 时可手动切换
+  const visibleChCount = channels.filter((c) => c.visible).length
+  const forceNorm = visibleChCount > 1
   const setElf = useMonitorStore((s) => s.setElf)
   const addVariable = useMonitorStore((s) => s.addVariable)
   const removeVariable = useMonitorStore((s) => s.removeVariable)
@@ -708,7 +711,8 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
               <Download className="size-3" /> 导出 CSV
             </button>
           </div>
-          {/* Y 轴自动归一化：每通道独立量程，多量级变量共存时互不压缩 */}
+          {/* Y 轴自动归一化：每通道独立量程，多量级变量共存时互不压缩
+              仅"可见通道 >1"为强制状态（按钮禁用）；≤1 个可见通道时可手动切换（归一化不会自动关闭） */}
           <div className="flex items-center gap-1.5">
             <button
               className={cn(
@@ -716,11 +720,15 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
                 yNormalized
                   ? 'border-primary bg-primary/10 text-primary'
                   : 'border-border text-muted-foreground hover:bg-muted/30 hover:text-foreground',
+                forceNorm && 'cursor-not-allowed opacity-60',
               )}
               onClick={() => setYNormalized(!yNormalized)}
-              title="Y 轴自动归一化：每个通道按各自数据范围独立缩放（如 s_cnt 0~4000 与 var -100~100 同时可见，互不压缩）"
+              disabled={forceNorm}
+              title={forceNorm
+                ? `Y 轴归一化已强制启用（当前 ${visibleChCount} 个可见变量通道，每个通道按各自数据范围独立缩放，防止多量级变量互相压扁）`
+                : 'Y 轴归一化：每个通道按各自数据范围独立缩放（如 s_cnt 0~4000 与 var -100~100 同时可见，互不压缩）；删除变量不会自动关闭'}
             >
-              <SlidersHorizontal className="size-3" /> Y 轴归一化
+              <SlidersHorizontal className="size-3" /> Y 轴归一化 {yNormalized ? 'ON' : 'OFF'}
             </button>
           </div>
           {transport === 'rtt' && (

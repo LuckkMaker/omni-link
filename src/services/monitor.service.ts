@@ -232,10 +232,10 @@ export const monitorService = {
     return data
   },
 
-  /** 按时间范围读取磁盘落盘采样数据（历史无上限，供全览/历史查看） */
+  /** 按时间范围读取磁盘落盘采样数据（历史无上限；maxPoints 全览降采样上限，超限均匀抽稀保证覆盖全时长） */
   async readRecord(
     uid: string,
-    opts?: { startMs?: number; endMs?: number; limit?: number },
+    opts?: { startMs?: number; endMs?: number; limit?: number; maxPoints?: number },
   ): Promise<{
     success: boolean
     segments: { vars: { id: string; name: string; type: string; address: number }[]; samples: { t_ms: number; values: Record<string, number> }[] }[]

@@ -122,6 +122,10 @@ export function WaveformChart({
   // Y 轴自动归一化开关 ref（buildPlotData 是 useCallback，需经 ref 读取最新值）
   const yNormRef = useRef(yNormalized)
   useEffect(() => { yNormRef.current = yNormalized }, [yNormalized])
+  // 自动归一化判定缓存：多通道量级差异大时自动启用逐通道独立量程。
+  // 范围计算全量遍历数据，用 500ms 节流避免每帧重算（60 万点 × 通道数）。
+  const autoNormRef = useRef(false)
+  const autoNormAtRef = useRef(0)
 
   // ── 构建可见通道列表（visible=true 的通道）──
   const getVisibleSeries = useCallback(() => {
@@ -225,12 +229,48 @@ export function WaveformChart({
     }
 
     // 4) 逐通道 Y 归一化（示波器模式）
-    // 触发条件：任意通道设置了 yResolution > 0，或全局开启"Y 轴自动归一化"。
+    // 触发条件：任意通道设置了 yResolution > 0、全局开启"Y 轴自动归一化"，
+    // 或自动判定（多通道量级差异 >8 倍时自动启用，避免大数值变量加入后
+    // 压扁小数值变量波形，如 s_cnt 0~4000 与 var -100~100 同时可见）。
     // 开启后所有通道数据归一化到 0..GRID_DIVS 网格，每通道独立缩放：
-    // yResolution 决定每格代表的数值（未设置的通道按自身数据范围自动计算），
-    // 多量级通道共存时互不压缩（如 s_cnt 0~4000 与 var -100~100 同时可见）。
+    // yResolution 决定每格代表的数值（未设置的通道按自身数据范围自动计算）。
     const anyYRes = series.some((s) => (s.channel.yResolution ?? 0) > 0)
-    normalizedRef.current = anyYRes || yNormRef.current
+    let autoNorm = autoNormRef.current
+    if (!anyYRes && !yNormRef.current && nSer >= 2) {
+      const now = performance.now()
+      if (now - autoNormAtRef.current > 500) {
+        autoNormAtRef.current = now
+        // 计算各通道数据范围（全量，500ms 节流）
+        const ranges: { min: number; max: number }[] = []
+        for (let si = 0; si < nSer; si++) {
+          const arr = valArrays[si]
+          let mn = Infinity, mx = -Infinity
+          for (let i = 0; i < arr.length; i++) {
+            const v = arr[i]
+            if (v !== null && typeof v === 'number') {
+              if (v < mn) mn = v
+              if (v > mx) mx = v
+            }
+          }
+          if (mn !== Infinity && mx !== -Infinity) ranges.push({ min: mn, max: mx })
+        }
+        if (ranges.length >= 2) {
+          const maxRange = Math.max(...ranges.map((r) => r.max - r.min))
+          const minRange = Math.min(...ranges.map((r) => r.max - r.min))
+          autoNormRef.current = minRange > 0 && maxRange / minRange > 8
+        } else {
+          autoNormRef.current = false
+        }
+      }
+      autoNorm = autoNormRef.current
+    }
+    const prevNorm = normalizedRef.current
+    normalizedRef.current = anyYRes || yNormRef.current || autoNorm
+    // 模式切换（共享量程 <-> 归一化）：重置 Y 轴与量程缓存，避免坐标系停留旧模式
+    if (normalizedRef.current !== prevNorm) {
+      normYResetRef.current = true
+      yRangeRef.current = null
+    }
     if (normalizedRef.current) {
       const normParams = normParamsRef.current
       const halfGrid = GRID_DIVS / 2
@@ -692,6 +732,10 @@ export function WaveformChart({
           // 不是 Unix 时间戳。设为 true 会导致 uPlot 按 1970 纪元日期格式化。
           time: false,
         },
+        // Y 轴：归一化模式下固定 0..GRID_DIVS（每通道独立缩放到该网格），
+        // 必须设 auto:false，否则 uPlot setData 后会自动缩放 Y 轴覆盖我们的 setScale，
+        // 导致归一化模式下波形被压扁或看似"空白"。
+        y: { auto: !normalizedRef.current },
       },
       // 注：uPlot 1.6 内置像素桶降采样（可视窗口点数 ≥ 4×像素宽时自动 min/max 分桶），
       // 桶基于像素列、稳定无漂移；因此前端不再做自研索引分桶降采样（见 buildPlotData）。
@@ -846,6 +890,8 @@ export function WaveformChart({
     variables.map((v) => v.id).join(','),
     channels.filter((c) => c.visible).map((c) => c.varId).join(','),
     channels.map((c) => c.color).join(','),
+    // 归一化状态变化时重建 uPlot（scales.y.auto 需在创建时设置）
+    yNormalized ? 'on' : (autoNormRef.current ? 'auto' : 'off'),
   ])
 
   return <div ref={containerRef} className={className} style={{ width: '100%', height: '100%' }} />

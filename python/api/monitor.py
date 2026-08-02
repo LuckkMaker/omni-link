@@ -205,12 +205,14 @@ def export_record(uid: str, format: str = "csv",
 
 @router.get("/probes/{uid}/monitor/record")
 def read_record(uid: str, start_ms: float | None = None,
-                end_ms: float | None = None, limit: int | None = None):
-    """按时间范围读取落盘采样数据（历史无上限，供前端全览/缩放加载）
+                end_ms: float | None = None, limit: int | None = None,
+                max_points: int | None = None):
+    """按时间范围读取落盘采样数据（历史无上限；max_points 全览降采样上限）
 
     返回 {success, segments: [{vars, samples:[{t_ms, values}]}]}
     """
-    result = monitor_backend.read_record(uid, start_ms=start_ms, end_ms=end_ms, limit=limit)
+    result = monitor_backend.read_record(uid, start_ms=start_ms, end_ms=end_ms,
+                                         limit=limit, max_points=max_points)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "Read failed"))
     return result

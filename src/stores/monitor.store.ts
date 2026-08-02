@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { MonitorVariable, SamplePoint, MonitorVarType } from '@/services/monitor.service'
+import { useNotificationStore } from '@/stores/notification.store'
 
 /** 前端 ring buffer 容量上限（与后端对齐；60 万点 @2.8kHz ≈ 3.5 分钟，
  *  全览历史加载以该上限截取最近数据） */
@@ -210,6 +211,28 @@ function makeChannel(varId: string): ChannelConfig {
   }
 }
 
+/**
+ * 自动归一化状态：可见变量通道 > 1 时自动开启（每通道独立缩放，多量级变量互不压扁），
+ * 且**只自动开启、不自动关闭**——变量减少/隐藏到 ≤1 个时保持当前状态（尊重用户选择），
+ * 由用户手动关闭（≤1 个通道时按钮可操作）。
+ */
+function computeAutoNormalize(prevYNorm: boolean, channels: ChannelConfig[]): boolean {
+  const visibleCount = channels.filter((c) => c.visible).length
+  if (visibleCount > 1) {
+    if (!prevYNorm) {
+      useNotificationStore.getState().push({
+        type: 'info',
+        title: 'Y 轴归一化已开启',
+        message: `当前 ${visibleCount} 个可见变量通道，每个通道按各自数据范围独立缩放显示（Min/Max 量程设置在此模式下不生效）`,
+        autoClose: true,
+        autoCloseDelay: 3000,
+      })
+    }
+    return true
+  }
+  return prevYNorm
+}
+
 export const useMonitorStore = create<MonitorState>((set, get) => ({
   running: false,
   paused: false,
@@ -267,10 +290,12 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   },
 
   removeVariable: (id) => {
-    set((s) => ({
-      variables: s.variables.filter((v) => v.id !== id),
-      channels: s.channels.filter((c) => c.varId !== id),
-    }))
+    const s = get()
+    const variables = s.variables.filter((v) => v.id !== id)
+    const channels = s.channels.filter((c) => c.varId !== id)
+    // 删除变量后重算自动归一化（可见通道 ≤1 时恢复共享量程并通知）
+    const yNormalized = computeAutoNormalize(s.yNormalized, channels)
+    set({ variables, channels, yNormalized })
   },
 
   updateVariable: (id, patch) => set((s) => ({
@@ -319,17 +344,26 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     })
   },
 
-  syncChannels: () => set((s) => {
+  syncChannels: () => {
+    const s = get()
     const existing = new Map(s.channels.map((c) => [c.varId, c]))
     const channels = s.variables.map((v) =>
       existing.get(v.id) ?? makeChannel(v.id)
     )
-    return { channels }
-  }),
+    // 自动归一化：可见通道 > 1 开启、≤1 恢复（变化时全局通知）
+    const yNormalized = computeAutoNormalize(s.yNormalized, channels)
+    set({ channels, yNormalized })
+  },
 
-  setChannel: (varId, patch) => set((s) => ({
-    channels: s.channels.map((c) => (c.varId === varId ? { ...c, ...patch } : c)),
-  })),
+  setChannel: (varId, patch) => {
+    const s = get()
+    const channels = s.channels.map((c) => (c.varId === varId ? { ...c, ...patch } : c))
+    // 仅 visible（隐藏/显示通道）变化时重算自动归一化；其他配置修改不影响
+    const yNormalized = patch.visible !== undefined
+      ? computeAutoNormalize(s.yNormalized, channels)
+      : s.yNormalized
+    set({ channels, yNormalized })
+  },
 
   registerArrayGroup: (g) => set((s) => ({
     arrayGroups: [...s.arrayGroups, { ...g, expanded: false, elemIds: [g.firstElemId] }],
