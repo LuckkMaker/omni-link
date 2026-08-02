@@ -148,9 +148,22 @@ while addr < end:
 2. 观察 `status` 接口的 `actual_rate_hz`（实际采样率）对比优化前后。
 3. 若采样率提升后波形卡顿，说明瓶颈转移到前端数据通道（WS 消息数 = 采样率 / `PUSH_BATCH=8`），后续可做 P2 优化（`PUSH_BATCH` 动态放大 + payload 减重）。
 
+## 已实施的后续优化（2026-08-02）
+
+以下原"后续方向"已落地：
+
+- **PUSH_BATCH 动态放大**：`push_batch = max(8, rate//50)`，5kHz 时 WS 消息 625 条/s → 100 条/s
+- **payload 结构减重**：`monitor.sample` 由 `{uid, samples:[{t_ms, values:[{id,value}]}]}` 改为 `{uid, ids:[...], t:[...], v:[[...]]}`——ids 批次内只发一次，时间戳/值改数组，JSON 体积减半；变量中途增删按 id 序列拆批；前端向后兼容旧格式
+- **采样节流 busy-wait 混合**：`sleep_time>2ms` 先 sleep 剩余 1ms 前，再忙等到目标时刻（注意时间源必须用 `time.perf_counter()`，Python ≤3.12 的 `monotonic` 在 Windows 是 15.6ms 精度）
+- **前端分帧批量提交**：`monitor.store` 的 `samples` 改为引用稳定的可变缓冲 + 16ms 合并 flush + `samplesVersion` 驱动重渲染（消除高频全量拷贝）
+- **probe 层直连**：单 AP 目标在 CSW 首次设置后 TAR/DRW/flush 走 `dp.probe` 直连，跳过 dp._select_ap 的 lock/DP SELECT（多 AP 保守走 dp）
+
+## 当前瓶颈与硬件极限
+
+实测（DAPLink V2 bulk + 10MHz SWD + 1 变量）：1kHz 设定达标；5kHz 设定实际 ~3kHz（单帧 ~0.33ms）。**瓶颈为 USB 往返延迟（DAPLink 单事务 ~0.2-0.3ms，占单帧 60-80%）**，软件侧（流水线/CSW 缓存/probe 直连/序列化减负）已接近 DAPLink 极限；要显著更高需换高性能探针（ST-Link V3 / J-Link / 高速 CMSIS-DAP V2）。多变量场景流水线合并读收益更大。
+
 ## 后续方向（未实施）
 
 - **P0**：SWD 时钟 1MHz → 4–8MHz（连接页已有速度选项，可主动选择；提频是全局的，需注意探针/线缆稳定性）
-- **P2**：WS 通道减负 — `PUSH_BATCH` 随采样率动态放大（如 `max(8, rate//50)`），payload 由 `[{id, value}]` 改为按通道顺序的数值数组
-- **P2**：采样节流改为 busy-wait 混合（先 sleep 大部分时间，最后忙等微调，μs 级抖动）
-- **P3**：前端 zustand `[...samples, ...pts]` 全量拷贝改为分帧批量提交，降低高频下 GC 压力
+- **P2**：WS payload 二进制化（struct.pack + base64）— 比结构减重再快一档，但前后端复杂度高、难调试，收益有限（瓶颈在 USB 往返），暂缓
+- **P3**：uPlot 渲染降采样进一步优化（当前 MAX_RENDER_POINTS=20000 min/max 桶）

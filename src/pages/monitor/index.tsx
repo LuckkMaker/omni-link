@@ -108,9 +108,29 @@ export default function MonitorPage() {
     if (!uid) return
 
     const offSample = wsClient.on('monitor.sample', (data: unknown) => {
-      const payload = data as { uid: string; samples: SamplePoint[] }
+      const payload = data as {
+        uid: string
+        samples?: SamplePoint[]
+        // 结构减重格式：ids 只发一次，t/v 为数组
+        ids?: string[]
+        t?: number[]
+        v?: number[][]
+      }
       if (payload.uid !== uid) return
-      appendSamples(payload.samples)
+      if (payload.samples) {
+        // 旧格式（向后兼容）
+        appendSamples(payload.samples)
+      } else if (payload.ids && payload.t && payload.v) {
+        // 新格式：展开为 SamplePoint[] 后统一走 store（内部仍是 SamplePoint[]）
+        const pts: SamplePoint[] = payload.t.map((tMs, i) => ({
+          t_ms: tMs,
+          values: payload.ids!.map((id, j) => ({
+            id,
+            value: payload.v![i]?.[j] ?? null,
+          })),
+        }))
+        appendSamples(pts)
+      }
     })
 
     const offStarted = wsClient.on('monitor.started', (data: unknown) => {
@@ -323,7 +343,11 @@ export default function MonitorPage() {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `monitor_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`
+        // 文件名用本地时间（toISOString 是 UTC，会比系统时间少 8 小时）
+        const now = new Date()
+        const p = (n: number) => String(n).padStart(2, '0')
+        const ts = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}-${p(now.getMinutes())}-${p(now.getSeconds())}`
+        a.download = `monitor_${ts}.csv`
         a.click()
         URL.revokeObjectURL(url)
         pushNotification({

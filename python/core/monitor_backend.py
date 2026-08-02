@@ -165,8 +165,10 @@ class MonitorBackend:
         self._elf_mtimes: dict[str, float] = {}
         # uid -> 已加载 ELF 文件路径（用于检测文件变化）
         self._elf_paths: dict[str, str] = {}
-        # uid -> 采样起点（monotonic）
+        # uid -> 采样起点（perf_counter）
         self._start_time: dict[str, float] = {}
+        # uid -> 采样启动的系统时间（time.time，用于 CSV 导出对齐系统时间）
+        self._start_wall: dict[str, float] = {}
         # uid -> 暂停起始时间（monotonic），用于恢复时消除时间间隙
         self._pause_start: dict[str, float] = {}
         # uid -> 传输模式（"swd" 轮询 / "rtt" 同步）
@@ -249,6 +251,7 @@ class MonitorBackend:
             self._paused[uid] = paused
             self._locks[uid] = threading.Lock()
             self._start_time[uid] = time.perf_counter()
+            self._start_wall[uid] = time.time()  # 记录采样启动系统时间（CSV 导出用）
 
         variables = self._variables.get(uid, [])
         event_manager.log("info",
@@ -630,10 +633,15 @@ class MonitorBackend:
         借鉴 plink 的 _pipelined_batch_read：
         - 直接操作 AP/DP 层（比 target 层更底层，跳过 CortexM 的事务边界）
         - 依赖 pyOCD deferred transfers（连接时 cmsis_dap.deferred_transfers=True），
-          命令先缓冲进 _crnt_cmd，一次 dp.flush() 才真正发送
+          命令先缓冲进 _crnt_cmd，一次 flush() 才真正发送
         - 效果：N 个 Block 串行 N 次 USB 往返 -> 一次往返（Bulk V2 下 pipeline_depth=6+）
         - 按 MEM-AP auto-increment 页边界（默认 1KB）拆分，防止 TAR 自增跨页读错
           （与 pyOCD _read_memory_block32 内部 _read_block32_page 行为一致）
+
+        注意：曾尝试单 AP 目标走 probe 层直连（跳过 dp._select_ap）以省 Python 开销，
+        实测引入偶发"读 0"毛刺（probe 层不管理 DP SELECT/APSEL，pyocd 内部
+        SELECT 状态变化时读到错误 AP 的 DRW），且无性能收益（USB 往返占大头），
+        已彻底弃用，统一走 dp 层。
 
         返回 {page_addr: raw_bytes}，key 为每个子页的起始地址。
         """
@@ -650,15 +658,24 @@ class MonitorBackend:
         ap_base = ap.address.address + getattr(ap, '_reg_offset', 0)
         page_size = getattr(ap, 'auto_increment_page_size', 0x400)
 
+        # 无任何数据要读时直接返回（不写 CSW，避免空转）
+        total_words = sum(g['length'] for g in groups) // 4
+        if total_words <= 0:
+            return {}
+
         # 1. 设置 CSW 为 32 位传输（保留原 CSW 其余控制位）
-        #    缓存已写入值：CSW 一旦设好就保持不变，每帧重复写会多一次 AP 写 + DP SELECT
+        #    缓存已写入值：CSW 一旦设好就保持不变，每帧重复写会多一次 AP 写 + DP SELECT。
+        #    CSW 走 dp 层写：确保首次同时完成 APSEL 选择（probe 层不管理 APSEL）。
         csw = getattr(ap, '_csw', DEFAULT_CSW_VALUE) | CSW_SIZE32
         ap_key = id(ap)
         if self._pipelined_csw.get(ap_key) != csw:
             dp.write_ap(ap_base + MEM_AP_CSW, csw)
+            dp.flush()
             self._pipelined_csw[ap_key] = csw
 
-        # 2. 为每个 Block（按页拆分子块）排队：写 TAR + 批量读 DRW（延迟执行）
+        # 2. 排队写 TAR/DRW 统一走 dp 层（曾尝试 probe 直连，见函数 docstring，
+        #    因偶发读 0 毛刺且无性能收益已弃用）
+        # 3. 为每个 Block（按页拆分子块）排队：写 TAR + 批量读 DRW（延迟执行）
         deferred = []  # [(page_addr, word_count, callback)]
         for group in groups:
             start = group['start']
@@ -670,17 +687,18 @@ class MonitorBackend:
                 word_count = chunk // 4
                 if word_count > 0:
                     dp.write_ap(ap_base + MEM_AP_TAR, addr)
-                    cb = dp.read_ap_multiple(ap_base + MEM_AP_DRW, word_count, now=False)
+                    cb = dp.read_ap_multiple(
+                        ap_base + MEM_AP_DRW, word_count, now=False)
                     deferred.append((addr, word_count, cb))
                 addr += chunk
 
         if not deferred:
             return {}
 
-        # 3. 一次 flush，同时发出所有命令
+        # 4. 一次 flush，同时发出所有命令
         dp.flush()
 
-        # 4. 逐个取回结果，组装为字节序列
+        # 5. 逐个取回结果，组装为字节序列
         raw_map = {}
         for addr, word_count, cb in deferred:
             raw_map[addr] = array.array('I', cb()).tobytes()
@@ -815,8 +833,34 @@ class MonitorBackend:
             return None
 
     def _emit_samples(self, uid: str, samples: list):
-        """批量推送采样点到前端"""
-        event_manager.emit("monitor.sample", {"uid": uid, "samples": samples})
+        """批量推送采样点到前端（结构减重：ids 只发一次，时间戳/值改为数组）
+
+        旧格式：{"uid", "samples": [{t_ms, values: [{id, value}]}]}
+        新格式：{"uid", "ids": [...], "t": [t_ms...], "v": [[value...]...]}
+          - ids: 本批次变量 id 列表（每帧 values 顺序一致时只发一次）
+          - t:   本批次各采样点相对时间戳
+          - v:   值矩阵，v[i][j] = 第 i 个采样点中 ids[j] 的值
+        变量中途增删时按 id 序列拆分为多个子批次，保证每个子批次内 ids 一致。
+        """
+        # 按变量 id 序列分组（同一批次内变量增删时拆批，保证子批次内 ids 一致）
+        sub_batches: list = []  # [{ids, samples}]
+        cur_ids: tuple = ()
+        for s in samples:
+            ids = tuple(v["id"] for v in s["values"])
+            if ids != cur_ids:
+                sub_batches.append({"ids": ids, "samples": []})
+                cur_ids = ids
+            sub_batches[-1]["samples"].append(s)
+
+        for batch in sub_batches:
+            if not batch["ids"]:
+                continue
+            event_manager.emit("monitor.sample", {
+                "uid": uid,
+                "ids": list(batch["ids"]),
+                "t": [s["t_ms"] for s in batch["samples"]],
+                "v": [[v["value"] for v in s["values"]] for s in batch["samples"]],
+            })
 
     # ── RTT 同步采样循环 ──────────────────────────────────────
 
@@ -1503,17 +1547,29 @@ class MonitorBackend:
     # ── 录制导出 ──────────────────────────────────────────────
 
     def export_csv(self, uid: str) -> dict:
-        """导出 RingBuffer 数据为 CSV 字符串"""
+        """导出 RingBuffer 数据为 CSV 字符串
+
+        t_ms 为相对采样起点的毫秒时间戳；额外提供"time"列（系统时间，
+        由采样启动时刻 + t_ms 换算），便于与外部工具/日志按时间对齐。
+        """
+        import datetime as _dt
+
         rb = self._ring_buffers.get(uid)
         if not rb:
             return {"success": False, "error": "无录制数据"}
 
         variables = self._variables.get(uid, [])
         var_map = {v.id: v for v in variables}
+        start_wall = self._start_wall.get(uid)
 
-        lines = ["t_ms," + ",".join(v.name for v in variables)]
+        lines = ["t_ms,time," + ",".join(v.name for v in variables)]
         for pt in rb.get_all():
             row = [f"{pt.t_ms:.3f}"]
+            if start_wall is not None:
+                wt = _dt.datetime.fromtimestamp(start_wall + pt.t_ms / 1000.0)
+                row.append(wt.strftime("%H:%M:%S.") + f"{wt.microsecond // 1000:03d}")
+            else:
+                row.append("")
             for v in variables:
                 val = pt.values.get(v.id, "")
                 row.append(str(val) if val is not None else "")

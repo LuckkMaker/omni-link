@@ -38,8 +38,7 @@ interface Props {
   onCursorValueChange?: (data: { values: Map<string, number | null>; sampleIndex: number } | null) => void
 }
 
-/** 最大渲染点数（超过时做 min/max 降采样保留波形形状） */
-const MAX_RENDER_POINTS = 20000
+// 降采样由 uPlot decimation 基于可视像素宽度完成（稳定分桶，无索引漂移伪影）
 /** Y 轴自适应的边距比例（上下各留 10%） */
 const Y_PADDING = 0.1
 /** Y 轴 hysteresis：新范围与旧范围重叠超过此比例时不更新，避免频繁跳动 */
@@ -176,63 +175,44 @@ export function WaveformChart({
       }
     }
 
-    // 2) min/max 降采样：点数超过上限时按桶取 min+max（同一时间戳输出两点，
-    //    uPlot 绘制垂直线，保真波形包络，不产生人为折线锯齿）
-    let fTimes: number[] = times
-    let valArrays: (number | null)[][]
-    let downsampled = false
-    if (times.length > MAX_RENDER_POINTS) {
-      const bucketSize = Math.ceil(times.length / MAX_RENDER_POINTS)
-      const ot: number[] = []
-      const ov: (number | null)[][] = series.map(() => [])
-      for (let b = 0; b < times.length; b += bucketSize) {
-        const end = Math.min(b + bucketSize, times.length)
-        const tMid = times[Math.min(end - 1, b + ((end - b) >> 1))]
-        ot.push(tMid, tMid)
-        for (let si = 0; si < nSer; si++) {
-          let min: number | null = null
-          let max: number | null = null
-          for (let j = b; j < end; j++) {
-            const v = rows[j][si]
-            if (v === null || typeof v !== 'number') continue
-            if (min === null || v < min) min = v
-            if (max === null || v > max) max = v
-          }
-          ov[si].push(min, max)
-        }
-      }
-      fTimes = ot
-      valArrays = ov
-      downsampled = true
-    } else {
-      // 未降采样：rows 是 [pointIdx][seriesIdx]，转置为 [seriesIdx][pointIdx]
-      valArrays = series.map((_, si) => rows.map((r) => r[si]))
-    }
+    // 2) 数据透传：不再做自研索引分桶降采样 —— 桶边界随总点数变化（bucketSize 取整
+    //    漂移），重绘时已绘制波形的 min/max 尖峰位置会整体移动，表现为"毛刺/已绘波形
+    //    被后续采样影响"。改由 uPlot 内置 decimation（基于可视像素宽度分桶，稳定无漂移）
+    //    负责降采样。rows 是 [pointIdx][seriesIdx]，转置为 [seriesIdx][pointIdx]。
+    const fTimes: number[] = times
+    const valArrays: (number | null)[][] = series.map((_, si) => rows.map((r) => r[si]))
 
     // 3) 滑动平均（按通道窗口大小）：对 movingAverage > 0 的通道做居中窗口平均，
     //    平滑噪声。null 值跳过（不参与平均，保持 null）。
-    //    降采样后的数据已为包络极值，不再做平均。
-    if (!downsampled) {
-      const anyMA = series.some((s) => (s.channel.movingAverage ?? 0) > 0)
-      if (anyMA) {
-        for (let si = 0; si < nSer; si++) {
-          const w = series[si].channel.movingAverage ?? 0
-          if (!w || w < 1) continue
-          const half = Math.floor(w / 2)
-          const src = valArrays[si]
-          const out: (number | null)[] = new Array(src.length)
-          for (let i = 0; i < src.length; i++) {
-            let sum = 0, cnt = 0
-            for (let k = -half; k <= half; k++) {
-              const idx = i + k
-              if (idx < 0 || idx >= src.length) continue
-              const v = src[idx]
-              if (v !== null && typeof v === 'number') { sum += v; cnt++ }
-            }
-            out[i] = cnt > 0 ? sum / cnt : src[i]
+    //    用前缀和 O(n) 实现：数据量增大到全量透传后，O(n*w) 双重循环会拖慢渲染。
+    const anyMA = series.some((s) => (s.channel.movingAverage ?? 0) > 0)
+    if (anyMA) {
+      for (let si = 0; si < nSer; si++) {
+        const w = series[si].channel.movingAverage ?? 0
+        if (!w || w < 1) continue
+        const half = Math.floor(w / 2)
+        const src = valArrays[si]
+        const n = src.length
+        // 前缀和：preSum[i] = src[0..i-1] 的数值和，preCnt[i] = 其中有效值个数
+        const preSum = new Float64Array(n + 1)
+        const preCnt = new Int32Array(n + 1)
+        for (let i = 0; i < n; i++) {
+          const v = src[i]
+          preSum[i + 1] = preSum[i]
+          preCnt[i + 1] = preCnt[i]
+          if (v !== null && typeof v === 'number') {
+            preSum[i + 1] += v
+            preCnt[i + 1] += 1
           }
-          valArrays[si] = out
         }
+        const out: (number | null)[] = new Array(n)
+        for (let i = 0; i < n; i++) {
+          const lo = Math.max(0, i - half)
+          const hi = Math.min(n - 1, i + half)
+          const cnt = preCnt[hi + 1] - preCnt[lo]
+          out[i] = cnt > 0 ? (preSum[hi + 1] - preSum[lo]) / cnt : src[i]
+        }
+        valArrays[si] = out
       }
     }
 
@@ -663,6 +643,8 @@ export function WaveformChart({
           time: false,
         },
       },
+      // 注：uPlot 1.6 内置像素桶降采样（可视窗口点数 ≥ 4×像素宽时自动 min/max 分桶），
+      // 桶基于像素列、稳定无漂移；因此前端不再做自研索引分桶降采样（见 buildPlotData）。
     }
 
     const plot = new uPlot(opts, [[]], containerRef.current)
