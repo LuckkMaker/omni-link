@@ -23,6 +23,24 @@ from dataclasses import dataclass, field
 from core.pyocd_backend import backend
 from core.events import event_manager
 
+# pyOCD AP/DP 寄存器级常量（用于跨 Block 流水线批量读）
+# 借鉴 plink: 直接操作 AP/DP 层，将多个 Block 的 DAP 命令一次 flush 发出，
+# 减少 USB 往返次数（deferred_transfers=True 时命令先缓冲、flush 才发送）。
+try:
+    from pyocd.coresight.ap import (
+        MEM_AP_CSW,
+        MEM_AP_TAR,
+        MEM_AP_DRW,
+        CSW_SIZE32,
+        DEFAULT_CSW_VALUE,
+    )
+except Exception:  # pragma: no cover - 编译环境可能无 pyocd，运行时有
+    MEM_AP_CSW = 0x00
+    MEM_AP_TAR = 0x04
+    MEM_AP_DRW = 0x0C
+    CSW_SIZE32 = 0x00000002
+    DEFAULT_CSW_VALUE = 0x00000010
+
 logger = logging.getLogger(__name__)
 
 # 数据类型 -> (struct 格式, 字节大小)
@@ -37,8 +55,19 @@ TYPE_MAP = {
 }
 
 # 批量读合并阈值：相邻变量地址间隔 <= 此值时合并为一次 USB 事务（字节）
-# 16 字节：合并更多变量组为单次读取，减少 USB 往返（高频采样下每往返 ~1-2ms）
-MERGE_GAP = 16
+# 64KB：合并条件退化为纯 Block 大小约束（"带宽换时间"，USB 延迟与往返次数
+# 成正比、与数据量几乎无关），变量分散时也能聚成少量 Block。
+MERGE_GAP = 64 * 1024
+# Block 覆盖字节上限（按探针传输类型区分，避免单个 Block 过大）
+# - Bulk (CMSIS-DAP v2 / WinUSB)：单包可携带更多命令，2048B = 512 words
+# - HID (CMSIS-DAP v1)：包小，1024B 更稳妥
+# - unknown：保守 512B
+BLOCK_MAX_BYTES_BULK = 2048
+BLOCK_MAX_BYTES_HID = 1024
+BLOCK_MAX_BYTES_DEFAULT = 512
+# Block 最小有效载荷比例：合并后有效变量字节 / 覆盖总字节 低于此值则不合并，
+# 避免为少量变量读取大段无关 RAM（防止带宽浪费）
+MIN_PAYLOAD_RATIO = 0.20
 # 高频推送批量阈值：当待推送样本数达到此值时打包一次 WS 推送
 PUSH_BATCH = 8
 # 错误退避上限
@@ -148,6 +177,11 @@ class MonitorBackend:
         self._vars_cache: dict[str, tuple] = {}
         # uid -> 变量列表版本号（add/remove 时递增，用于缓存失效）
         self._vars_version: dict[str, int] = {}
+        # uid -> 探针传输类型缓存（"bulk" / "hid" / "unknown"），用于选择 Block 合并参数
+        self._transport_type: dict[str, str] = {}
+        # uid -> 流水线读取降级标志：失败一次即置 True，后续走串行读取
+        # （防止"每帧尝试流水线失败 + 整批串行重读"的双倍开销导致采样率暴跌）
+        self._pipeline_disabled: dict[str, bool] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
 
@@ -201,6 +235,8 @@ class MonitorBackend:
             self._sample_counter_time[uid] = time.monotonic()
             self._ring_buffers[uid] = RingBuffer(max_points)
             self._transport[uid] = transport
+            # 新采样会话：重置流水线降级标志，给流水线读取一次机会
+            self._pipeline_disabled.pop(uid, None)
             running = threading.Event()
             running.set()
             self._running[uid] = running
@@ -517,8 +553,9 @@ class MonitorBackend:
         按地址排序后合并邻近变量为批量读取，减少 SWD 事务。
         优化：
         - 缓存排序+分组结果，变量列表未变更时复用（避免每帧重复排序）
-        - 4字节对齐时用 read_memory_block32（比 block8 快 2-3 倍）
-        关键：直接用 session.target.read_memory_block8/block32，绝不 halt。
+        - 跨 Block 流水线读取：多个分组的 DAP 命令一次性打包发出（减少 USB 往返）
+        - 失败自动回退到逐组串行读取（read_memory_block32/block8），保证兼容性
+        关键：直接用 session.target 读取，绝不 halt。
         """
         variables = self._variables.get(uid, [])
         if not variables:
@@ -529,16 +566,117 @@ class MonitorBackend:
             return []
         target = session.target
 
+        max_bytes = self._block_max_bytes(uid)
+
         # 检查缓存：变量列表未变更时复用已排序+分组的结构
         current_version = self._vars_version.get(uid, 0)
         cached = self._vars_cache.get(uid)
         if cached is None or cached[0] != current_version:
             sorted_vars = sorted(variables, key=lambda v: v.address)
-            groups = self._build_read_groups(sorted_vars)
+            groups = self._build_read_groups(sorted_vars, max_bytes)
             self._vars_cache[uid] = (current_version, groups)
         else:
             groups = cached[1]
 
+        # 仅 Bulk (CMSIS-DAP v2/WinUSB) 探针启用流水线：
+        # - HID 探针 pipeline_depth=1，命令本就是逐条往返，流水线无收益还可能引入风险
+        # - 流水线此前失败过则降级为串行（避免每帧重试+重读的双倍开销）
+        transport = self._get_transport_type(uid)
+        if transport != "bulk" or self._pipeline_disabled.get(uid):
+            return self._read_variables_serial(target, groups)
+
+        results: list = []
+        try:
+            raw_map = self._pipelined_read(target, groups)
+            for group in groups:
+                raw = self._group_words_to_raw(raw_map, group)
+                for v in group['vars']:
+                    offset = v.address - group['start']
+                    val_bytes = raw[offset:offset + v.size]
+                    if len(val_bytes) < v.size:
+                        continue
+                    value = self._decode(val_bytes, v.type)
+                    results.append({"id": v.id, "value": value})
+        except Exception as e:
+            # 流水线失败（个别探针兼容性问题等）：降级为串行读取并禁止重试，
+            # 保证最差性能回到改动前，而不是每帧"失败+整批重读"拖垮采样率
+            logger.warning(
+                f"Monitor pipelined read failed, disable pipelining for probe "
+                f"{uid[:16]}: {e}"
+            )
+            self._pipeline_disabled[uid] = True
+            results = self._read_variables_serial(target, groups)
+
+        return results
+
+    def _pipelined_read(self, target, groups: list) -> dict:
+        """跨 Block 流水线读取：将多个 Block 的 DAP 命令一次打包发出
+
+        借鉴 plink 的 _pipelined_batch_read：
+        - 直接操作 AP/DP 层（比 target 层更底层，跳过 CortexM 的事务边界）
+        - 依赖 pyOCD deferred transfers（连接时 cmsis_dap.deferred_transfers=True），
+          命令先缓冲进 _crnt_cmd，一次 dp.flush() 才真正发送
+        - 效果：N 个 Block 串行 N 次 USB 往返 -> 一次往返（Bulk V2 下 pipeline_depth=6+）
+        - 按 MEM-AP auto-increment 页边界（默认 1KB）拆分，防止 TAR 自增跨页读错
+          （与 pyOCD _read_memory_block32 内部 _read_block32_page 行为一致）
+
+        返回 {page_addr: raw_bytes}，key 为每个子页的起始地址。
+        """
+        ap = target.ap
+        dp = ap.dp
+        ap_base = ap.address.address + getattr(ap, '_reg_offset', 0)
+        page_size = getattr(ap, 'auto_increment_page_size', 0x400)
+
+        # 1. 设置 CSW 为 32 位传输（保留原 CSW 其余控制位）
+        csw = getattr(ap, '_csw', DEFAULT_CSW_VALUE) | CSW_SIZE32
+        dp.write_ap(ap_base + MEM_AP_CSW, csw)
+
+        # 2. 为每个 Block（按页拆分子块）排队：写 TAR + 批量读 DRW（延迟执行）
+        deferred = []  # [(page_addr, word_count, callback)]
+        for group in groups:
+            start = group['start']
+            end = start + group['length']
+            addr = start
+            while addr < end:
+                page_avail = page_size - (addr & (page_size - 1))
+                chunk = min(page_avail, end - addr)
+                word_count = chunk // 4
+                if word_count > 0:
+                    dp.write_ap(ap_base + MEM_AP_TAR, addr)
+                    cb = dp.read_ap_multiple(ap_base + MEM_AP_DRW, word_count, now=False)
+                    deferred.append((addr, word_count, cb))
+                addr += chunk
+
+        if not deferred:
+            return {}
+
+        # 3. 一次 flush，同时发出所有命令
+        dp.flush()
+
+        # 4. 逐个取回结果，组装为字节序列
+        raw_map = {}
+        for addr, word_count, cb in deferred:
+            raw_map[addr] = array.array('I', cb()).tobytes()
+        return raw_map
+
+    @staticmethod
+    def _group_words_to_raw(raw_map: dict, group: dict) -> bytes:
+        """将分组对应的各子页原始字节按地址顺序拼接"""
+        start = group['start']
+        length = group['length']
+        out = bytearray()
+        addr = start
+        end = start + length
+        while addr < end:
+            raw = raw_map.get(addr)
+            if raw is None:
+                return b""
+            out += raw
+            addr += len(raw)
+        return bytes(out[:length])
+
+    def _read_variables_serial(self, target, groups: list) -> list:
+        """逐组串行读取（流水线失败时的回退路径）"""
         results: list = []
         for group in groups:
             start_addr = group['start']
@@ -563,28 +701,79 @@ class MonitorBackend:
             except Exception as e:
                 logger.debug(f"Monitor read failed @0x{start_addr:08X}: {e}")
                 raise
-
         return results
 
-    @staticmethod
-    def _build_read_groups(sorted_vars: list) -> list:
-        """将已排序的变量合并为读取组，返回 [{start, length, vars}, ...]"""
+    def _get_transport_type(self, uid: str) -> str:
+        """检测探针传输类型（bulk/hid/unknown），用于选择 Block 合并参数。带缓存。
+
+        - bulk:  CMSIS-DAP v2 (WinUSB bulk)，单包可携带多个 DAP 命令
+        - hid:   CMSIS-DAP v1 (HID)
+        """
+        cached = self._transport_type.get(uid)
+        if cached:
+            return cached
+        t = "unknown"
+        try:
+            session = backend._get_session(uid)
+            if session is not None:
+                probe = getattr(session, 'probe', None)
+                link = getattr(probe, '_link', None)
+                interface = getattr(link, '_interface', None)
+                if interface is not None:
+                    t = "bulk" if getattr(interface, 'is_bulk', False) else "hid"
+        except Exception:
+            t = "unknown"
+        self._transport_type[uid] = t
+        return t
+
+    def _block_max_bytes(self, uid: str) -> int:
+        """按探针传输类型返回 Block 覆盖字节上限"""
+        transport = self._get_transport_type(uid)
+        if transport == "bulk":
+            return BLOCK_MAX_BYTES_BULK
+        if transport == "hid":
+            return BLOCK_MAX_BYTES_HID
+        return BLOCK_MAX_BYTES_DEFAULT
+
+    def _build_read_groups(self, sorted_vars: list, max_bytes: int) -> list:
+        """将已排序的变量合并为读取组，返回 [{start, length, vars}, ...]
+
+        合并条件（借鉴 plink 聚合读取引擎）：
+        - gap <= MERGE_GAP（64KB）：相邻变量不因间距拆块（带宽换时间）
+        - 覆盖字节数 <= max_bytes：按传输类型限制单块大小
+        - payload_ratio >= MIN_PAYLOAD_RATIO：有效字节占比不足时拆块
+        返回的 start 向下对齐 4、length 向上对齐 4（保证 32 位传输可用）。
+        """
         groups = []
         i = 0
         n = len(sorted_vars)
         while i < n:
-            # 合并邻近变量为一组（gap <= MERGE_GAP 字节）
+            # 合并邻近变量为一组
             j = i
-            group_end = sorted_vars[i].address + sorted_vars[i].size
-            while j + 1 < n and sorted_vars[j + 1].address - group_end <= MERGE_GAP:
+            raw_start = sorted_vars[i].address
+            raw_end = sorted_vars[i].address + sorted_vars[i].size
+            while j + 1 < n:
+                gap = sorted_vars[j + 1].address - raw_end
+                if gap > MERGE_GAP:
+                    break
+                candidate_end = max(raw_end,
+                                    sorted_vars[j + 1].address + sorted_vars[j + 1].size)
+                if candidate_end - raw_start > max_bytes:
+                    break
+                # 有效载荷比检查：避免为稀疏变量读取大段无关 RAM
+                payload = sum(v.size for v in sorted_vars[i:j + 2])
+                covered = candidate_end - raw_start
+                if covered > 0 and payload / covered < MIN_PAYLOAD_RATIO:
+                    break
                 j += 1
-                group_end = max(group_end, sorted_vars[j].address + sorted_vars[j].size)
+                raw_end = candidate_end
 
-            start_addr = sorted_vars[i].address
-            length = group_end - start_addr
+            # 32 位对齐（block32 比 block8 快 2-3 倍，流水线也要求 32 位对齐）
+            start_addr = raw_start & ~3
+            aligned_end = (raw_end + 3) & ~3
             groups.append({
                 'start': start_addr,
-                'length': length,
+                'length': aligned_end - start_addr,
                 'vars': sorted_vars[i:j + 1],
             })
             i = j + 1
@@ -1356,6 +1545,8 @@ class MonitorBackend:
             except Exception:
                 pass
         self._transport.pop(uid, None)
+        self._transport_type.pop(uid, None)  # 探针断开后清除传输类型缓存，重连时重新检测
+        self._pipeline_disabled.pop(uid, None)  # 同步清除流水线降级标志
         self._variables.pop(uid, None)
         self._ring_buffers.pop(uid, None)
 
