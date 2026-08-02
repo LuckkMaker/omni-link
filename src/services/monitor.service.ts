@@ -39,6 +39,8 @@ export interface MonitorSymbol {
   elem_size: number
   /** 所属源文件（DWARF compile unit name，无 DWARF 时 "unknown"） */
   source_file: string
+  /** 数组类型是否为猜测（无 DWARF 信息时按 size 推断，元素类型可能不准确） */
+  is_guess?: boolean
 }
 
 /** 符号查询结果（分页） */

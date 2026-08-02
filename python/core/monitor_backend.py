@@ -1223,6 +1223,7 @@ class MonitorBackend:
                 elem_size = int(ti["elem_size"])
                 # 数组时 type 设为 elem_type，size 仍为整个符号大小（向后兼容）
                 sym_type_str = elem_type
+                is_guess = False
             else:
                 # 无 DWARF 或类型解析失败：回退 size 猜测，但仍保留 source_file
                 is_array = False
@@ -1230,6 +1231,17 @@ class MonitorBackend:
                 elem_count = 1
                 elem_size = info.size if info.size else TYPE_MAP[elem_type][1]
                 sym_type_str = elem_type
+                is_guess = False
+                # 保守猜测数组：无调试信息且 size >= 16、能被 4 整除的大符号，
+                # 按 uint32 数组展示（嵌入式常量表最常见；size=8 的符号可能是
+                # struct/double/函数指针等，不猜以免误导）。元素类型可能不准确，
+                # 以 is_guess=True 标记供前端提示。
+                if info.size and info.size >= 16 and info.size % 4 == 0:
+                    is_array = True
+                    elem_type = "uint32"
+                    elem_count = info.size // 4
+                    elem_size = 4
+                    is_guess = True
 
             symbols.append({
                 "name": name,
@@ -1241,6 +1253,7 @@ class MonitorBackend:
                 "elem_count": elem_count,
                 "elem_size": elem_size,
                 "source_file": source_file,
+                "is_guess": is_guess,
             })
 
         # 排序：按地址
@@ -1395,6 +1408,9 @@ class MonitorBackend:
                 return "int16"
             if bs == 4:
                 return "int32"
+        elif enc == 0x06:      # DW_ATE_signed_char
+            if bs == 1:
+                return "int8"
         elif enc == 0x07:      # DW_ATE_unsigned
             if bs == 1:
                 return "uint8"
@@ -1402,6 +1418,9 @@ class MonitorBackend:
                 return "uint16"
             if bs == 4:
                 return "uint32"
+        elif enc == 0x08:      # DW_ATE_unsigned_char（GCC 对 char/uint8_t 数组用此编码）
+            if bs == 1:
+                return "uint8"
         elif enc == 0x04:      # DW_ATE_float
             if bs == 4:
                 return "float"

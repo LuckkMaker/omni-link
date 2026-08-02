@@ -785,9 +785,12 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
                                       {isExp ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
                                     </button>
                                   )}
-                                  <span className="truncate" title={sym.name}>
+                                  <span className="truncate" title={sym.is_guess ? `${sym.name}（数组类型为猜测，无调试信息）` : sym.name}>
                                     {sym.name}
                                     {sym.is_array && <span className="text-muted-foreground">[{sym.elem_count}]</span>}
+                                    {sym.is_guess && (
+                                      <span className="text-amber-500" title="无调试信息，数组类型按 size 猜测">*</span>
+                                    )}
                                   </span>
                                 </div>
                               </td>
