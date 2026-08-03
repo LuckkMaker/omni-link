@@ -1,12 +1,12 @@
 # 快速开始
 
-OMNI Work 提供两种使用方式：直接下载安装包使用，或从源码构建开发。
+OMNI Link 提供两种使用方式：直接下载安装包使用，或从源码构建开发。
 
 ## 使用
 
 ### 下载安装
 
-前往 [GitHub Releases](https://github.com/LuckkMaker/omni-work/releases/latest) 下载最新版本的安装包 `OMNI Work-x.x.x-x64-setup.exe`。
+前往 [GitHub Releases](https://github.com/LuckkMaker/omni-link/releases/latest) 下载最新版本的安装包 `OMNI Link-x.x.x-x64-setup.exe`。
 
 双击运行安装包，按向导完成安装。安装包已内置 Python 后端与 pyOCD 源码，无需额外配置 Python 环境。
 
@@ -14,7 +14,7 @@ OMNI Work 提供两种使用方式：直接下载安装包使用，或从源码�
 
 1. 通过 USB 将 DAPLink 仿真器连接到电脑
 2. 用 SWD 排线将仿真器接到目标开发板（SWDIO、SWCLK、GND、VTref 四根线至少接通）
-3. 启动 OMNI Work，顶部设备切换器会自动检测已连接的探针
+3. 启动 OMNI Link，顶部设备切换器会自动检测已连接的探针
 4. 选择探针后，应用会尝试自动识别目标芯片型号；若识别为通用 `cortex_m`，需在设备面板手动选择具体型号
 
 > 首次连接时 pyOCD 可能识别为通用 `cortex_m` 类型（无 Flash 布局信息），此时需手动选择具体 MCU 型号以获取正确的 Flash 参数。
@@ -22,7 +22,7 @@ OMNI Work 提供两种使用方式：直接下载安装包使用，或从源码�
 ### 首次使用流程
 
 1. 连接 DAPLink 仿真器与目标开发板
-2. 启动 OMNI Work，在顶部设备切换器中选择探针
+2. 启动 OMNI Link，在顶部设备切换器中选择探针
 3. 选择目标芯片型号（或使用自动识别结果）
 4. 进入 [Flash](guide/flash.md) 页面加载固件并烧录
 5. 使用 [Commander](guide/commander.md) 交互调试，或 [RTT Viewer](guide/rtt-viewer.md) 收发实时数据，或 [Monitor](guide/monitor.md) 监控变量波形
@@ -90,4 +90,4 @@ npm run package
 npm run package:clean
 ```
 
-打包产物：`release/OMNI Work-0.3.3-x64-setup.exe`（NSIS 安装包）
+打包产物：`release/OMNI Link-0.3.3-x64-setup.exe`（NSIS 安装包）

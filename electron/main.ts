@@ -1,4 +1,4 @@
-// OMNI Work
+// OMNI Link
 // Copyright (c) 2026 LuckkMaker
 // SPDX-License-Identifier: MIT
 
@@ -17,7 +17,7 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    title: `OMNI Work v${app.getVersion()}`,
+    title: `OMNI Link v${app.getVersion()}`,
     icon: join(__dirname, '../../assets/images/icon.png'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

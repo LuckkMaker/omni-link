@@ -26,11 +26,11 @@ export function useRecordToFile(activeTabId: string) {
     let cancelled = false
     const start = async () => {
       try {
-        // 生成文件名：[omni_work_rtt]_YYYYMMDD_HHMMSS.dat
+        // 生成文件名：[omni_link_rtt]_YYYYMMDD_HHMMSS.dat
         const now = new Date()
         const p = (n: number) => n.toString().padStart(2, '0')
         const ts = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
-        const fileName = `[omni_work_rtt]_${ts}.dat`
+        const fileName = `[omni_link_rtt]_${ts}.dat`
 
         // File System Access API
         if (typeof (window as any).showSaveFilePicker === 'function') {

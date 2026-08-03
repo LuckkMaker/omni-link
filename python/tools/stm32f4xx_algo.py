@@ -1,5 +1,5 @@
 # pyOCD debugger
-# Copyright (c) 2026 OMNI Work
+# Copyright (c) 2026 OMNI Link
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

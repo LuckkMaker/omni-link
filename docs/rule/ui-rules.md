@@ -1,4 +1,4 @@
-# OMNI Work UI 设计规则
+# OMNI Link UI 设计规则
 
 > 本文档总结项目的 UI 设计规范，作为后续开发和维护的参考标准。
 > 技术栈：Electron + React 18 + TypeScript + Tailwind CSS + shadcn/ui

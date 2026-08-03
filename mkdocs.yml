@@ -1,4 +1,4 @@
-site_name: OMNI Work
+site_name: OMNI Link
 site_description: Embedded development toolkit
 site_author: LuckkMaker
 
@@ -18,8 +18,8 @@ theme:
 extra_css:
   - css/extra.css
 
-repo_name: omni-work
-repo_url: https://github.com/LuckkMaker/omni-work
+repo_name: omni-link
+repo_url: https://github.com/LuckkMaker/omni-link
 
 plugins:
   - search

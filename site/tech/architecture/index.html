@@ -5,7 +5,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="LuckkMaker" />
       <link rel="shortcut icon" href="../../img/favicon.ico" />
-    <title>架构与技术栈 - OMNI Work</title>
+    <title>架构与技术栈 - OMNI Link</title>
     <link rel="stylesheet" href="../../css/theme.css" />
     <link rel="stylesheet" href="../../css/theme_extra.css" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
@@ -74,7 +74,7 @@
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
       <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="../..">OMNI Work</a>
+          <a href="../..">OMNI Link</a>
         
       </nav>
       <div class="wy-nav-content">
@@ -83,7 +83,7 @@
     <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
       <li class="breadcrumb-item active">架构与技术栈</li>
     <li class="wy-breadcrumbs-aside">
-          <a href="https://github.com/LuckkMaker/omni-work/edit/master/docs/tech/architecture.md">Edit on omni-work</a>
+          <a href="https://github.com/LuckkMaker/omni-link/edit/master/docs/tech/architecture.md">Edit on omni-link</a>
     </li>
   </ul>
   <hr/>
@@ -92,7 +92,7 @@
             <div class="section" itemprop="articleBody">
               
                 <h1 id="_1">架构与技术栈<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h1>
-<p>OMNI Work 采用 Electron + Python 前后端分离架构。前端负责 UI 渲染与交互，后端通过 pyOCD 与硬件通信，两者通过 HTTP 与 WebSocket 双通道连接。</p>
+<p>OMNI Link 采用 Electron + Python 前后端分离架构。前端负责 UI 渲染与交互，后端通过 pyOCD 与硬件通信，两者通过 HTTP 与 WebSocket 双通道连接。</p>
 <h2 id="_2">技术栈<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -208,7 +208,7 @@
 └─────────────────────────────────────────────────┘</code></pre>
 <p>Electron 主进程启动时 spawn Python 子进程运行 FastAPI 服务，通过 stdout 首行 JSON <code>{"port": 12345}</code> 传递动态分配的端口号。前端通过 preload 暴露的 IPC API 获取端口后，使用 HTTP（Axios）与 WebSocket（ws 8）双通道与 Python 后端通信：HTTP 用于命令请求，WebSocket 用于实时事件推送（探针状态、Flash 进度、Monitor 采样数据、RTT 数据等）。pyOCD 源码内置在 <code>python/pyocd/</code>，随项目分发，不通过 pip 安装，保证版本一致与离线可用。</p>
 <h2 id="_4">项目结构<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
-<pre class="highlight"><code>omni-work/
+<pre class="highlight"><code>omni-link/
 ├── electron/                    # Electron 主进程
 │   ├── main.ts                  # 窗口创建、生命周期、IPC 路由
 │   ├── preload.ts               # contextBridge 安全暴露 API
@@ -342,7 +342,7 @@
   <span class="rst-current-version" data-toggle="rst-current-version">
     
         <span>
-          <a href="https://github.com/LuckkMaker/omni-work" class="fa fa-code-fork" style="color: #fcfcfc"> omni-work</a>
+          <a href="https://github.com/LuckkMaker/omni-link" class="fa fa-code-fork" style="color: #fcfcfc"> omni-link</a>
         </span>
     
     

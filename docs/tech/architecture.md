@@ -1,6 +1,6 @@
 # 架构与技术栈
 
-OMNI Work 采用 Electron + Python 前后端分离架构。前端负责 UI 渲染与交互，后端通过 pyOCD 与硬件通信，两者通过 HTTP 与 WebSocket 双通道连接。
+OMNI Link 采用 Electron + Python 前后端分离架构。前端负责 UI 渲染与交互，后端通过 pyOCD 与硬件通信，两者通过 HTTP 与 WebSocket 双通道连接。
 
 ## 技术栈
 
@@ -61,7 +61,7 @@ Electron 主进程启动时 spawn Python 子进程运行 FastAPI 服务，通过
 ## 项目结构
 
 ```
-omni-work/
+omni-link/
 ├── electron/                    # Electron 主进程
 │   ├── main.ts                  # 窗口创建、生命周期、IPC 路由
 │   ├── preload.ts               # contextBridge 安全暴露 API

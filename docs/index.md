@@ -1,12 +1,12 @@
-# OMNI Work
+# OMNI Link
 
 嵌入式开发工具集，提供类似 SEGGER J-Link 工具链的完整体验，以开源 pyOCD + DAPLink 硬件为基础，降低嵌入式开发者的工具成本。
 
-![OMNI Work Advertisement](assets/images/advertisement.png)
+![OMNI Link Advertisement](assets/images/advertisement.png)
 
 ## 项目简介
 
-OMNI Work 是一个跨平台桌面应用，内置 Flash 烧录、交互式命令行、RTT 实时数据收发、变量波形监控等核心调试能力，对标 SEGGER J-Link 工具链。底层基于开源的 pyOCD，配合 DAPLink 等符合 CMSIS-DAP 标准的仿真器即可使用，无需购买 J-Link 硬件。
+OMNI Link 是一个跨平台桌面应用，内置 Flash 烧录、交互式命令行、RTT 实时数据收发、变量波形监控等核心调试能力，对标 SEGGER J-Link 工具链。底层基于开源的 pyOCD，配合 DAPLink 等符合 CMSIS-DAP 标准的仿真器即可使用，无需购买 J-Link 硬件。
 
 支持 70+ 款 Arm Cortex-M MCU，包括 STM32、GD32、APM32、NXP 等主流系列，通过 CMSIS Device Family Packs 可进一步扩展覆盖范围。
 
@@ -59,7 +59,7 @@ npm run python:install
 npm run dev
 ```
 
-详细步骤见 [GitHub 仓库 README](https://github.com/LuckkMaker/omni-work#readme)。
+详细步骤见 [GitHub 仓库 README](https://github.com/LuckkMaker/omni-link#readme)。
 
 ## 许可证
 
