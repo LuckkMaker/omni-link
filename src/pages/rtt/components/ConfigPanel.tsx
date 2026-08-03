@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { Eraser, Trash2, Download, Keyboard, MessageSquare, FileDown, ListChecks, FileText } from 'lucide-react'
+import { Eraser, Trash2, Download, Keyboard, MessageSquare, FileDown, ListChecks, FileText, Play, Pause, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -37,6 +37,12 @@ interface ConfigPanelProps {
   terminalRef: React.RefObject<{ clear: () => void; getData: () => Uint8Array; clearData: () => void } | null>
   /** 打开多字符串对话框 */
   onOpenMultiString: () => void
+  /** 切换目标内核 Run/Halt */
+  onToggleDevice: () => void
+  /** 复位目标芯片 */
+  onReset: () => void
+  /** 目标内核状态 */
+  coreState: 'running' | 'halted' | 'unknown'
 }
 
 /** 统一配置行：复选框 + 文字（+ 可选右侧配置项）。
@@ -96,7 +102,7 @@ function ConfigSubRow({
   )
 }
 
-export function ConfigPanel({ uid, terminalRef, onOpenMultiString }: ConfigPanelProps) {
+export function ConfigPanel({ uid, connected, terminalRef, onOpenMultiString, onToggleDevice, onReset, coreState }: ConfigPanelProps) {
   const [showSaveDialog, setShowSaveDialog] = useState(false)
 
   const {
@@ -203,7 +209,45 @@ export function ConfigPanel({ uid, terminalRef, onOpenMultiString }: ConfigPanel
 
   return (
     <div className="flex flex-col overflow-y-auto text-xs">
-      {/* ① 接收配置 */}
+      {/* ① 目标设备控制 */}
+      <div className="border-b border-border last:border-b-0">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">目标设备控制</span>
+        </div>
+        <div className="space-y-1.5 p-2 pt-0">
+          {/* [Run/Halt] [Reset]：直接操作 CPU 内核，与 RTT 轮询独立 */}
+          <div className="flex gap-1.5">
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded border text-[11px] font-medium transition-colors',
+                coreState === 'running'
+                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20'
+                  : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20',
+                !connected && 'opacity-40 cursor-not-allowed',
+              )}
+              onClick={onToggleDevice}
+              disabled={!connected}
+              title="Run/Halt 目标内核（不影响 RTT 轮询）"
+            >
+              {coreState === 'running' ? <><Pause className="size-3" /> Halt</> : <><Play className="size-3" /> Run</>}
+            </button>
+            <button
+              className={cn(
+                'flex h-7 flex-1 items-center justify-center gap-1 rounded border border-border text-[11px] font-medium transition-colors',
+                'text-muted-foreground hover:bg-muted/30 hover:text-foreground',
+                !connected && 'opacity-40 cursor-not-allowed',
+              )}
+              onClick={onReset}
+              disabled={!connected}
+              title="复位目标芯片并重新初始化 RTT 控制块"
+            >
+              <RotateCcw className="size-3" /> Reset
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ② 接收配置 */}
       <div className="border-b border-border last:border-b-0">
         <div className="px-2 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">接收配置</span>
@@ -277,7 +321,7 @@ export function ConfigPanel({ uid, terminalRef, onOpenMultiString }: ConfigPanel
         </div>
       </div>
 
-      {/* ② 发送配置 */}
+      {/* ③ 发送配置 */}
       <div className="border-b border-border last:border-b-0">
         <div className="px-2 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">发送配置</span>

@@ -318,7 +318,7 @@ export default function MapAnalyzer() {
         <>
           {/* 元信息 */}
           <div className="flex flex-wrap gap-4 rounded-lg border border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-            <span>组件: <span className="font-mono text-foreground">{analysis.meta.component || '—'}</span></span>
+            <span>编译器: <span className="font-mono text-foreground">{analysis.meta.component || '—'}</span></span>
             <span>工具: <span className="font-mono text-foreground">{analysis.meta.tool || '—'}</span></span>
             <span>生成时间: <span className="font-mono text-foreground">{analysis.meta.generated_at || '—'}</span></span>
             <span>条目数: <span className="font-mono text-foreground">{analysis.entries.length}</span></span>

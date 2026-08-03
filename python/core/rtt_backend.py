@@ -43,6 +43,8 @@ class RTTBackend:
         # uid -> 选中的 up/down channel 索引
         self._up_channel: dict[str, int] = {}
         self._down_channel: dict[str, int] = {}
+        # uid -> 用户主动 halt 标志（True=用户主动暂停，轮询线程不自动恢复）
+        self._user_halted: dict[str, bool] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
 
@@ -249,6 +251,7 @@ class RTTBackend:
                 self._control_blocks[uid] = cb
                 self._up_channel[uid] = up_channel
                 self._down_channel[uid] = down_channel
+                self._user_halted[uid] = False
                 running = threading.Event()
                 running.set()
                 self._running[uid] = running
@@ -306,9 +309,17 @@ class RTTBackend:
 
         改造说明：遍历所有 up_channels 分别读取，事件 payload 带 channel 索引。
         前端根据 tab 模式（All Channel 或单通道）过滤显示。
+
+        自动恢复机制：定期检查目标内核状态，若检测到内核被暂停（如硬件复位后
+        pyOCD 的 reset catch 机制暂停了内核），且非用户主动暂停，则自动 resume，
+        使固件重新运行并恢复 RTT 数据流。同时重新读取控制块描述符，确保缓存
+        的 buffer 地址/大小与复位后固件重新初始化的值一致。
         """
         poll_interval = POLL_INTERVAL
         consecutive_errors = 0
+        # 内核状态检查计数器（每 ~3 秒检查一次，避免高频 SWD 事务增加延迟）
+        state_check_counter = 0
+        STATE_CHECK_INTERVAL = 300  # 300 * 10ms = 3s
 
         while True:
             running = self._running.get(uid)
@@ -324,6 +335,12 @@ class RTTBackend:
             if not backend.is_connected(uid):
                 event_manager.emit("rtt.stopped", {"uid": uid, "reason": "disconnected"})
                 break
+
+            # 定期检查目标内核状态，自动恢复因硬件复位而暂停的内核
+            state_check_counter += 1
+            if state_check_counter >= STATE_CHECK_INTERVAL:
+                state_check_counter = 0
+                self._check_and_auto_resume(uid, cb, lock)
 
             try:
                 with lock:
@@ -354,6 +371,201 @@ class RTTBackend:
 
         # 线程退出时清理
         event_manager.log("info", f"RTT: polling stopped for probe {uid[:16]}")
+
+    def _check_and_auto_resume(self, uid: str, cb: object, lock: threading.Lock):
+        """检查目标内核状态，若被暂停且非用户主动暂停则自动恢复
+
+        硬件复位后 pyOCD 的 reset catch 机制会暂停内核，导致固件不运行、
+        RTT 无数据。此方法检测到该情况后自动 resume，并重新读取控制块描述符
+        以同步固件重新初始化后的 buffer 地址/大小。
+        """
+        if self._user_halted.get(uid, False):
+            return  # 用户主动暂停，不自动恢复
+
+        try:
+            from pyocd.core.target import Target
+            target = getattr(cb, 'target', None)
+            if target is None:
+                session = backend._get_session(uid)
+                if not session:
+                    return
+                target = session.target
+
+            state = target.get_state()
+            if state == Target.State.HALTED:
+                event_manager.log("info",
+                                  "RTT: 检测到目标内核已暂停（可能由硬件复位触发），自动恢复...")
+                try:
+                    target.resume()
+                except Exception as e:
+                    event_manager.log("warning", f"RTT: 自动 resume 失败: {e}")
+                    return
+
+                # 等待固件重新初始化 RTT 控制块
+                time.sleep(0.3)
+
+                # 重新读取控制块描述符，确保缓存的 buffer 地址/大小与
+                # 复位后固件重新初始化的值一致（防止读取到旧地址导致数据异常）
+                try:
+                    with lock:
+                        for up_ch in cb.up_channels:
+                            if hasattr(up_ch, '_read_descriptor'):
+                                up_ch._read_descriptor()
+                except Exception as e:
+                    event_manager.log("warning",
+                                      f"RTT: 重新读取控制块描述符失败: {e}")
+
+                event_manager.log("info", "RTT: 目标内核已自动恢复运行")
+        except Exception:
+            pass  # 状态检查失败不影响正常轮询
+
+    # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
+    # 直接操作 session.target，不影响轮询线程。
+    # Run/Halt/Reset 是毫秒级操作，轮询线程的读取有错误恢复机制，
+    # 短暂冲突由 consecutive_errors 退避处理。
+
+    def run_target(self, uid: str) -> dict:
+        """运行目标内核（resume）
+
+        清除用户暂停标志，允许轮询线程的自动恢复机制正常工作。
+        """
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.resume()
+            with self._global_lock:
+                self._user_halted[uid] = False
+            event_manager.log("info", "RTT: 目标内核已运行 (run)")
+            return {"success": True, "state": "running"}
+        except Exception as e:
+            event_manager.log("warning", f"RTT: run 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def halt_target(self, uid: str) -> dict:
+        """暂停目标内核（halt）
+
+        设置用户暂停标志，防止轮询线程自动恢复内核。
+        """
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+        try:
+            session.target.halt()
+            with self._global_lock:
+                self._user_halted[uid] = True
+            event_manager.log("info", "RTT: 目标内核已暂停 (halt)")
+            return {"success": True, "state": "halted"}
+        except Exception as e:
+            event_manager.log("warning", f"RTT: halt 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def reset_target(self, uid: str, run: bool = True) -> dict:
+        """复位目标芯片并重新初始化 RTT 控制块
+
+        硬件复位后固件会重新初始化 RTT 控制块（重写 "SEGGER RTT" 签名、
+        重置通道读写指针），因此必须重新搜索控制块以获取新的引用，
+        否则旧的 RTTControlBlock 对象的缓存状态（buffer 地址等）可能失效。
+
+        Args:
+            run: True=复位后运行，False=复位后保持 halt
+        """
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接"}
+
+        try:
+            # 1) halt 目标（确保安全操作）
+            try:
+                session.target.halt()
+            except Exception:
+                pass
+
+            # 2) 复位目标芯片
+            session.target.reset(reset_type=None)
+            event_manager.log("info", f"RTT: 目标已复位 (run={run})")
+
+            if run:
+                # 3a) resume 目标，让固件重新初始化 RTT
+                try:
+                    session.target.resume()
+                except Exception:
+                    pass
+                # 等待固件启动并初始化 RTT 控制块
+                time.sleep(0.5)
+
+                # 4) 重新搜索 RTT 控制块
+                new_cb = self._reinit_control_block(uid, session.target)
+                if new_cb is not None:
+                    with self._global_lock:
+                        lock = self._locks.get(uid)
+                        if lock:
+                            with lock:
+                                self._control_blocks[uid] = new_cb
+                        self._user_halted[uid] = False
+                    event_manager.log("info",
+                                      "RTT: 控制块已重新初始化")
+                else:
+                    event_manager.log("warning",
+                                      "RTT: 复位后未找到控制块，"
+                                      "RTT 数据可能无法恢复（固件可能尚未初始化 RTT）")
+            else:
+                with self._global_lock:
+                    self._user_halted[uid] = True
+
+            state = "running" if run else "halted"
+            return {"success": True, "state": state}
+        except Exception as e:
+            event_manager.log("warning", f"RTT: reset 目标失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _reinit_control_block(self, uid: str, target) -> Optional[object]:
+        """重新搜索 RTT 控制块（复位后调用）
+
+        遍历所有 RAM region 搜索 "SEGGER RTT" 控制块，
+        找到后创建新的 RTTControlBlock 对象并返回。
+        """
+        try:
+            from pyocd.debug.rtt import RTTControlBlock
+            from pyocd.core.memory_map import MemoryType
+
+            mem_map = target.get_memory_map()
+            ram_regions = list(mem_map.iter_matching_regions(type=MemoryType.RAM))
+            if not ram_regions:
+                return None
+
+            for r in ram_regions:
+                try:
+                    cb_obj = RTTControlBlock.from_target(
+                        target, address=r.start, size=r.length)
+                    cb_obj.start()
+                    if len(cb_obj.up_channels) > 0:
+                        event_manager.log("info",
+                                          f"RTT: 控制块重新找到 @0x{r.start:08X}, "
+                                          f"{len(cb_obj.up_channels)} up channels")
+                        return cb_obj
+                except Exception:
+                    continue
+        except Exception as e:
+            event_manager.log("warning", f"RTT: 重新搜索控制块失败: {e}")
+        return None
+
+    def get_core_state(self, uid: str) -> dict:
+        """查询目标内核状态"""
+        session = backend._get_session(uid)
+        if not session:
+            return {"success": False, "error": "探针未连接", "state": "unknown"}
+        try:
+            from pyocd.core.target import Target
+            state = session.target.get_state()
+            if state == Target.State.RUNNING:
+                return {"success": True, "state": "running"}
+            elif state == Target.State.HALTED:
+                return {"success": True, "state": "halted"}
+            else:
+                return {"success": True, "state": str(state).lower()}
+        except Exception as e:
+            return {"success": False, "error": str(e), "state": "unknown"}
 
     def send(self, uid: str, data: bytes, channel: Optional[int] = None) -> dict:
         """向 down channel 发送数据
@@ -419,6 +631,7 @@ class RTTBackend:
             self._locks.pop(uid, None)
             self._up_channel.pop(uid, None)
             self._down_channel.pop(uid, None)
+            self._user_halted.pop(uid, None)
 
         if running:
             running.clear()

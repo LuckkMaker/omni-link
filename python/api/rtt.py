@@ -42,6 +42,11 @@ class RttSendTextRequest(BaseModel):
     append_newline: bool = True       # 是否追加换行符
 
 
+class RttDeviceResetRequest(BaseModel):
+    """RTT 设备复位请求"""
+    run: bool = True                   # reset 后是否自动运行
+
+
 @router.get("/probes/{uid}/rtt/status")
 def rtt_status(uid: str):
     """查询 RTT 状态"""
@@ -120,3 +125,40 @@ def rtt_send_text(uid: str, req: RttSendTextRequest):
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "Send failed"))
     return result
+
+
+# ── 目标设备控制（Run/Halt/Reset）─────────────────────────
+# 直接操作 CPU 内核状态，不影响 RTT 轮询线程。
+# 复位时会重新搜索 RTT 控制块，确保复位后数据流恢复正常。
+
+@router.post("/probes/{uid}/rtt/device/run")
+def rtt_device_run(uid: str):
+    """运行目标内核（resume）"""
+    result = rtt_backend.run_target(uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Run failed"))
+    return result
+
+
+@router.post("/probes/{uid}/rtt/device/halt")
+def rtt_device_halt(uid: str):
+    """暂停目标内核（halt）"""
+    result = rtt_backend.halt_target(uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Halt failed"))
+    return result
+
+
+@router.post("/probes/{uid}/rtt/device/reset")
+def rtt_device_reset(uid: str, req: RttDeviceResetRequest):
+    """复位目标芯片并重新初始化 RTT 控制块"""
+    result = rtt_backend.reset_target(uid, run=req.run)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Reset failed"))
+    return result
+
+
+@router.get("/probes/{uid}/rtt/device/state")
+def rtt_device_state(uid: str):
+    """查询目标内核状态（running/halted）"""
+    return rtt_backend.get_core_state(uid)

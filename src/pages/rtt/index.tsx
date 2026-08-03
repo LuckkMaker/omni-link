@@ -9,6 +9,8 @@ import { useRecordToFile } from './hooks/useRecordToFile'
 import { useProbeStore } from '@/stores/probe.store'
 import { useRttStore } from '@/stores/rtt.store'
 import { useUiStore } from '@/stores/ui.store'
+import { useNotificationStore } from '@/stores/notification.store'
+import { rttService } from '@/services/rtt.service'
 
 const SIDEBAR_MAX_RATIO = 0.25 // 最大尺寸 = 窗口宽度 1/4
 const SIDEBAR_DEFAULT_WIDTH = 288 // w-72
@@ -34,9 +36,75 @@ export default function RttPage() {
   const terminalTheme = useUiStore((s) => s.terminalTheme)
   const inputMode = useRttStore((s) => s.inputMode)
   const localEcho = useRttStore((s) => s.localEcho)
+  const pushNotification = useNotificationStore((s) => s.push)
+
+  const [coreState, setCoreState] = useState<'running' | 'halted' | 'unknown'>('unknown')
 
   // 接收数据到文件（持续录制 .dat）
   useRecordToFile(activeTabId)
+
+  // 目标内核状态轮询（连接时定期查询 Run/Halt 状态）
+  useEffect(() => {
+    if (!uid || !isConnected) {
+      setCoreState('unknown')
+      return
+    }
+    const poll = async () => {
+      try {
+        const r = await rttService.deviceState(uid)
+        if (r.success) {
+          setCoreState(r.state === 'running' ? 'running' : r.state === 'halted' ? 'halted' : 'unknown')
+        }
+      } catch { /* ignore */ }
+    }
+    poll()
+    const timer = setInterval(poll, 3000)
+    return () => clearInterval(timer)
+  }, [uid, isConnected])
+
+  // 目标设备控制：Run/Halt 切换
+  const handleToggleDevice = useCallback(async () => {
+    if (!uid) return
+    try {
+      if (coreState === 'running') {
+        await rttService.deviceHalt(uid)
+        setCoreState('halted')
+      } else {
+        await rttService.deviceRun(uid)
+        setCoreState('running')
+      }
+    } catch (e) {
+      pushNotification({
+        type: 'error', title: '设备控制失败',
+        message: e instanceof Error ? e.message : String(e),
+        autoClose: true, autoCloseDelay: 3000,
+      })
+    }
+  }, [uid, coreState, pushNotification])
+
+  // 目标设备控制：复位（后端会重新搜索 RTT 控制块）
+  const handleReset = useCallback(async () => {
+    if (!uid) return
+    const notifId = pushNotification({
+      type: 'progress', title: '正在复位目标...',
+      message: '复位并重新初始化 RTT 控制块',
+    })
+    try {
+      const result = await rttService.deviceReset(uid, true)
+      setCoreState(result.state === 'halted' ? 'halted' : 'running')
+      useNotificationStore.getState().update(notifId, {
+        type: 'success', title: '目标已复位',
+        message: 'RTT 控制块已重新初始化',
+        autoClose: true, autoCloseDelay: 3000,
+      })
+    } catch (e) {
+      useNotificationStore.getState().update(notifId, {
+        type: 'error', title: '复位失败',
+        message: e instanceof Error ? e.message : String(e),
+        autoClose: true, autoCloseDelay: 5000,
+      })
+    }
+  }, [uid, pushNotification])
 
   // 侧边栏宽度变化后触发 resize 让 xterm 重新 fit
   useEffect(() => {
@@ -125,6 +193,9 @@ export default function RttPage() {
             connected={isConnected}
             terminalRef={terminalRef}
             onOpenMultiString={() => setShowMultiString(true)}
+            onToggleDevice={handleToggleDevice}
+            onReset={handleReset}
+            coreState={coreState}
           />
         </div>
       </div>
