@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { RotateCcw } from 'lucide-react'
+import { RotateCcw, ArrowLeft, ArrowRight } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,9 @@ export default function NumberConverter() {
   const setNcValues = useToolsStore((s) => s.setNcValues)
 
   const [error, setError] = useState('')
+
+  // 移位位数（0-31），用于左移 / 右移操作
+  const [shiftAmount, setShiftAmount] = useState('1')
 
   // 核心数值（无符号 32 位），所有输入最终同步到这个值
   const value = (() => {
@@ -89,6 +92,30 @@ export default function NumberConverter() {
   const handleReset = useCallback(() => {
     updateAll(0)
   }, [updateAll])
+
+  // 解析移位位数，非法或越界时返回 null 并提示
+  const parseShiftAmount = useCallback((): number | null => {
+    const n = parseInt(shiftAmount, 10)
+    if (Number.isNaN(n) || n < 0 || n > 31) {
+      setError('移位位数需为 0-31 的整数')
+      return null
+    }
+    return n
+  }, [shiftAmount])
+
+  // 左移：低位补 0，超过 32 位部分丢弃
+  const handleShiftLeft = useCallback(() => {
+    const n = parseShiftAmount()
+    if (n === null) return
+    updateAll((value << n) >>> 0)
+  }, [parseShiftAmount, value, updateAll])
+
+  // 右移：逻辑右移，高位补 0
+  const handleShiftRight = useCallback(() => {
+    const n = parseShiftAmount()
+    if (n === null) return
+    updateAll(value >>> n)
+  }, [parseShiftAmount, value, updateAll])
 
   // 生成 32 位的位信息（bit 31 在左，bit 0 在右）
   const bitValue = (bitIndex: number) => (value >> bitIndex) & 1
@@ -209,6 +236,28 @@ export default function NumberConverter() {
               </div>
             </div>
           ))}
+        </div>
+
+        {/* 位运算：左移 / 右移 — 32-bit Binary 区块底部 */}
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
+          <label className="text-xs font-medium text-muted-foreground">移位位数</label>
+          <Input
+            value={shiftAmount}
+            onChange={(e) => setShiftAmount(e.target.value.replace(/[^\d]/g, ''))}
+            className="w-24 font-mono"
+            placeholder="1"
+            inputMode="numeric"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <Button variant="outline" size="sm" onClick={handleShiftLeft} title="左移 (<<)" className="gap-1.5">
+            <ArrowLeft className="size-4" />
+            左移 &lt;&lt;
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleShiftRight} title="逻辑右移 (>>)" className="gap-1.5">
+            <ArrowRight className="size-4" />
+            右移 &gt;&gt;
+          </Button>
         </div>
       </div>
 

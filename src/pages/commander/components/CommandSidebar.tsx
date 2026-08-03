@@ -280,8 +280,14 @@ export function CommandSidebar({
     navigator.clipboard.writeText(text).catch(() => {})
   }, [])
 
-  /** 转换路径：Windows 反斜杠转正斜杠 */
-  const convertedPath = pathInput.trim().replace(/\\/g, '/')
+  /** 转换路径：Windows 反斜杠转正斜杠
+   *  只取第一行非空内容，避免粘贴多行路径后复制到终端时
+   *  被 xterm.js 误当作多条命令执行 */
+  const convertedPath = (pathInput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? ''
+  ).replace(/\\/g, '/')
 
   /** 复制转换后的路径并插入到终端 */
   const handleCopyPath = useCallback(() => {

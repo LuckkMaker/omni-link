@@ -98,4 +98,35 @@ export const rttService = {
     })
     return data
   },
+
+  /** 运行目标内核（resume） */
+  async deviceRun(uid: string): Promise<{ success: boolean; state: string }> {
+    const client = await api()
+    const { data } = await client.post(`/api/probes/${uid}/rtt/device/run`)
+    return data
+  },
+
+  /** 暂停目标内核（halt） */
+  async deviceHalt(uid: string): Promise<{ success: boolean; state: string }> {
+    const client = await api()
+    const { data } = await client.post(`/api/probes/${uid}/rtt/device/halt`)
+    return data
+  },
+
+  /** 复位目标芯片并重新初始化 RTT 控制块 */
+  async deviceReset(uid: string, run: boolean = true): Promise<{ success: boolean; state: string }> {
+    const client = await api()
+    const { data } = await client.post(`/api/probes/${uid}/rtt/device/reset`, { run }, {
+      // 复位含 0.5s 等待 + 控制块重搜索，需较长超时
+      timeout: 15000,
+    })
+    return data
+  },
+
+  /** 查询目标内核状态 */
+  async deviceState(uid: string): Promise<{ success: boolean; state: string; error?: string }> {
+    const client = await api()
+    const { data } = await client.get(`/api/probes/${uid}/rtt/device/state`)
+    return data
+  },
 }

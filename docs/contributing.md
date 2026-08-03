@@ -1,10 +1,10 @@
 # 贡献指南
 
-欢迎为 OMNI Work 贡献代码、报告问题或提出建议。
+欢迎为 OMNI Link 贡献代码、报告问题或提出建议。
 
 ## 报告问题
 
-通过 [GitHub Issues](https://github.com/LuckkMaker/omni-work/issues) 提交问题，请包含以下信息：
+通过 [GitHub Issues](https://github.com/LuckkMaker/omni-link/issues) 提交问题，请包含以下信息：
 
 - 操作系统版本
 - 目标 MCU 型号与仿真器类型
@@ -15,8 +15,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/LuckkMaker/omni-work.git
-cd omni-work
+git clone https://github.com/LuckkMaker/omni-link.git
+cd omni-link
 
 # 安装前端依赖
 npm install

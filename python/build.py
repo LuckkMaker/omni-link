@@ -264,7 +264,7 @@ def build(python_exe: str):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Build OMNI Work backend")
+    parser = argparse.ArgumentParser(description="Build OMNI Link backend")
     parser.add_argument(
         "--clean", action="store_true",
         help="Clean build artifacts before building",

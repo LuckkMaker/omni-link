@@ -1,9 +1,9 @@
-# OMNI Work
+# OMNI Link
 
-[![Version](https://img.shields.io/github/v/release/LuckkMaker/omni-work)](https://github.com/LuckkMaker/omni-work/releases/latest)
-[![License](https://img.shields.io/github/license/LuckkMaker/omni-work)](https://github.com/LuckkMaker/omni-work/blob/main/LICENSE)
+[![Version](https://img.shields.io/github/v/release/LuckkMaker/omni-link)](https://github.com/LuckkMaker/omni-link/releases/latest)
+[![License](https://img.shields.io/github/license/LuckkMaker/omni-link)](https://github.com/LuckkMaker/omni-link/blob/main/LICENSE)
 
-OMNI Work 是一个嵌入式开发工具集，提供 Flash 烧录、Commander 交互式命令行、RTT Viewer 实时数据收发、Monitor 变量波形监控等核心调试功能，支持 DAPLink、JLink 等工具接入，适用于 STM32、GD32、APM32、NXP 等主流 Arm Cortex-M MCU 系列。
+OMNI Link 是一个嵌入式开发工具集，提供 Flash 烧录、Commander 交互式命令行、RTT Viewer 实时数据收发、Monitor 变量波形监控等核心调试功能，支持 DAPLink、JLink 等工具接入，适用于 STM32、GD32、APM32、NXP 等主流 Arm Cortex-M MCU 系列。
 
 ![Flash 烧录工具](assets/images/advertisement.png)
 
@@ -122,7 +122,7 @@ npm run package
 npm run package:clean
 ```
 
-打包产物：`release/OMNI Work-0.3.3-x64-setup.exe`（NSIS 安装包）
+打包产物：`release/OMNI Link-0.3.3-x64-setup.exe`（NSIS 安装包）
 
 ## 支持的目标芯片
 
@@ -132,7 +132,7 @@ npm run package:clean
 
 ## 许可证
 
-OMNI Work 采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 LuckkMaker。
+OMNI Link 采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 LuckkMaker。
 
 内置的 pyOCD 源码采用 [Apache 2.0 许可证](python/pyocd/LICENSE)，Copyright (c) 2006-2026 pyOCD Authors。
 

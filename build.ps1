@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    OMNI Work 一键打包脚本（Windows）
+    OMNI Link 一键打包脚本（Windows）
 .DESCRIPTION
     自动完成三步构建：
       1. PyInstaller 打包 Python 后端 -> python/dist/omni-backend/
@@ -34,7 +34,7 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  OMNI Work Build Script" -ForegroundColor Cyan
+Write-Host "  OMNI Link Build Script" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 

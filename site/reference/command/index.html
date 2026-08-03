@@ -5,7 +5,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="LuckkMaker" />
       <link rel="shortcut icon" href="../../img/favicon.ico" />
-    <title>Command reference - OMNI Work</title>
+    <title>Command reference - OMNI Link</title>
     <link rel="stylesheet" href="../../css/theme.css" />
     <link rel="stylesheet" href="../../css/theme_extra.css" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
@@ -74,7 +74,7 @@
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
       <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="../..">OMNI Work</a>
+          <a href="../..">OMNI Link</a>
         
       </nav>
       <div class="wy-nav-content">
@@ -83,7 +83,7 @@
     <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
       <li class="breadcrumb-item active">Command reference</li>
     <li class="wy-breadcrumbs-aside">
-          <a href="https://github.com/LuckkMaker/omni-work/edit/master/docs/reference/command.md">Edit on omni-work</a>
+          <a href="https://github.com/LuckkMaker/omni-link/edit/master/docs/reference/command.md">Edit on omni-link</a>
     </li>
   </ul>
   <hr/>
@@ -92,7 +92,7 @@
             <div class="section" itemprop="articleBody">
               
                 <h1 id="command-reference">Command reference<a class="headerlink" href="#command-reference" title="Permanent link">&para;</a></h1>
-<p>Commander 页面复用 pyOCD Commander REPL，以下为完整命令参考。OMNI Work 在此基础上增加了 <code>source</code> 命令用于源码路径映射。</p>
+<p>Commander 页面复用 pyOCD Commander REPL，以下为完整命令参考。OMNI Link 在此基础上增加了 <code>source</code> 命令用于源码路径映射。</p>
 <h2 id="_1">会话与状态<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -264,7 +264,7 @@
 </tr>
 </tbody>
 </table>
-<p>OMNI Work 的 <code>erase</code> 命令直接操作 <code>boot_memory</code> 的 Flash 实例，与 Flash 页面的擦除行为一致。</p>
+<p>OMNI Link 的 <code>erase</code> 命令直接操作 <code>boot_memory</code> 的 Flash 实例，与 Flash 页面的擦除行为一致。</p>
 <h2 id="_5">断点与观察点<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -374,7 +374,7 @@
 </tr>
 </tbody>
 </table>
-<h2 id="source-omni-work">source 命令（OMNI Work 扩展）<a class="headerlink" href="#source-omni-work" title="Permanent link">&para;</a></h2>
+<h2 id="source-omni-link">source 命令（OMNI Link 扩展）<a class="headerlink" href="#source-omni-link" title="Permanent link">&para;</a></h2>
 <p><code>source</code> 命令参考 GDB 的 <code>directory</code>/<code>substitute-path</code> 设计，解决跨机器源码路径映射问题。当 ELF 文件中记录的源码路径与当前机器上的实际路径不一致时，配置替换规则后 <code>where</code> 和 <code>disasm</code> 命令可正确显示源码。</p>
 <pre class="highlight"><code>source add &lt;原始路径前缀&gt; &lt;本地路径前缀&gt;
 source list
@@ -429,7 +429,7 @@ source remove 0</code></pre>
   <span class="rst-current-version" data-toggle="rst-current-version">
     
         <span>
-          <a href="https://github.com/LuckkMaker/omni-work" class="fa fa-code-fork" style="color: #fcfcfc"> omni-work</a>
+          <a href="https://github.com/LuckkMaker/omni-link" class="fa fa-code-fork" style="color: #fcfcfc"> omni-link</a>
         </span>
     
     

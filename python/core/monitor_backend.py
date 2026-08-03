@@ -26,7 +26,7 @@ from core.events import event_manager
 from core.session_recorder import SessionRecorder
 
 # 采样落盘目录（用户主目录下，跨重启持久化；历史无上限，全览/CSV 从磁盘读）
-SESSION_DIR = os.path.join(os.path.expanduser("~"), ".omni-work", "monitor-sessions")
+SESSION_DIR = os.path.join(os.path.expanduser("~"), ".omni-link", "monitor-sessions")
 
 # pyOCD AP/DP 寄存器级常量（用于跨 Block 流水线批量读）
 # 借鉴 plink: 直接操作 AP/DP 层，将多个 Block 的 DAP 命令一次 flush 发出，

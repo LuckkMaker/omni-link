@@ -1,6 +1,6 @@
 # Command reference
 
-Commander 页面复用 pyOCD Commander REPL，以下为完整命令参考。OMNI Work 在此基础上增加了 `source` 命令用于源码路径映射。
+Commander 页面复用 pyOCD Commander REPL，以下为完整命令参考。OMNI Link 在此基础上增加了 `source` 命令用于源码路径映射。
 
 ## 会话与状态
 
@@ -56,7 +56,7 @@ Commander 页面复用 pyOCD Commander REPL，以下为完整命令参考。OMNI
 | `erase [ADDR LENGTH]` | 擦除 Flash（不指定参数则擦除整个芯片） |
 | `unlock` | 解锁安全区域 |
 
-OMNI Work 的 `erase` 命令直接操作 `boot_memory` 的 Flash 实例，与 Flash 页面的擦除行为一致。
+OMNI Link 的 `erase` 命令直接操作 `boot_memory` 的 Flash 实例，与 Flash 页面的擦除行为一致。
 
 ## 断点与观察点
 
@@ -92,7 +92,7 @@ OMNI Work 的 `erase` 命令直接操作 `boot_memory` 的 Flash 实例，与 Fl
 | `symbol NAME` | 查找符号地址 |
 | `core NUM` | 选择核心 |
 
-## source 命令（OMNI Work 扩展）
+## source 命令（OMNI Link 扩展）
 
 `source` 命令参考 GDB 的 `directory`/`substitute-path` 设计，解决跨机器源码路径映射问题。当 ELF 文件中记录的源码路径与当前机器上的实际路径不一致时，配置替换规则后 `where` 和 `disasm` 命令可正确显示源码。
 
