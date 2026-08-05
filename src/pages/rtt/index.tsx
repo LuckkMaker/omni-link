@@ -158,7 +158,7 @@ export default function RttPage() {
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <p style={{ color: terminalTheme.theme.foreground, opacity: 0.7 }}>
-                  {uid ? '仿真器未连接' : '请选择并连接仿真器'}
+                  {uid ? 'Link 未连接' : '请选择并连接 Link'}
                 </p>
               </div>
             </div>

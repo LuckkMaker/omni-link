@@ -412,7 +412,7 @@ export default function MonitorPage() {
             {!isConnected ? (
               <div className="flex h-full items-center justify-center">
                 <p className="text-sm text-muted-foreground">
-                  {uid ? '仿真器未连接' : '请选择并连接仿真器'}
+                  {uid ? 'Link 未连接' : '请选择并连接 Link'}
                 </p>
               </div>
             ) : variables.length === 0 ? (
