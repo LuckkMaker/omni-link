@@ -76,9 +76,12 @@ Number Converter 支持十进制、十六进制、二进制实时联动转换，
 npm install
 
 # 创建 Python 虚拟环境并安装依赖
-# Windows（使用系统 Python，非 TRAE 内置版本）
-C:\Users\<用户名>\AppData\Local\Programs\Python\Python311\python.exe -m venv .venv
+# Windows
+python -m venv .venv
 .venv\Scripts\pip.exe install -r python/requirements.txt
+# macOS / Linux
+python3 -m venv .venv
+.venv/bin/pip install -r python/requirements.txt
 ```
 
 或使用 npm 脚本一键创建虚拟环境：

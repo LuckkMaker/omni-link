@@ -193,7 +193,7 @@ export function InputBar({ uid, running }: InputBarProps) {
         disabled={!running || !hasDownChannel}
         placeholder={
           !running
-            ? 'RTT 未启动'
+            ? 'RTT 会话未启动'
             : !hasDownChannel
             ? '无下行通道'
             : sendHex

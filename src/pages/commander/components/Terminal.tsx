@@ -42,8 +42,8 @@ const COLOR = {
   reverse: '\x1b[7m',
 }
 
-const PROMPT = `${COLOR.green}pyocd${COLOR.reset}> `
-const PROMPT_VISIBLE_LEN = 7 // "pyocd> " 可见长度
+const PROMPT = `${COLOR.green}omni link${COLOR.reset}> `
+const PROMPT_VISIBLE_LEN = 11 // "omni link> " 可见长度
 
 // localStorage key
 const HISTORY_KEY = 'commander:history'
@@ -199,7 +199,7 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
       historyIndex.current = -1
 
       if (!cmd.trim()) {
-        // 空命令：清除当前行再写 prompt，避免 pyocd> pyocd> 重复叠加
+        // 空命令：清除当前行再写 prompt，避免 omni link> omni link> 重复叠加
         term.write('\r\x1b[2K' + PROMPT)
         return
       }
@@ -331,7 +331,7 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
     }
   }, [redrawInputLine])
 
-  // ── 清屏（修复 pyocd> pyocd> bug）─────
+  // ── 清屏（修复 omni link> 重复叠加 bug）─────
   const clearScreen = useCallback(() => {
     const term = termRef.current
     if (!term) return
