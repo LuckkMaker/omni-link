@@ -12,22 +12,22 @@ export type DebugInterface = 'swd' | 'jtag'
 /** 连接模式选项 */
 export const CONNECT_MODE_OPTIONS: { label: string; value: ConnectMode; desc: string }[] = [
   {
-    label: '复位并暂停',
+    label: '复位并暂停 (Halt)',
     value: 'halt',
     desc: '连接时复位目标并暂停在复位向量（默认）',
   },
   {
-    label: '附加模式',
+    label: '附加模式 (Attach)',
     value: 'attach',
     desc: '不复位、不暂停，保持目标当前状态（适合故障分析等需要保留现场的场景）',
   },
   {
-    label: '连接前复位',
+    label: '连接前复位 (Pre-reset)',
     value: 'pre-reset',
     desc: '建立调试连接前先执行一次复位',
   },
   {
-    label: '复位下连接',
+    label: '复位下连接 (Under-reset)',
     value: 'under-reset',
     desc: '拉低复位线时连接，用于深度睡眠或被锁定的目标',
   },

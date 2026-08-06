@@ -170,7 +170,7 @@ const parseRead32 = (output: string): string => {
   const m =
     output.match(/:  ([0-9a-fA-F]{8})/) ??
     output.match(/0x([0-9a-fA-F]{1,8})\b/)
-  return m ? m[1].padStart(8, '0').toLowerCase() : '00000000'
+  return m ? m[1].padStart(8, '0').toUpperCase() : '00000000'
 }
 
 const readMem32 = async (uid: string, addr: number): Promise<string> => {
@@ -194,7 +194,7 @@ const parseCoreState = (output: string): 'halted' | 'running' | 'unknown' => {
 
 // ── 异常现场恢复（栈回溯：故障已发生但未在异常入口捕获时，从栈中找回现场） ──────────────────────────────────
 
-const toHexStr = (v: number): string => (v >>> 0).toString(16).padStart(8, '0')
+const toHexStr = (v: number): string => (v >>> 0).toString(16).padStart(8, '0').toUpperCase()
 
 /** 解析 read32 addr len 批量输出的多行 hex dump（每行 4 个 32 位值，值间单空格） */
 const parseRead32Block = (output: string): number[] => {
@@ -300,7 +300,7 @@ const parseRegAll = (output: string): ParsedRegEntry[] => {
 
 const formatRegValue = (value: string): string => {
   const v = value.replace(/^0x/i, '')
-  return v.length <= 8 ? v.padStart(8, '0').toLowerCase() : value.toLowerCase()
+  return v.length <= 8 ? v.padStart(8, '0').toUpperCase() : value.toUpperCase()
 }
 
 /** 寄存器语义说明（完整覆盖：通用 + 特殊 + FPU） */
@@ -383,11 +383,18 @@ export default function FaultAnalyzer() {
   )
   const [loading, setLoading] = useState(false)
   const [regOutput, setRegOutput] = useState<string | null>(null)
-  const [analyzeInfo, setAnalyzeInfo] = useState<string | null>(() =>
-    initial
-      ? (initial.analyzeInfo ?? '已恢复上次分析结果')
-      : null
-  )
+  const [analyzeInfo, setAnalyzeInfo] = useState<string | null>(() => {
+    if (!initial) return null
+    if (initial.analyzeInfo) return initial.analyzeInfo
+    // 仅当确有实际数据恢复（栈帧非空或任一故障寄存器非 0）时才提示"已恢复"；
+    // 清空后持久化的空状态（regs 全 0 / stackFrame null）不显示该提示
+    const hasRealData =
+      initial.stackFrame !== null ||
+      initial.regs.cfsr !== '00000000' ||
+      initial.regs.hfsr !== '00000000' ||
+      initial.regs.dfsr !== '00000000'
+    return hasRealData ? '已恢复上次分析结果' : null
+  })
 
   // 分析结果变化时持久化，页面切换后自动恢复
   useEffect(() => {
@@ -468,10 +475,10 @@ export default function FaultAnalyzer() {
         lr: toHexStr(frameWords[5]),
         pc: toHexStr(frameWords[6]),
         xpsr: toHexStr(frameWords[7]),
-        sp: frameAddr.toString(16).padStart(8, '0'),
+        sp: frameAddr.toString(16).padStart(8, '0').toUpperCase(),
         excReturn:
           excReturn !== null
-            ? excReturn.toString(16).padStart(8, '0')
+            ? excReturn.toString(16).padStart(8, '0').toUpperCase()
             : undefined,
         stackUsed,
         source: finalSource,
@@ -503,8 +510,22 @@ export default function FaultAnalyzer() {
             : '目标已暂停，未检测到故障标志 — 已读取当前状态'
         )
       } else {
-        // ── 目标运行中：开启 VC（不复位、不打断运行），等待故障自然发生 ──
-        setAnalyzeInfo('目标运行中，开启向量捕获并监控…（不复位，保留现场）')
+        // ── 目标运行中 ──
+        // 1. 先查故障标志：上电即触发故障的固件此时很可能已卡在故障处理程序中
+        //    （状态仍为 running），直接捕获，避免空等 15s 监控超时。
+        const preCfsr = parseHex(await readMem32(uid, FAULT_ADDRS.CFSR))
+        const preHfsr = parseHex(await readMem32(uid, FAULT_ADDRS.HFSR))
+        if (preCfsr !== 0 || preHfsr !== 0) {
+          await execWithTimeout(uid, 'halt')
+          setAnalyzeInfo(
+            '检测到故障已发生（目标仍在运行，可能正停在故障处理程序中），已暂停并恢复现场（未复位）'
+          )
+          await readTargetState('current', { recover: true })
+          return
+        }
+
+        // 2. 无故障标志 → 开启 VC 监控，等待故障自然发生（不复位、不打断运行）
+        setAnalyzeInfo('未检测到故障，开启 Vector Catch 监控…（不复位，故障发生时自动暂停保留现场）')
         await execWithTimeout(uid, 'vector-catch hbm')
 
         let captured = false
@@ -523,20 +544,9 @@ export default function FaultAnalyzer() {
           setAnalyzeInfo('已捕获异常（Vector Catch，未复位），读取现场…')
           await readTargetState('vc')
         } else {
-          // 超时：区分「真未触发」与「故障已发生但 VC 未拦截（如已进入故障处理程序）」
-          const cfsrV = parseHex(await readMem32(uid, FAULT_ADDRS.CFSR))
-          const hfsrV = parseHex(await readMem32(uid, FAULT_ADDRS.HFSR))
-          if (cfsrV !== 0 || hfsrV !== 0) {
-            await execWithTimeout(uid, 'halt')
-            setAnalyzeInfo(
-              '检测到故障已发生（可能正停在故障处理程序中），已暂停并尝试恢复现场（未复位）'
-            )
-            await readTargetState('current', { recover: true })
-          } else {
-            setAnalyzeInfo(
-              '监控 15s 未触发故障；Vector Catch 已保持开启，故障发生时目标会自动暂停保留现场，届时再次点击「开始分析」即可读取'
-            )
-          }
+          setAnalyzeInfo(
+            '监控 15s 未触发故障；Vector Catch 已保持开启，故障发生时目标会自动暂停保留现场，届时再次点击「开始分析」即可读取'
+          )
         }
       }
     } catch (e) {
@@ -573,6 +583,7 @@ export default function FaultAnalyzer() {
     setRegs(EMPTY_REGS)
     setStackFrame(null)
     setAnalyzeInfo(null)
+    setRegOutput(null) // 同时清空 Reg 弹窗输出，避免任何残留状态
     try {
       localStorage.removeItem(STORAGE_KEY)
     } catch {
@@ -635,15 +646,10 @@ export default function FaultAnalyzer() {
   const hfsrVal = parseHex(regs.hfsr)
   const shcsrVal = parseHex(regs.shcsr)
   const dfsrVal = parseHex(regs.dfsr)
-  const mmfarVal = parseHex(regs.mmfar)
-  const bfarVal = parseHex(regs.bfar)
 
   const mmfsrVal = cfsrVal & 0xff
   const bfsrVal = (cfsrVal >> 8) & 0xff
   const ufsrVal = (cfsrVal >> 16) & 0xffff
-
-  const mmarValid = (mmfsrVal >> 7) & 1
-  const bfarValid = (bfsrVal >> 7) & 1
 
   const hasData =
     cfsrVal !== 0 || hfsrVal !== 0 || dfsrVal !== 0 || stackFrame !== null
@@ -787,89 +793,53 @@ export default function FaultAnalyzer() {
         </CardContent>
       </Card>
 
-      {/* 2. Hard Faults（保留） */}
+      {/* 2. System Handler Control（单列显示） */}
+      <FaultSection
+        title="System Handler Control"
+        register="SHCSR"
+        value={shcsrVal}
+        bits={SHCSR_BITS}
+      />
+
+      {/* 3. Debug Faults（单列显示） */}
+      <FaultSection
+        title="Debug Faults"
+        register="DFSR"
+        value={dfsrVal}
+        bits={DFSR_BITS}
+      />
+
+      {/* 4. Hard Faults（保留） */}
       <FaultSection
         title="Hard Faults"
         register="HFSR"
         value={hfsrVal}
         bits={HFSR_BITS}
-        accent="destructive"
       />
 
-      {/* 3. Usage Faults（保留） */}
+      {/* 5. Usage Faults（保留） */}
       <FaultSection
         title="Usage Faults"
         register="UFSR"
         value={ufsrVal}
         bits={UFSR_BITS}
-        accent="warning"
       />
 
-      {/* 4. Bus Faults（保留） */}
+      {/* 6. Bus Faults（保留） */}
       <FaultSection
         title="Bus Faults"
         register="BFSR"
         value={bfsrVal}
         bits={BFSR_BITS}
-        accent="info"
       />
 
-      {/* 5. Memory Management Faults（保留） */}
+      {/* 7. Memory Management Faults（保留） */}
       <FaultSection
         title="Memory Management Faults"
         register="MMFSR"
         value={mmfsrVal}
         bits={MMFSR_BITS}
-        accent="secondary"
       />
-
-      {/* 附加故障寄存器（新增，不改变四 section 结构） */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <FaultSection
-          title="System Handler Control"
-          register="SHCSR"
-          value={shcsrVal}
-          bits={SHCSR_BITS}
-          accent="secondary"
-        />
-        <FaultSection
-          title="Debug Faults"
-          register="DFSR"
-          value={dfsrVal}
-          bits={DFSR_BITS}
-          accent="secondary"
-        />
-      </div>
-
-      {/* 辅助地址信息：硬件故障地址寄存器 BFAR/MMFAR（出错的数据地址，区别于栈帧 PC 的代码位置） */}
-      {(mmarValid || bfarValid) && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">故障地址</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="text-xs text-muted-foreground">
-              硬件故障地址寄存器（出错的数据访问地址）— 区别于「CPU capture」中栈帧 PC/LR（代码位置）
-            </div>
-            {mmarValid && (
-              <div className="flex items-center gap-3 text-sm">
-                <span className="font-mono text-xs text-muted-foreground">MMFAR</span>
-                <span className="font-mono text-primary">0x{regs.mmfar}</span>
-                <MemRegionBadge addr={mmfarVal} />
-                <span className="text-xs text-muted-foreground">— Memory Management Fault 地址寄存器</span>
-              </div>
-            )}
-            {bfarValid && (
-              <div className="flex items-center gap-3 text-sm">
-                <span className="font-mono text-xs text-muted-foreground">BFAR</span>
-                <span className="font-mono text-primary">0x{regs.bfar}</span>
-                <MemRegionBadge addr={bfarVal} />
-                <span className="text-xs text-muted-foreground">— Bus Fault 地址寄存器</span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
 
       {/* Reg 弹窗（多 tab：通用 / 特殊 / 原始输出） */}
       {regOutput !== null && (
@@ -1032,13 +1002,20 @@ function FaultSummary({
   const usgFaultEnabled = (shcsr >> 18) & 1
   const memFaultEnabled = (shcsr >> 16) & 1
 
-  if (!hasData && !analyzeInfo) return null
-
   return (
     <Card className="border-primary/20 bg-primary/5">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-sm">
           分析结论
+          {hasData ? (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-normal text-primary">
+              已捕获
+            </span>
+          ) : (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-normal text-muted-foreground">
+              未分析
+            </span>
+          )}
           {analyzeInfo && (
             <span className="ml-1 text-xs font-normal text-muted-foreground">
               · {analyzeInfo}
@@ -1054,11 +1031,11 @@ function FaultSummary({
             <SummaryItem label="触发位置" value={faultPos} mono />
           </div>
         ) : (
-          <div className="text-xs text-muted-foreground">
-            {analyzeInfo ?? '点击「开始分析」自动捕获并生成诊断结论'}
+          <div className="py-6 text-center text-sm text-muted-foreground">
+            点击「开始分析」自动捕获并生成诊断结论
           </div>
         )}
-        {hasData && hfsr & (1 << 30) && (
+        {hasData && (hfsr & (1 << 30)) !== 0 && (
           <div className="text-xs text-muted-foreground">
             可配置故障使能：Bus{' '}
             {busFaultEnabled ? 'ON' : 'OFF'} · Usage {usgFaultEnabled ? 'ON' : 'OFF'} · MemManage{' '}
@@ -1093,13 +1070,6 @@ function SummaryItem({
 }
 
 // ── 子组件 ──────────────────────────────────
-
-const accentMap = {
-  destructive: { text: 'text-destructive', border: 'border-destructive/30', bg: 'bg-destructive/10' },
-  warning: { text: 'text-yellow-600 dark:text-yellow-500', border: 'border-yellow-500/30', bg: 'bg-yellow-500/10' },
-  info: { text: 'text-blue-600 dark:text-blue-400', border: 'border-blue-500/30', bg: 'bg-blue-500/10' },
-  secondary: { text: 'text-purple-600 dark:text-purple-400', border: 'border-purple-500/30', bg: 'bg-purple-500/10' },
-} as const
 
 function CpuIcon() {
   return (
@@ -1146,24 +1116,26 @@ function FaultSection({
   register,
   value,
   bits,
-  accent,
 }: {
   title: string
   register: string
   value: number
   bits: FaultBit[]
-  accent: keyof typeof accentMap
 }) {
-  const colors = accentMap[accent]
   const activeBits = bits.filter((b) => (value >> b.bit) & 1)
   const hasFault = value !== 0
   const summary = activeBits.map((b) => b.name).join(' ')
 
   return (
-    <Card className={cn(hasFault && colors.border)}>
+    <Card className={cn(hasFault && 'border-primary/30')}>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle className={cn('flex items-center gap-2 text-sm', colors.text)}>
+          <CardTitle
+            className={cn(
+              'flex items-center gap-2 text-sm',
+              hasFault ? 'text-primary' : 'text-foreground'
+            )}
+          >
             {title}
             {hasFault && (
               <span className="flex items-center gap-1 text-xs">
@@ -1172,7 +1144,12 @@ function FaultSection({
               </span>
             )}
           </CardTitle>
-          <span className={cn('font-mono text-xs', hasFault ? colors.text : 'text-muted-foreground')}>
+          <span
+            className={cn(
+              'font-mono text-xs',
+              hasFault ? 'text-primary' : 'text-muted-foreground'
+            )}
+          >
             {register} = 0x{value.toString(16).padStart(8, '0').toUpperCase()}
             {summary ? ` · ${summary}` : ''}
           </span>
@@ -1186,7 +1163,7 @@ function FaultSection({
                 key={b.bit}
                 className="flex items-start gap-3 rounded-md bg-muted/30 px-3 py-2 text-sm"
               >
-                <span className={cn('font-mono text-xs font-bold', colors.text)}>
+                <span className="font-mono text-xs font-bold text-primary">
                   bit {b.bit}
                 </span>
                 <span className="font-mono text-xs font-medium">{b.name}</span>
@@ -1216,7 +1193,7 @@ function FaultSection({
                 className={cn(
                   'flex h-7 w-7 items-center justify-center rounded text-[10px] font-mono font-bold transition-colors',
                   isActive
-                    ? cn(colors.bg, colors.text)
+                    ? 'bg-primary/10 text-primary'
                     : 'bg-muted/30 text-muted-foreground'
                 )}
               >
@@ -1285,6 +1262,14 @@ function XpsrBits({ xpsr }: { xpsr: string }) {
 }
 
 function MemRegionBadge({ addr }: { addr: number }) {
+  // 地址 0 特判：通常是空指针/零地址访问（0x0 即向量表/Flash 起始区）
+  if (addr === 0) {
+    return (
+      <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive">
+        地址 0x0 · 空指针/零地址访问
+      </span>
+    )
+  }
   const region =
     addr >= 0x00000000 && addr <= 0x1fffffff
       ? { name: 'Flash/代码区', cls: 'bg-blue-500/10 text-blue-600 dark:text-blue-400' }
