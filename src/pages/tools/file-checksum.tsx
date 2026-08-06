@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { Upload, FileText, Copy, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -12,13 +12,52 @@ interface ChecksumResult {
   size: number
 }
 
+// ── 校验和结果持久化（页面切换后恢复） ──────────────────────────────────
+
+const STORAGE_KEY = 'omni.file-checksum.v1'
+
+interface PersistedChecksum {
+  result: ChecksumResult | null
+  fileName: string
+  ts: number
+}
+
+/** 读取上次保存的校验和结果（失败返回 null，不影响正常流程） */
+const readPersisted = (): PersistedChecksum | null => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedChecksum
+    if (!parsed || typeof parsed !== 'object') return null
+    if (parsed.result !== null && typeof parsed.result !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 export default function FileChecksum() {
-  const [result, setResult] = useState<ChecksumResult | null>(null)
-  const [fileName, setFileName] = useState('')
+  const [initial] = useState(readPersisted)
+  const [result, setResult] = useState<ChecksumResult | null>(
+    () => initial?.result ?? null
+  )
+  const [fileName, setFileName] = useState(() => initial?.fileName ?? '')
   const [computing, setComputing] = useState(false)
   const [progress, setProgress] = useState(0)
   const [copied, setCopied] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // 结果变化时持久化，页面切换后自动恢复
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ result, fileName, ts: Date.now() })
+      )
+    } catch {
+      // localStorage 不可用时忽略
+    }
+  }, [result, fileName])
 
   const handleFile = useCallback(async (file: File) => {
     setComputing(true)

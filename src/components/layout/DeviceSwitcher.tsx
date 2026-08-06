@@ -16,7 +16,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { TargetDeviceDialog } from '@/components/TargetDeviceDialog'
-import { useProbeStore, SPEED_OPTIONS } from '@/stores/probe.store'
+import { useProbeStore, SPEED_OPTIONS, CONNECT_MODE_OPTIONS } from '@/stores/probe.store'
 import { useBackendStatus } from '@/hooks/useBackendStatus'
 import type { ProbeState } from '@shared/types'
 
@@ -43,6 +43,7 @@ export function DeviceSwitcher() {
     pendingTarget,
     pendingInterface,
     pendingSpeed,
+    pendingConnectMode,
     fetchProbes,
     fetchDevices,
     selectProbe,
@@ -51,6 +52,7 @@ export function DeviceSwitcher() {
     setPendingTarget,
     setPendingInterface,
     setPendingSpeed,
+    setPendingConnectMode,
     getSelectedProbe,
     getSelectedTarget,
     getDeviceInfo,
@@ -259,6 +261,37 @@ export function DeviceSwitcher() {
                 </SelectContent>
               </Select>
             </div>
+          </div>
+
+          {/* 连接模式 */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-1">
+              <span className="text-sm font-medium">连接模式</span>
+              <span
+                className="text-[10px] text-muted-foreground cursor-help"
+                title={CONNECT_MODE_OPTIONS.map((m) => `${m.label}：${m.desc}`).join('\n')}
+              >
+                ⓘ
+              </span>
+            </div>
+            <Select
+              value={pendingConnectMode}
+              onValueChange={(v) => setPendingConnectMode(v as typeof pendingConnectMode)}
+            >
+              <SelectTrigger className="h-9" disabled={isConnected}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CONNECT_MODE_OPTIONS.map((m) => (
+                  <SelectItem key={m.value} value={m.value}>
+                    {m.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] leading-relaxed text-muted-foreground">
+              {CONNECT_MODE_OPTIONS.find((m) => m.value === pendingConnectMode)?.desc}
+            </p>
           </div>
 
           {/* 完成按钮：仅保存配置 */}

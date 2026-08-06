@@ -124,7 +124,8 @@ class PyOCDBackend(BackendInterface):
     # ── 连接管理 ──────────────────────────────────────────────
 
     def connect(self, probe_uid: str, target: str | None = None,
-                interface: str = "swd", speed: int | None = None) -> bool:
+                interface: str = "swd", speed: int | None = None,
+                connect_mode: str | None = None) -> bool:
         """连接指定探针
 
         Args:
@@ -132,6 +133,11 @@ class PyOCDBackend(BackendInterface):
             target: 目标型号（如 stm32f407xg），None 则使用默认
             interface: 调试接口 "swd" 或 "jtag"
             speed: 时钟频率 (Hz)，None 则使用默认
+            connect_mode: 连接模式，None 则使用默认 'attach'
+                - attach: 附加模式，不复位、不暂停，保持目标当前状态（默认，推荐用于故障分析）
+                - halt: 复位并暂停在复位向量
+                - pre-reset: 连接前执行复位
+                - under-reset: 拉低复位线时连接（用于深度睡眠/被锁目标）
         """
         from pyocd.core.helpers import ConnectHelper
 
@@ -170,6 +176,12 @@ class PyOCDBackend(BackendInterface):
             # 启用延迟传输：将多个寄存器读写批量打包到 USB 包中，减少 USB 往返次数
             # 对 CMSIS-DAP v2 (WinUSB bulk) 提升尤为显著，读取速度可提升 5-10 倍
             'cmsis_dap.deferred_transfers': True,
+            # 连接模式：默认 'halt'（与 pyOCD 原生默认一致，不影响 flash/Commander/RTT 等
+            # 依赖"连接即复位并暂停"的原有行为）。
+            # 故障分析等需要保留现场的场景，可在连接配置窗口手动选择 'attach'
+            # （不复位、不暂停，保持目标当前状态）。
+            # 烧录/擦除/读回等操作内部仍显式 reset_and_halt，不受连接模式影响。
+            'connect_mode': connect_mode or 'halt',
         }
         # 默认 1MHz SWD 时钟（与前端默认值一致）。
         # 若探针不支持该频率，pyOCD 会自动选择最接近的支持值。

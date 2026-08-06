@@ -13,10 +13,10 @@ OMNI Link 是一个嵌入式开发工具集，提供 Flash 烧录、Commander �
 |------|------|
 | Flash 烧录工具 | 固件烧录、擦除（chip/sector）、校验、回读、Hex 查看器、Fill Memory、Compare |
 | Commander 命令行 | 交互式 REPL，复用 pyOCD Commander，支持 `source` 命令配置源码路径 |
-| RTT Viewer | SEGGER RTT 实时数据收发，多 tab 通道管理，文件发送/录制 |
+| RTT Viewer | RTT 实时数据收发，多 tab 通道管理，文件发送/录制 |
 | Monitor 变量监控 | DWARF 符号解析、SWD/RTT 传输、uPlot 波形图、触发、游标测量 |
 | Tools 工具集 | Fault Analyzer、Map Analyzer、Number Converter、File Checksum |
-| Settings | 终端主题、版本信息 |
+| Settings | 终端主题、版本信息、增加芯片支持 |
 
 ## Flash 烧录工具
 
@@ -32,7 +32,7 @@ OMNI Link 是一个嵌入式开发工具集，提供 Flash 烧录、Commander �
 
 ## RTT Viewer
 
-SEGGER RTT 实时数据收发，支持多 tab 通道管理、terminal/bar 两种输入模式、文件发送、录制到 `.dat` 文件。RTT 会话在应用顶层启用，切换页面不中断数据流。右侧配置面板提供 HEX 发送、定时发送、协议校验等选项，终端区域按日志级别（info/debug/warn/error）着色显示，底部状态栏实时展示数据速率与帧计数。
+RTT 实时数据收发，支持多 tab 通道管理、terminal/bar 两种输入模式、文件发送、录制到 `.dat` 文件。RTT 会话在应用顶层启用，切换页面不中断数据流。右侧配置面板提供 HEX 发送、定时发送、协议校验等选项，终端区域按日志级别（info/debug/warn/error）着色显示，底部状态栏实时展示数据速率与帧计数。
 
 ![RTT Viewer](assets/images/rtt_viewer_page.png)
 
@@ -125,11 +125,9 @@ npm run package
 npm run package:clean
 ```
 
-打包产物：`release/OMNI Link-0.3.3-x64-setup.exe`（NSIS 安装包）
-
 ## 支持的目标芯片
 
-支持 70+ 款 Cortex-M MCU，包括 STM32、GD32、APM32、NXP 等主流系列。
+用户可通过厂商提供的 `Keil Pack` 包增加对新芯片的支持。
 
 ## 文档
 

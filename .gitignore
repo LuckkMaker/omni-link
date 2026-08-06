@@ -106,3 +106,4 @@ ehthumbs_vista.db
 # ── 调试 / Profile ───────────────────────
 *.prof
 *.profraw
+/.workbuddy

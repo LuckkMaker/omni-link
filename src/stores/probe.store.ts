@@ -1,12 +1,37 @@
 import { create } from 'zustand'
 import type { ProbeWithState, TargetInfo, DeviceInfo } from '@shared/types'
 import * as probeService from '@/services/probe.service'
+import type { ConnectMode } from '@/services/probe.service'
 import { listTargets } from '@/services/target.service'
 import { listDevices } from '@/services/device.service'
 import { useNotificationStore } from './notification.store'
 
 /** 调试接口类型 */
 export type DebugInterface = 'swd' | 'jtag'
+
+/** 连接模式选项 */
+export const CONNECT_MODE_OPTIONS: { label: string; value: ConnectMode; desc: string }[] = [
+  {
+    label: '复位并暂停',
+    value: 'halt',
+    desc: '连接时复位目标并暂停在复位向量（默认）',
+  },
+  {
+    label: '附加模式',
+    value: 'attach',
+    desc: '不复位、不暂停，保持目标当前状态（适合故障分析等需要保留现场的场景）',
+  },
+  {
+    label: '连接前复位',
+    value: 'pre-reset',
+    desc: '建立调试连接前先执行一次复位',
+  },
+  {
+    label: '复位下连接',
+    value: 'under-reset',
+    desc: '拉低复位线时连接，用于深度睡眠或被锁定的目标',
+  },
+]
 
 /** 速度选项 (Hz) */
 export const SPEED_OPTIONS = [
@@ -43,6 +68,8 @@ interface ProbeStore {
   pendingInterface: DebugInterface
   /** 连接前选择的时钟速度 (Hz) */
   pendingSpeed: number
+  /** 连接前选择的连接模式 */
+  pendingConnectMode: ConnectMode
   /** Flash 配置：选中的扇区索引集合（确定后保存） */
   selectedSectorIndices: Set<number>
 
@@ -67,6 +94,7 @@ interface ProbeStore {
   setPendingTarget: (partNumber: string | null) => void
   setPendingInterface: (iface: DebugInterface) => void
   setPendingSpeed: (speed: number) => void
+  setPendingConnectMode: (mode: ConnectMode) => void
   /** 保存 Flash 配置中选中的扇区索引 */
   setSelectedSectorIndices: (indices: Set<number>) => void
   /** 连接仿真器 */
@@ -101,6 +129,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   pendingTarget: null,
   pendingInterface: 'swd',
   pendingSpeed: 1_000_000,
+  pendingConnectMode: 'halt',
   selectedSectorIndices: new Set(),
 
   // ── 派生获取器 ────────────────────────
@@ -165,10 +194,11 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   setPendingTarget: (partNumber) => set({ pendingTarget: partNumber }),
   setPendingInterface: (iface) => set({ pendingInterface: iface }),
   setPendingSpeed: (speed) => set({ pendingSpeed: speed }),
+  setPendingConnectMode: (mode) => set({ pendingConnectMode: mode }),
   setSelectedSectorIndices: (indices) => set({ selectedSectorIndices: new Set(indices) }),
 
   connectProbe: async (uid) => {
-    const { pendingTarget, pendingInterface, pendingSpeed } = get()
+    const { pendingTarget, pendingInterface, pendingSpeed, pendingConnectMode } = get()
     set({ connecting: true, error: null })
     // 先将状态标记为 connecting
     set((state) => ({
@@ -181,6 +211,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
         target: pendingTarget ?? undefined,
         interface: pendingInterface,
         speed: pendingSpeed,
+        connect_mode: pendingConnectMode,
       })
       // 连接成功，更新仿真器状态和目标信息
       set((state) => ({

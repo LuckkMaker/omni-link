@@ -97,13 +97,63 @@ const CATEGORY_COLORS: Record<string, string> = {
   'Heap': '#ef4444',
 }
 
+// ── 分析结果持久化（页面切换后恢复） ──────────────────────────────────
+
+const STORAGE_KEY = 'omni.map-analyzer.v1'
+
+interface PersistedMapState {
+  analysis: MapAnalysis | null
+  fileName: string
+  ts: number
+}
+
+/** 读取上次保存的分析结果（失败返回 null，不影响正常流程） */
+const readPersisted = (): PersistedMapState | null => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedMapState
+    if (!parsed || typeof parsed !== 'object') return null
+    if (parsed.analysis !== null && typeof parsed.analysis !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 // ── 主组件 ──────────────────────────────────
 
 export default function MapAnalyzer() {
-  const [analysis, setAnalysis] = useState<MapAnalysis | null>(null)
-  const [fileName, setFileName] = useState('')
+  const [initial] = useState(readPersisted)
+  const [analysis, setAnalysis] = useState<MapAnalysis | null>(
+    () => initial?.analysis ?? null
+  )
+  const [fileName, setFileName] = useState(() => initial?.fileName ?? '')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(() =>
+    initial && !initial.analysis && initial.fileName
+      ? '上次分析结果较大未能完整保存，请重新导入文件'
+      : ''
+  )
+
+  // 分析结果变化时持久化；结果过大导致配额超限时降级为仅保存文件名
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ analysis, fileName, ts: Date.now() })
+      )
+    } catch {
+      try {
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ analysis: null, fileName, ts: Date.now() })
+        )
+      } catch {
+        // localStorage 不可用时忽略
+      }
+    }
+  }, [analysis, fileName])
 
   // 从持久化 store 读取配置
   const activeTab = useToolsStore((s) => s.maActiveTab) as TabKey
