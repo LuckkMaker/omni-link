@@ -15,10 +15,18 @@ export async function refreshProbes(): Promise<ProbeWithState[]> {
   return data.probes as ProbeWithState[]
 }
 
+/** 连接模式 */
+export type ConnectMode = 'attach' | 'halt' | 'pre-reset' | 'under-reset'
+
 /** 连接指定仿真器 */
 export async function connectProbe(
   uid: string,
-  options?: { target?: string; interface?: string; speed?: number }
+  options?: {
+    target?: string
+    interface?: string
+    speed?: number
+    connect_mode?: ConnectMode
+  }
 ): Promise<{ connected: boolean; uid: string; target: TargetInfo | null }> {
   const client = await api()
   const { data } = await client.post(`/api/probes/${uid}/connect`, options ?? {})

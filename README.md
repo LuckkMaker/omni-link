@@ -3,9 +3,9 @@
 [![Version](https://img.shields.io/github/v/release/LuckkMaker/omni-link)](https://github.com/LuckkMaker/omni-link/releases/latest)
 [![License](https://img.shields.io/github/license/LuckkMaker/omni-link)](https://github.com/LuckkMaker/omni-link/blob/main/LICENSE)
 
-OMNI Link 是一个嵌入式开发工具集，提供 Flash 烧录、Commander 交互式命令行、RTT Viewer 实时数据收发、Monitor 变量波形监控等核心调试功能，支持 DAPLink、JLink 等工具接入，适用于 STM32、GD32、APM32、NXP 等主流 Arm Cortex-M MCU 系列。
+OMNI Link 是一站式嵌入式开发工作台，提供 Flash 烧录、Commander 交互式命令行、RTT Viewer 实时数据收发、Monitor 变量波形监控等核心调试功能，支持 DAPLink、JLink 等工具接入，适用于 STM32、GD32、APM32、NXP 等主流 Arm Cortex-M MCU 系列，支持厂商提供的 Keil Pack 包扩展芯片型号。
 
-![Flash 烧录工具](assets/images/advertisement.png)
+![Advertisement](assets/images/advertisement.png)
 
 ## 功能概览
 
@@ -13,10 +13,16 @@ OMNI Link 是一个嵌入式开发工具集，提供 Flash 烧录、Commander �
 |------|------|
 | Flash 烧录工具 | 固件烧录、擦除（chip/sector）、校验、回读、Hex 查看器、Fill Memory、Compare |
 | Commander 命令行 | 交互式 REPL，复用 pyOCD Commander，支持 `source` 命令配置源码路径 |
-| RTT Viewer | SEGGER RTT 实时数据收发，多 tab 通道管理，文件发送/录制 |
+| RTT Viewer | RTT 实时数据收发，多 tab 通道管理，文件发送/录制 |
 | Monitor 变量监控 | DWARF 符号解析、SWD/RTT 传输、uPlot 波形图、触发、游标测量 |
 | Tools 工具集 | Fault Analyzer、Map Analyzer、Number Converter、File Checksum |
-| Settings | 终端主题、版本信息 |
+| Settings | 终端主题、版本信息、增加芯片支持 |
+
+## Keil Pack 扩展芯片支持
+
+支持通过厂商提供的 Keil Pack 包扩展芯片型号，在设置页面中选 "芯片管理" Tab，点击 "DFP 导入芯片" 按钮选择 `.pack` 文件即可。Pack 文件可从芯片厂商官网下载。
+
+![Chip Import Page](assets/images/chip_import_page.png)
 
 ## Flash 烧录工具
 
@@ -32,7 +38,7 @@ OMNI Link 是一个嵌入式开发工具集，提供 Flash 烧录、Commander �
 
 ## RTT Viewer
 
-SEGGER RTT 实时数据收发，支持多 tab 通道管理、terminal/bar 两种输入模式、文件发送、录制到 `.dat` 文件。RTT 会话在应用顶层启用，切换页面不中断数据流。右侧配置面板提供 HEX 发送、定时发送、协议校验等选项，终端区域按日志级别（info/debug/warn/error）着色显示，底部状态栏实时展示数据速率与帧计数。
+RTT 实时数据收发，支持多 tab 通道管理、terminal/bar 两种输入模式、文件发送、录制到 `.dat` 文件。RTT 会话在应用顶层启用，切换页面不中断数据流。右侧配置面板提供 HEX 发送、定时发送、协议校验等选项，终端区域按日志级别（info/debug/warn/error）着色显示，底部状态栏实时展示数据速率与帧计数。
 
 ![RTT Viewer](assets/images/rtt_viewer_page.png)
 
@@ -44,12 +50,14 @@ SEGGER RTT 实时数据收发，支持多 tab 通道管理、terminal/bar 两种
 
 ## Tools 工具集
 
-四个独立子工具：
-
 - **Fault Analyzer** — Cortex-M 故障寄存器分析，解析 CFSR/HFSR/MMFSR/BFSR/UFSR 等寄存器，定位 fault 类型与原因
 - **Map Analyzer** — ARM `.map` 链接器输出文件解析与可视化（基于 ECharts），分析 ROM/RAM/Stack 占用分布
 - **Number Converter** — 十进制/十六进制/二进制互转，支持 32 位逐位点击编辑
 - **File Checksum** — CRC32/MD5/SHA-1/SHA-256 校验和计算
+
+Fault Analyzer 解析 Cortex-M 系列 MCU 的故障寄存器，帮助快速定位 HardFault/BusFault/UsageFault/MemoryFault 等异常类型与原因。用户可通过「寄存器值」或「异常类型」两种方式输入，工具将自动解析并显示详细信息。
+
+![Fault Analyzer](assets/images/fault_analyzer_page.png)
 
 Map Analyzer 顶部指标卡汇总 ROM/RAM 总量与 Code/RO Data/RW Data/ZI Data 分布，中部环形图展示 ROM 与 RAM 构成比例，底部柱状图按模块分类排列 Top 15 占用，帮助快速定位体积异常的代码段。
 
@@ -125,11 +133,9 @@ npm run package
 npm run package:clean
 ```
 
-打包产物：`release/OMNI Link-0.3.3-x64-setup.exe`（NSIS 安装包）
-
 ## 支持的目标芯片
 
-支持 70+ 款 Cortex-M MCU，包括 STM32、GD32、APM32、NXP 等主流系列。
+用户可通过厂商提供的 `Keil Pack` 包增加对新芯片的支持。
 
 ## 文档
 

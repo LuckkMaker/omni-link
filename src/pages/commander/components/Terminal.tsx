@@ -42,7 +42,10 @@ const COLOR = {
   reverse: '\x1b[7m',
 }
 
-const PROMPT = `${COLOR.green}omni link${COLOR.reset}> `
+// 应用主题色（--primary: 221.2 83.2% 53.3% ≈ #2563eb）
+const THEME_COLOR = { r: 37, g: 99, b: 235 }
+
+const PROMPT = `\x1b[38;2;${THEME_COLOR.r};${THEME_COLOR.g};${THEME_COLOR.b}momni link\x1b[0m> `
 const PROMPT_VISIBLE_LEN = 11 // "omni link> " 可见长度
 
 // localStorage key

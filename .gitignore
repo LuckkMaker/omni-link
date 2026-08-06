@@ -67,6 +67,16 @@ logs/
 *~
 *.orig
 
+# ── 临时验证配置（构建探测用，不提交）──
+vite.fault-check.config.ts
+.tmp-fault-build/
+
+# ── 文档构建产物（mkdocs build 输出）──
+site/
+
+# ── 覆盖率 ─────────────────────────────
+coverage/
+
 # ── 缓存 ─────────────────────────────────
 .cache/
 .eslintcache
@@ -83,6 +93,12 @@ electron.vite.config.*.mjs
 *.swo
 *.iml
 *.code-workspace
+.cursor/
+.zed/
+
+# ── Python 分发包 ───────────────────────
+*.whl
+*.tar.gz
 
 # ── macOS ────────────────────────────────
 .DS_Store
@@ -106,3 +122,4 @@ ehthumbs_vista.db
 # ── 调试 / Profile ───────────────────────
 *.prof
 *.profraw
+/.workbuddy

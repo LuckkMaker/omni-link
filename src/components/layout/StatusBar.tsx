@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from 'react'
 import { Bell, Usb, ChevronDown, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity } from 'lucide-react'
 import { useProbeStore, SPEED_OPTIONS, type DebugInterface } from '@/stores/probe.store'
 import { useNotificationStore } from '@/stores/notification.store'
-import { useBackendStatus } from '@/hooks/useBackendStatus'
 import { useRttStore } from '@/stores/rtt.store'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { cn } from '@/lib/utils'
@@ -151,7 +150,6 @@ export function StatusBar() {
   const setPendingSpeed = useProbeStore((s) => s.setPendingSpeed)
   const selectedUid = useProbeStore((s) => s.selectedUid)
   const probes = useProbeStore((s) => s.probes)
-  const { status } = useBackendStatus()
   const { history, historyVisible, toggleHistory } = useNotificationStore()
 
   // RTT 统计信息（运行时显示在中间）
@@ -187,12 +185,26 @@ export function StatusBar() {
 
   return (
     <div className="flex h-6 items-center justify-between bg-primary text-white px-1 text-xs select-none shrink-0">
-      {/* 左侧：后端状态 + 接口/速度 + 连接 + RTT 统计（紧凑内联） */}
+      {/* 左侧：目标设备连接状态（最前） + 接口/速度 + RTT 统计（紧凑内联） */}
       <div className="flex items-center gap-0.5">
-        {/* 后端状态 */}
+        {/* 目标设备连接状态（置前） */}
         <div className="flex items-center gap-1 px-2">
-          <div className={cn('size-1.5 rounded-full', status ? 'bg-green-400' : 'bg-red-400')} />
-          <span className="text-white/80">{status ? 'Backend Online' : 'Backend Offline'}</span>
+          {isConnecting ? (
+            <>
+              <Loader2 className="size-3 animate-spin text-white/80" />
+              <span className="text-white/80">Connecting...</span>
+            </>
+          ) : isConnected ? (
+            <>
+              <Usb className="size-3 text-green-400" />
+              <span className="text-white/80">Connected</span>
+            </>
+          ) : (
+            <>
+              <Usb className="size-3 text-white/40" />
+              <span className="text-white/50">Disconnected</span>
+            </>
+          )}
         </div>
 
         <div className="w-px h-3 bg-white/20" />
@@ -217,28 +229,6 @@ export function StatusBar() {
           onSelect={(v) => setPendingSpeed(v as number)}
           disabled={interfaceDisabled}
         />
-
-        <div className="w-px h-3 bg-white/20" />
-
-        {/* 连接状态 */}
-        <div className="flex items-center gap-1 px-2">
-          {isConnecting ? (
-            <>
-              <Loader2 className="size-3 animate-spin text-white/80" />
-              <span className="text-white/80">Connecting...</span>
-            </>
-          ) : isConnected ? (
-            <>
-              <Usb className="size-3 text-green-400" />
-              <span className="text-white/80">Connected</span>
-            </>
-          ) : (
-            <>
-              <Usb className="size-3 text-white/40" />
-              <span className="text-white/50">Disconnected</span>
-            </>
-          )}
-        </div>
 
         {/* RTT 统计：运行时紧凑内联显示，与左侧项一致分隔 */}
         {rttRunning && (
