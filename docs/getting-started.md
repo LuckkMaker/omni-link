@@ -8,16 +8,19 @@ OMNI Link 提供两种使用方式：直接下载安装包使用，或从源码�
 
 前往 [GitHub Releases](https://github.com/LuckkMaker/omni-link/releases/latest) 下载最新版本的安装包 `OMNI Link-x.x.x-x64-setup.exe`。
 
-双击运行安装包，按向导完成安装。安装包已内置 Python 后端与 pyOCD 源码，无需额外配置 Python 环境。
-
 ### 连接硬件
 
-1. 通过 USB 将 DAPLink 仿真器连接到电脑
-2. 用 SWD 排线将仿真器接到目标开发板（SWDIO、SWCLK、GND、VTref 四根线至少接通）
-3. 启动 OMNI Link，顶部设备切换器会自动检测已连接的探针
-4. 选择探针后，应用会尝试自动识别目标芯片型号；若识别为通用 `cortex_m`，需在设备面板手动选择具体型号
+OMNI Link 支持 DAPLink / ST-Link / J-Link 等常见主流调试器：
 
-> 首次连接时 pyOCD 可能识别为通用 `cortex_m` 类型（无 Flash 布局信息），此时需手动选择具体 MCU 型号以获取正确的 Flash 参数。
+1. 通过 USB 将调试器（DAPLink / ST-Link / J-Link 均可）连接到电脑
+2. 用 SWD 排线将调试器接到目标开发板（SWDIO、SWCLK、GND、VTref 四根线至少接通）
+3. 启动 OMNI Link，顶部设备切换器会自动检测已连接的调试器
+4. 选择目标芯片型号
+5. 配置连接参数，如 SWD 频率等
+
+### 增加芯片支持
+
+OMNI Link 内置了常见的主流 Arm Cortex-M 系列（STM32、GD32、APM32、NXP 等）。若目标芯片不在内置列表里，可在**设置页**导入厂商提供的 **Keil Pack 包**来扩展芯片支持，导入后即可正常识别与烧录。这对尝鲜新片子的场景很友好。
 
 ### 首次使用流程
 
@@ -45,7 +48,7 @@ npm install
 
 # 创建 Python 虚拟环境并安装依赖
 # Windows（使用系统 Python，非 TRAE 内置版本）
-C:\Users\<用户名>\AppData\Local\Programs\Python\Python311\python.exe -m venv .venv
+python -m venv .venv
 .venv\Scripts\pip.exe install -r python/requirements.txt
 ```
 
@@ -89,5 +92,3 @@ npm run package
 # 清理后重新打包
 npm run package:clean
 ```
-
-打包产物：`release/OMNI Link-0.3.3-x64-setup.exe`（NSIS 安装包）
