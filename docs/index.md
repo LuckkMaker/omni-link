@@ -6,7 +6,7 @@
 
 ## 项目简介
 
-OMNI Link 是一个跨平台桌面应用，内置 Flash 烧录、交互式命令行、RTT 实时数据收发、变量波形监控等核心调试能力，对标 SEGGER J-Link 工具链。底层基于开源的 pyOCD，配合 DAPLink 等符合 CMSIS-DAP 标准的仿真器即可使用，无需购买 J-Link 硬件。
+OMNI Link 是一个跨平台桌面应用，内置 Flash 烧录、交互式命令行、RTT 实时数据收发、变量波形监控等核心调试能力，对标 SEGGER J-Link 工具链。底层基于开源的 pyOCD，支持 DAPLink / ST-Link / J-Link 等常见主流调试器，无需额外购买专用调试硬件。
 
 支持 70+ 款 Arm Cortex-M MCU，包括 STM32、GD32、APM32、NXP 等主流系列，通过 CMSIS Device Family Packs 可进一步扩展覆盖范围。
 
