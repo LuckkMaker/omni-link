@@ -113,6 +113,36 @@ Ozone 式四区布局：
 - 与 Zone store 共享连接/运行状态，命令执行结果同时写入全局日志
 - 验收：底部可输入 REPL 命令，与工具栏操作互通
 
+## 5 会话配置持久化
+
+> 对应 Ozone 项目文件（`.jdebug`）能力：保存 ELF 路径、目标设备、连接参数、断点、检查器布局与观测项，打开即可恢复调试环境。Zone 采用**轻量 JSON 会话配置**，不引入脚本语言。
+
+### 5.1 最小字段集（Phase 3 起）
+
+| 字段 | 说明 |
+|---|---|
+| `elfPath` | 加载的 ELF 路径 |
+| `target` | 目标设备/芯片 |
+| `probe` | 探针与连接接口参数 |
+| `breakpoints` | 断点（地址/行号）列表，Phase 3 断点功能稳定后并入 |
+
+### 5.2 扩展字段集（Phase 4 后逐步并入）
+
+- 检查器 dock 布局与启用的 tab（`InspectorDock` 状态）
+- 内存观测项（地址/宽度/分组）
+- 外设忽略列表
+- 刷新策略模式（On Stop / Periodic）
+
+### 5.3 存储形态
+
+- 前端默认：`localStorage`，复用现有 `zustand persist` 模式（`tools.store` / `rtt.store` 先例），单用户即时恢复。
+- 跨环境共享：后端 JSON 导出/导入（走 `zone.service.ts` 与 `zone.py` 路由），符合项目 JSON 快照习惯，不新增脚本语言。
+
+### 5.4 落地节奏
+
+- Phase 3：先支持最小字段集（ELF + 目标 + 连接），保存/加载。
+- Phase 4 / 5：布局、断点、内存观测项逐步并入同一会话 JSON。
+
 ## 6 参考项目
 
 Zone 页面深度参考 Eclipse CDT Cloud 系列项目的实现思路与技术选型，作为功能与架构的对照基准。
@@ -132,6 +162,7 @@ Zone 页面深度参考 Eclipse CDT Cloud 系列项目的实现思路与技术�
 2. **联动刷新用后端口令埋点 + WS 推送**（Phase 5）：Phase 2-4 先做主动拉取，保证前期即可用，Phase 5 再升级为事件驱动。
 3. **检查器 dock 采用 TabRegistry 注册制**：为后续 Memory Inspector / RTOS View 预留扩展点。
 4. **源码视图数据走专用后端 API**：前端不直接解析 ELF，避免重复造轮子。
+5. **会话配置用轻量 JSON，不引入脚本语言**：前端 `localStorage` 保证单用户即时恢复，后端 JSON 导出/导入支持跨环境共享，对应但不复刻 Ozone 的 `.jdebug`。
 
 ## 8 涉及文件清单
 
@@ -150,6 +181,9 @@ Zone 页面深度参考 Eclipse CDT Cloud 系列项目的实现思路与技术�
 | P3 | `src/services/zone.service.ts` | 新建 |
 | P3 | `src/pages/zone/components/SourceView.tsx` | 新建 |
 | P3 | `src/pages/zone/components/DisasmView.tsx` | 新建 |
+| P3 | `python/api/zone.py` | 新增 `/zone/session` 保存/加载路由（会话持久化） |
+| P3 | `src/services/zone.service.ts` | 增加会话保存/加载方法 |
+| P3 | `src/pages/zone/store.ts` | 会话字段接入 `zustand persist` |
 | P4 | `python/core/peripheral_backend.py` | 新建 |
 | P4 | `python/api/zone.py` | 扩展外设/寄存器 API |
 | P4 | `src/pages/zone/components/InspectorDock.tsx` | 新建 |
@@ -160,7 +194,7 @@ Zone 页面深度参考 Eclipse CDT Cloud 系列项目的实现思路与技术�
 ## 9 验收标准汇总
 
 - Phase 1 结束：`/zone` 空布局可访问
-- Phase 3 结束：ELF 加载后源码可见，PC 行高亮
+- Phase 3 结束：ELF 加载后源码可见，PC 行高亮；会话配置可保存/加载，重新打开后恢复 ELF 与目标设备
 - Phase 4 结束：外设/寄存器/内存检查器可读值
 - Phase 5 结束：step/halt 后视图自动刷新
 - Phase 6 结束：终端与工具栏互通，全流程可闭环

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2 } from 'lucide-react'
+import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useBackendStatus } from '@/hooks/useBackendStatus'
 import { useProbeWs } from '@/hooks/useProbeWs'
@@ -24,6 +24,7 @@ const navItems = [
   { to: '/commander', label: 'Commander', icon: SquareTerminal },
   { to: '/rtt', label: 'RTT Viewer', icon: Logs },
   { to: '/monitor', label: 'Monitor', icon: SquareActivity },
+  { to: '/zone', label: 'Zone', icon: Bug },
   { to: '/settings', label: '设置', icon: Settings },
 ]
 
@@ -96,7 +97,7 @@ export default function MainLayout() {
           </div>
 
           <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 p-3">
-            {navItems.slice(0, 4).map((item) => (
+            {navItems.slice(0, 5).map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -154,7 +155,7 @@ export default function MainLayout() {
               )}
             </div>
 
-            {navItems.slice(4).map((item) => (
+            {navItems.slice(5).map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

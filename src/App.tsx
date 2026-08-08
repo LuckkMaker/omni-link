@@ -3,6 +3,7 @@ import MainLayout from './layouts/MainLayout'
 import FlashPage from './pages/flash'
 import RttPage from './pages/rtt'
 import MonitorPage from './pages/monitor'
+import ZonePage from './pages/zone'
 import SettingsPage from './pages/settings'
 import ToolsLayout from './pages/tools'
 import FaultAnalyzer from './pages/tools/fault-analyzer'
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/commander" element={null} />
         <Route path="/rtt" element={<RttPage />} />
         <Route path="/monitor" element={<MonitorPage />} />
+        <Route path="/zone" element={<ZonePage />} />
         <Route path="/tools" element={<ToolsLayout />}>
           <Route index element={<Navigate to="/tools/fault" replace />} />
           <Route path="fault" element={<FaultAnalyzer />} />
