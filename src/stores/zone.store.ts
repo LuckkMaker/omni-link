@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import * as zoneService from '@/services/zone.service'
-import type { ZoneSession } from '@/services/zone.service'
+import type { ZoneSession, SourceFileInfo } from '@/services/zone.service'
+import { useNotificationStore } from '@/stores/notification.store'
 
 /** 右侧检查器 dock 的 tab 类型 */
 export type InspectorTabId = 'registers' | 'peripherals' | 'memory'
@@ -24,7 +25,7 @@ interface ZoneStore {
   /** 已加载 ELF 路径 */
   elfPath: string | null
   /** ELF 源文件列表 */
-  sourceFiles: string[]
+  sourceFiles: SourceFileInfo[]
   /** 当前选中的源文件 */
   activeSourceFile: string | null
   /** 是否支持反汇编 */
@@ -48,7 +49,7 @@ interface ZoneStore {
   setBusy: (busy: boolean) => void
   setError: (error: string | null) => void
   setElfPath: (path: string | null) => void
-  setSourceFiles: (files: string[]) => void
+  setSourceFiles: (files: SourceFileInfo[]) => void
   setActiveSourceFile: (file: string | null) => void
   setDisasmAvailable: (v: boolean) => void
   setActiveInspectorTab: (tab: InspectorTabId) => void
@@ -125,7 +126,9 @@ export const useZoneStore = create<ZoneStore>()(
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
-          set({ busy: false, error: err instanceof Error ? err.message : 'Halt failed' })
+          const msg = err instanceof Error ? err.message : 'Halt failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({ type: 'error', title: 'Halt failed', message: msg })
         }
       },
 
@@ -136,7 +139,9 @@ export const useZoneStore = create<ZoneStore>()(
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
-          set({ busy: false, error: err instanceof Error ? err.message : 'Step failed' })
+          const msg = err instanceof Error ? err.message : 'Step failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({ type: 'error', title: 'Step failed', message: msg })
         }
       },
 
@@ -147,7 +152,9 @@ export const useZoneStore = create<ZoneStore>()(
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
-          set({ busy: false, error: err instanceof Error ? err.message : 'Continue failed' })
+          const msg = err instanceof Error ? err.message : 'Continue failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({ type: 'error', title: 'Continue failed', message: msg })
         }
       },
 
@@ -158,7 +165,9 @@ export const useZoneStore = create<ZoneStore>()(
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
-          set({ busy: false, error: err instanceof Error ? err.message : 'Reset failed' })
+          const msg = err instanceof Error ? err.message : 'Reset failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({ type: 'error', title: 'Reset failed', message: msg })
         }
       },
 
@@ -175,15 +184,37 @@ export const useZoneStore = create<ZoneStore>()(
         set({ busy: true, error: null })
         try {
           const result = await zoneService.zoneLoadElf(uid, path)
+          // 拉取含大小的源文件列表
+          let files: SourceFileInfo[] = []
+          const activeFile = result.source_files[0] ?? null
+          try {
+            files = await zoneService.zoneSourceFiles(uid)
+          } catch {
+            files = result.source_files.map((p) => ({ path: p, name: p.split('/').pop() ?? p, size: null }))
+          }
           set({
             elfPath: result.path,
-            sourceFiles: result.source_files,
+            sourceFiles: files,
+            activeSourceFile: activeFile,
             disasmAvailable: result.disasm_available,
             busy: false,
           })
+          useNotificationStore.getState().push({
+            type: 'success',
+            title: 'ELF 已加载',
+            message: result.path.split(/[\\/]/).pop() ?? result.path,
+            autoClose: true,
+            autoCloseDelay: 3000,
+          })
           return true
         } catch (err) {
-          set({ busy: false, error: err instanceof Error ? err.message : 'ELF load failed' })
+          const msg = err instanceof Error ? err.message : 'ELF load failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({
+            type: 'error',
+            title: 'ELF 加载失败',
+            message: msg,
+          })
           return false
         }
       },
@@ -200,11 +231,25 @@ export const useZoneStore = create<ZoneStore>()(
       saveSession: async (name) => {
         await zoneService.zoneSaveSession(name, collectSessionData(get))
         await get().fetchSessions()
+        useNotificationStore.getState().push({
+          type: 'success',
+          title: '会话已保存',
+          message: name,
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
       },
 
       loadSession: async (name) => {
         const res = await zoneService.zoneGetSession(name)
-        if (!res.success || !res.session) return
+        if (!res.success || !res.session) {
+          useNotificationStore.getState().push({
+            type: 'error',
+            title: '会话加载失败',
+            message: name,
+          })
+          return
+        }
         const d = res.session.data
         set({
           elfPath: (d.elfPath as string) ?? null,
@@ -213,11 +258,25 @@ export const useZoneStore = create<ZoneStore>()(
           memoryAddress: (d.memoryAddress as string) ?? '0x20000000',
           refreshMode: (d.refreshMode as RefreshMode) ?? 'on_stop',
         })
+        useNotificationStore.getState().push({
+          type: 'success',
+          title: '会话已恢复',
+          message: name,
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
       },
 
       deleteSession: async (name) => {
         await zoneService.zoneDeleteSession(name)
         await get().fetchSessions()
+        useNotificationStore.getState().push({
+          type: 'success',
+          title: '会话已删除',
+          message: name,
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
       },
     }),
     {

@@ -150,13 +150,11 @@ async def zone_elf_changed(uid: str):
 
 @router.get("/probes/{uid}/zone/source/files")
 async def zone_source_files(uid: str):
-    """已加载 ELF 的源文件列表"""
-    with elf_backend._lock:
-        entry = elf_backend._entries.get(uid)
-    if not entry:
-        raise HTTPException(status_code=400, detail="No ELF loaded")
-    files = elf_backend._collect_source_files(entry["decoder"])
-    return {"success": True, "files": files}
+    """源文件列表（File/Size/Path）"""
+    result = elf_backend.get_source_files(uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "No ELF loaded"))
+    return {"success": True, "files": result["files"]}
 
 
 @router.get("/probes/{uid}/zone/source/line")
@@ -208,6 +206,15 @@ async def zone_disasm(uid: str, req: DisasmRequest):
 async def zone_functions(uid: str, filter: str = "", offset: int = 0, limit: int = 200):
     """函数列表（分页）"""
     result = elf_backend.get_functions(uid, filter, offset, limit)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "No ELF loaded"))
+    return result
+
+
+@router.get("/probes/{uid}/zone/memory/usage")
+async def zone_memory_usage(uid: str):
+    """内存使用统计（Flash/RAM 占用）"""
+    result = elf_backend.get_memory_usage(uid)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "No ELF loaded"))
     return result

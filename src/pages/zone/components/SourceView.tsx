@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { FileCode2, Loader2, AlertCircle } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Loader2, AlertCircle } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
 
@@ -7,11 +7,9 @@ interface SourceViewProps {
   uid: string | null
 }
 
-/** 源码视图：行号 + PC 高亮 + 断点红点 */
+/** 源码视图：行号 + PC 高亮 + 断点红点（文件选择由左侧 Source Files 面板完成） */
 export function SourceView({ uid }: SourceViewProps) {
-  const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const activeSourceFile = useZoneStore((s) => s.activeSourceFile)
-  const setActiveSourceFile = useZoneStore((s) => s.setActiveSourceFile)
   const pc = useZoneStore((s) => s.pc)
   const state = useZoneStore((s) => s.state)
 
@@ -20,7 +18,6 @@ export function SourceView({ uid }: SourceViewProps) {
   const [error, setError] = useState<string | null>(null)
   const [pcLine, setPcLine] = useState<number | null>(null)
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map())
-  const scrollRef = useRef<HTMLDivElement>(null)
 
   // 加载选中的源文件
   useEffect(() => {
@@ -68,11 +65,9 @@ export function SourceView({ uid }: SourceViewProps) {
         if (cancelled) return
         if (line && line.file) {
           const targetFile = line.file.replace(/\\/g, '/')
-          // 若当前文件与 PC 所在文件一致，则定位行号
           const cur = (activeSourceFile ?? '').replace(/\\/g, '/')
           if (targetFile === cur || targetFile.endsWith(cur) || cur.endsWith(targetFile)) {
             setPcLine(line.line ?? null)
-            // 滚动到该行
             requestAnimationFrame(() => {
               const el = lineRefs.current.get(line.line ?? -1)
               el?.scrollIntoView({ block: 'center', behavior: 'auto' })
@@ -90,46 +85,9 @@ export function SourceView({ uid }: SourceViewProps) {
     }
   }, [uid, pc, activeSourceFile, state])
 
-  const handleSelectFile = useCallback(
-    async (file: string) => {
-      setActiveSourceFile(file)
-    },
-    [setActiveSourceFile]
-  )
-
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* 文件选择条 */}
-      <div className="shrink-0 flex items-center gap-1 overflow-x-auto border-b border-border px-2 py-1">
-        <FileCode2 className="size-3.5 shrink-0 text-muted-foreground" />
-        {sourceFiles.length === 0 ? (
-          <span className="text-xs text-muted-foreground">未加载 ELF 或 ELF 无 DWARF 源码信息</span>
-        ) : (
-          <div className="flex items-center gap-1 overflow-x-auto">
-            {sourceFiles.map((f) => {
-              const name = f.split('/').pop() ?? f
-              const isActive = f === activeSourceFile
-              return (
-                <button
-                  key={f}
-                  onClick={() => handleSelectFile(f)}
-                  className={
-                    isActive
-                      ? 'shrink-0 rounded px-2 py-0.5 text-xs font-medium text-primary'
-                      : 'shrink-0 rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent'
-                  }
-                  title={f}
-                >
-                  {name}
-                </button>
-              )
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* 源码内容 */}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-relaxed">
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed">
         {loading ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
@@ -142,7 +100,7 @@ export function SourceView({ uid }: SourceViewProps) {
           </div>
         ) : lines.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
-            选择左侧源文件以查看源码
+            请在左侧 Source Files 面板选择源码文件
           </div>
         ) : (
           lines.map((content, idx) => {

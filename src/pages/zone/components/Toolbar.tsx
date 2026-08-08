@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { Pause, StepForward, Play, RotateCcw, Loader2, FolderOpen, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Separator } from '@/components/ui/separator'
 import { useZoneStore } from '../store'
 
 interface ToolbarProps {
@@ -8,7 +9,7 @@ interface ToolbarProps {
   connected: boolean
 }
 
-/** Zone 顶部调试控制工具栏 */
+/** Zone 顶部调试控制工具栏（参考 Flash 顶部菜单栏风格） */
 export function Toolbar({ uid, connected }: ToolbarProps) {
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
@@ -31,39 +32,46 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
     if (ok) {
       // 加载成功后自动选中第一个源文件
       const files = useZoneStore.getState().sourceFiles
-      if (files.length > 0) setActiveSourceFile(files[0])
+      if (files.length > 0) setActiveSourceFile(files[0].path)
     }
   }, [uid, loadElf, setActiveSourceFile])
 
   const stateLabel =
-    state === 'halted' ? '已暂停' : state === 'running' ? '运行中' : state === 'disconnected' ? '未连接' : '未知'
+    state === 'halted' ? 'Halted' : state === 'running' ? 'Running' : state === 'disconnected' ? 'Disconnected' : 'Unknown'
 
   return (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-border bg-card px-3 py-1.5">
-      <Button variant="outline" size="sm" onClick={handleLoadElf} disabled={!uid} title="加载 ELF 文件">
-        <FolderOpen className="size-4" />
-        <span className="ml-1.5">加载 ELF</span>
+    <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={handleLoadElf}
+        disabled={!uid}
+        className="h-8 gap-1.5"
+      >
+        <FolderOpen className="size-3.5" />
+        Load ELF
       </Button>
 
-      <div className="mx-1 h-5 w-px bg-border" />
+      <Separator orientation="vertical" className="mx-1 h-5" />
 
-      <Button variant="outline" size="icon" onClick={() => uid && halt(uid)} disabled={disabled} title="暂停 (Halt)">
+      <Button variant="ghost" size="sm" onClick={() => uid && halt(uid)} disabled={disabled} className="h-8 gap-1.5" title="Halt">
         <Pause className="size-4" />
+        Halt
       </Button>
-      <Button variant="outline" size="icon" onClick={() => uid && step(uid)} disabled={disabled} title="单步 (Step)">
+      <Button variant="ghost" size="sm" onClick={() => uid && step(uid)} disabled={disabled} className="h-8 gap-1.5" title="Step">
         <StepForward className="size-4" />
+        Step
       </Button>
-      <Button variant="outline" size="icon" onClick={() => uid && continueRun(uid)} disabled={disabled} title="继续 (Continue)">
+      <Button variant="ghost" size="sm" onClick={() => uid && continueRun(uid)} disabled={disabled} className="h-8 gap-1.5" title="Continue">
         <Play className="size-4" />
+        Continue
       </Button>
-      <Button variant="outline" size="icon" onClick={() => uid && reset(uid)} disabled={disabled} title="复位并暂停 (Reset)">
+      <Button variant="ghost" size="sm" onClick={() => uid && reset(uid)} disabled={disabled} className="h-8 gap-1.5" title="Reset">
         <RotateCcw className="size-4" />
+        Reset
       </Button>
 
-      <div className="mx-1 h-5 w-px bg-border" />
-
-      {/* 连接与运行状态 */}
-      <div className="flex items-center gap-2 text-xs">
+      <div className="ml-auto flex items-center gap-2 text-xs">
         {busy && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
         <span
           className={
@@ -84,7 +92,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
       </div>
 
       {error && (
-        <div className="ml-auto flex items-center gap-1 text-xs text-red-500">
+        <div className="ml-3 flex items-center gap-1 text-xs text-red-500">
           <AlertCircle className="size-3.5" />
           <span className="max-w-64 truncate" title={error}>{error}</span>
         </div>

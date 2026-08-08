@@ -20,11 +20,11 @@ const LOG_MIN_HEIGHT = 0
 const LOG_DEFAULT_EXPANDED = 200
 
 const navItems = [
+  { to: '/zone', label: 'Zone', icon: Bug },
   { to: '/flash', label: 'Flash', icon: Download },
   { to: '/commander', label: 'Commander', icon: SquareTerminal },
   { to: '/rtt', label: 'RTT Viewer', icon: Logs },
   { to: '/monitor', label: 'Monitor', icon: SquareActivity },
-  { to: '/zone', label: 'Zone', icon: Bug },
   { to: '/settings', label: '设置', icon: Settings },
 ]
 

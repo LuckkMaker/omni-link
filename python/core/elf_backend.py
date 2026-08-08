@@ -112,6 +112,31 @@ class ElfBackend:
             files.add(full.replace('\\', '/'))
         return sorted(files)
 
+    def get_source_files(self, uid: str) -> dict:
+        """源文件列表（含磁盘大小），供左侧 Source Files 表格展示
+
+        Returns:
+            {success, files: [{path, name, size}]}，size 为空或不可读时为 None
+        """
+        entry = self._get(uid)
+        if not entry:
+            return {"success": False, "error": "No ELF loaded"}
+        paths = self._collect_source_files(entry["decoder"])
+        files = []
+        for p in paths:
+            size = None
+            try:
+                if os.path.isfile(p):
+                    size = os.path.getsize(p)
+            except OSError:
+                size = None
+            files.append({
+                "path": p,
+                "name": p.split('/')[-1] if p else p,
+                "size": size,
+            })
+        return {"success": True, "files": files}
+
     def _close(self, uid: str):
         """关闭并移除探针的 ELF 实例"""
         with self._lock:
@@ -218,6 +243,54 @@ class ElfBackend:
         total = len(funcs)
         page = funcs[offset:offset + limit]
         return {"success": True, "functions": page, "total": total}
+
+    def get_memory_usage(self, uid: str) -> dict:
+        """内存使用统计（从 ELF section 近似估算 Flash/RAM 占用）
+
+        - Flash(ROM)：可读且不可写的已分配 section（.text/.rodata 等）
+        - RAM：可写的已分配 section（.data/.bss 等）
+
+        Returns:
+            {success, flash_used, ram_used, total, sections: [{name, address, size, writable, flash}]}
+        """
+        entry = self._get(uid)
+        if not entry:
+            return {"success": False, "error": "No ELF loaded"}
+        elf = entry["elf"]
+        SHF_WRITE, SHF_ALLOC = 0x1, 0x2
+        flash_used, ram_used = 0, 0
+        sections = []
+        try:
+            for sec in elf.iter_sections():
+                hdr = sec.header
+                flags = hdr['sh_flags']
+                size = hdr['sh_size']
+                name = sec.name
+                if size == 0 or not (flags & SHF_ALLOC):
+                    continue
+                writable = bool(flags & SHF_WRITE)
+                if writable:
+                    ram_used += size
+                else:
+                    flash_used += size
+                sections.append({
+                    "name": name,
+                    "address": hdr['sh_addr'],
+                    "size": size,
+                    "writable": writable,
+                    "flash": not writable,
+                })
+        except Exception as e:
+            logger.exception("Memory usage computation failed")
+            return {"success": False, "error": str(e)}
+        sections.sort(key=lambda s: s["address"])
+        return {
+            "success": True,
+            "flash_used": flash_used,
+            "ram_used": ram_used,
+            "total": flash_used + ram_used,
+            "sections": sections,
+        }
 
     # ── 反汇编 ─────────────────────────────────────
 

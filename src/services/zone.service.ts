@@ -91,6 +91,22 @@ export interface ZoneSession {
   updated_at: string
 }
 
+/** 源文件信息（左侧 Source Files 表格行） */
+export interface SourceFileInfo {
+  path: string
+  name: string
+  size: number | null
+}
+
+/** 内存使用统计 */
+export interface MemoryUsage {
+  success: boolean
+  flash_used: number
+  ram_used: number
+  total: number
+  sections: { name: string; address: number; size: number; writable: boolean; flash: boolean }[]
+}
+
 // ── 调试控制 ──────────────────────────────
 
 /** 暂停目标 */
@@ -148,10 +164,10 @@ export async function zoneElfChanged(uid: string): Promise<{ success: boolean; c
 }
 
 /** 源文件列表 */
-export async function zoneSourceFiles(uid: string): Promise<string[]> {
+export async function zoneSourceFiles(uid: string): Promise<SourceFileInfo[]> {
   const client = await api()
   const { data } = await client.get(`/api/probes/${uid}/zone/source/files`)
-  return data.files as string[]
+  return data.files as SourceFileInfo[]
 }
 
 /** 地址 → 源码行 */
@@ -199,6 +215,13 @@ export async function zoneFunctions(
     params: { filter, offset, limit },
   })
   return data
+}
+
+/** 内存使用统计 */
+export async function zoneMemoryUsage(uid: string): Promise<MemoryUsage> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/memory/usage`)
+  return data as MemoryUsage
 }
 
 // ── 外设 / 寄存器 / 内存 ──────────────────────
