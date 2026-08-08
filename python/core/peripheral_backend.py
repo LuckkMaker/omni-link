@@ -11,6 +11,8 @@
 import logging
 import threading
 
+from core.addr_ranges import merge_and_split
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,27 +111,24 @@ class PeripheralBackend:
                 return {"success": False, "error": "No session"}
             target = session.target
 
-            # 合并连续地址（间隙 <= 4 字节视为连续，整块读取）
+            # 去重排序，合并连续地址（间隙 <= 4 字节视为连续，整块读取）
             addresses = sorted(set(addresses))
-            groups = []
-            for addr in addresses:
-                if groups and addr - groups[-1][-1] <= 4:
-                    groups[-1].append(addr)
-                else:
-                    groups.append([addr])
+            ranges = merge_and_split(addresses, gap_threshold=4, max_bytes=0)
 
             values = []
             errors = []
-            for group in groups:
-                start = group[0]
-                end = group[-1]
+            for rng in ranges:
+                start = rng.base
+                end = rng.end_addr()
                 count = end - start + 1
+                # 只读取该区间内实际请求的地址（切块可能引入未请求地址）
+                wanted = [a for a in addresses if start <= a <= end]
                 try:
                     data = target.read_memory_block32(start, count)
-                    for i, addr in enumerate(group):
-                        values.append({"address": addr, "value": data[i]})
+                    for i, addr in enumerate(wanted):
+                        values.append({"address": addr, "value": data[addr - start]})
                 except Exception as e:
-                    for addr in group:
+                    for addr in wanted:
                         errors.append({"address": addr, "error": str(e)})
 
             return {"success": True, "values": values, "errors": errors}

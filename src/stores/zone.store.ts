@@ -1,7 +1,13 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import * as zoneService from '@/services/zone.service'
-import type { ZoneSession, SourceFileInfo, ZoneResetMode, ZoneStepMode } from '@/services/zone.service'
+import type {
+  ZoneSession,
+  SourceFileInfo,
+  ZoneResetMode,
+  ZoneStepMode,
+  SourceBreakpoint,
+} from '@/services/zone.service'
 import * as probeService from '@/services/probe.service'
 import type { ConnectMode } from '@/services/probe.service'
 import { programFlash } from '@/services/flash.service'
@@ -49,6 +55,9 @@ interface ZoneStore {
   // ── 会话 ───────────────────────────────────
   sessions: ZoneSession[]
 
+  // ── 断点 ───────────────────────────────────
+  breakpoints: SourceBreakpoint[]
+
   // ── 操作 ──────────────────────────────────
   setState: (s: ZoneStore['state']) => void
   setPc: (pc: number | null) => void
@@ -61,13 +70,20 @@ interface ZoneStore {
   setActiveInspectorTab: (tab: InspectorTabId) => void
   setMemoryAddress: (addr: string) => void
   setRefreshMode: (mode: RefreshMode) => void
+  setBreakpoints: (bps: SourceBreakpoint[]) => void
 
   /** 调试控制动作（调用后端后刷新状态） */
   halt: (uid: string) => Promise<void>
   step: (uid: string, mode?: ZoneStepMode) => Promise<void>
   continue: (uid: string) => Promise<void>
   reset: (uid: string, mode?: ZoneResetMode) => Promise<void>
+  /** 停止调试会话（断开探针连接） */
+  stopSession: (uid: string) => Promise<void>
   refreshStatus: (uid: string) => Promise<void>
+
+  /** 源码断点：切换某行断点并刷新列表 */
+  toggleBreakpoint: (uid: string, file: string, line: number) => Promise<boolean>
+  refreshBreakpoints: (uid: string) => Promise<void>
 
   /** ELF 加载 */
   loadElf: (uid: string, path: string) => Promise<boolean>
@@ -115,6 +131,8 @@ export const useZoneStore = create<ZoneStore>()(
 
       sessions: [],
 
+      breakpoints: [],
+
       // ── 操作 ──────────────────────────────
       setState: (state) => set({ state }),
       setPc: (pc) => set({ pc }),
@@ -127,6 +145,7 @@ export const useZoneStore = create<ZoneStore>()(
       setActiveInspectorTab: (activeInspectorTab) => set({ activeInspectorTab }),
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
       setRefreshMode: (refreshMode) => set({ refreshMode }),
+      setBreakpoints: (breakpoints) => set({ breakpoints }),
 
       halt: async (uid) => {
         set({ busy: true, error: null })
@@ -186,6 +205,53 @@ export const useZoneStore = create<ZoneStore>()(
           set({ state: st.state, pc: st.pc })
         } catch {
           // 忽略（连接断开时）
+        }
+      },
+
+      stopSession: async (uid) => {
+        set({ busy: true, error: null })
+        try {
+          await probeService.disconnectProbe(uid)
+          set({ state: 'disconnected', pc: null, busy: false })
+          useNotificationStore.getState().push({
+            type: 'success',
+            title: 'Stop debug session',
+            message: '调试会话已停止',
+            autoClose: true,
+            autoCloseDelay: 3000,
+          })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Stop failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({ type: 'error', title: '停止调试会话失败', message: msg })
+        }
+      },
+
+      refreshBreakpoints: async (uid) => {
+        try {
+          const res = await zoneService.zoneListBreakpoints(uid)
+          if (res.success) set({ breakpoints: res.breakpoints })
+        } catch {
+          // 忽略（连接断开时）
+        }
+      },
+
+      toggleBreakpoint: async (uid, file, line) => {
+        const { breakpoints } = get()
+        const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+        const cur = norm(file)
+        const existing = breakpoints.find(
+          (b) => b.line === line && (norm(b.file) === cur || norm(b.file).endsWith('/' + cur) || cur.endsWith('/' + norm(b.file)))
+        )
+        try {
+          await zoneService.zoneSetBreakpoint(uid, file, line, !existing)
+          await get().refreshBreakpoints(uid)
+          return true
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Breakpoint failed'
+          set({ error: msg })
+          useNotificationStore.getState().push({ type: 'error', title: '断点操作失败', message: msg })
+          return false
         }
       },
 

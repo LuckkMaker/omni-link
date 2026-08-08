@@ -373,6 +373,8 @@ function RegisterRow({ reg, value }: { reg: PeripheralRegister; value: number | 
 function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const memoryAddress = useZoneStore((s) => s.memoryAddress)
   const setMemoryAddress = useZoneStore((s) => s.setMemoryAddress)
+  // 每行字节数（可配置显示密度，参考 vscode-memory-inspector 的 Groups per Row）
+  const [bytesPerRow, setBytesPerRow] = useState<'8' | '16' | '32'>('16')
   const [rows, setRows] = useState<{ address: number; bytes: number[]; ascii: string }[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -386,9 +388,10 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
       const res = await zoneService.zoneReadMemory(uid, addr & ~0xf, 256)
       if (res.success) {
         const bytes = Buffer.from(res.data_hex, 'hex')
+        const bpr = Number(bytesPerRow)
         const newRows: { address: number; bytes: number[]; ascii: string }[] = []
-        for (let i = 0; i < bytes.length; i += 16) {
-          const chunk = Array.from(bytes.slice(i, i + 16))
+        for (let i = 0; i < bytes.length; i += bpr) {
+          const chunk = Array.from(bytes.slice(i, i + bpr))
           newRows.push({
             address: (res.address + i) & ~0xf,
             bytes: chunk,
@@ -403,7 +406,7 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
     } finally {
       setLoading(false)
     }
-  }, [uid, connected, memoryAddress])
+  }, [uid, connected, memoryAddress, bytesPerRow])
 
   useAutoRefresh(uid, connected, refresh)
 
@@ -423,6 +426,16 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
           className="ml-1 w-28 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-xs"
           placeholder="0x20000000"
         />
+        <select
+          value={bytesPerRow}
+          onChange={(e) => setBytesPerRow(e.target.value as '8' | '16' | '32')}
+          className="h-6 rounded border border-border bg-background px-1 font-mono text-[11px] text-muted-foreground"
+          title="每行字节数"
+        >
+          <option value="8">×8</option>
+          <option value="16">×16</option>
+          <option value="32">×32</option>
+        </select>
         <button
           className="rounded p-1 text-muted-foreground hover:bg-accent"
           onClick={() => void refresh()}
@@ -445,7 +458,7 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
               </span>
               <span className="flex-1">
                 {row.bytes.map((b, i) => (
-                  <span key={i} className="mr-1.5">
+                  <span key={i} className="mr-2 last:mr-0">
                     {b.toString(16).toUpperCase().padStart(2, '0')}
                   </span>
                 ))}

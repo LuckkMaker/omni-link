@@ -56,6 +56,13 @@ class StepRequest(BaseModel):
     mode: str = 'into'  # 'into' | 'over' | 'out'
 
 
+class BreakpointRequest(BaseModel):
+    """源码行断点：file + line 定位，set=True 设断点 / False 移除"""
+    file: str
+    line: int
+    set: bool = True
+
+
 class SessionSaveRequest(BaseModel):
     name: str
     data: dict
@@ -204,6 +211,55 @@ async def zone_status(uid: str):
     except Exception:
         pass
     return {"success": True, "connected": True, "state": state, "pc": pc}
+
+
+# ── 源码行断点 ──────────────────────────────
+# uid -> {address: {address, file, line}}
+_BREAKPOINTS: dict[str, dict[int, dict]] = {}
+
+
+def _get_session_core(uid: str):
+    """获取已连接会话的目标 core，未连接时抛 HTTPException"""
+    session = backend._get_session(uid)
+    if not session:
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    try:
+        return session.target.selected_core_or_raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Target not available: {e}")
+
+
+@router.post("/probes/{uid}/zone/debug/breakpoint")
+async def zone_breakpoint(uid: str, req: BreakpointRequest):
+    """按源码行设置/移除断点（file + line → 地址 → 目标断点）"""
+    from core.monitor_backend import monitor_backend
+    if not elf_backend.is_loaded(uid):
+        raise HTTPException(status_code=400, detail="No ELF loaded")
+    address = elf_backend.get_address_for_line(uid, req.file, req.line)
+    if address is None:
+        raise HTTPException(status_code=400, detail=f"No code at {req.file}:{req.line}")
+
+    bps = _BREAKPOINTS.setdefault(uid, {})
+    if req.set:
+        core = _get_session_core(uid)
+        with monitor_backend.pause_during(uid):
+            core.set_breakpoint(address)
+            core.bp_manager.flush()
+        bps[address] = {"address": address, "file": req.file, "line": req.line}
+    else:
+        core = _get_session_core(uid)
+        with monitor_backend.pause_during(uid):
+            core.remove_breakpoint(address)
+            core.bp_manager.flush()
+        bps.pop(address, None)
+
+    return {"success": True, "address": address, "file": req.file, "line": req.line, "active": req.set}
+
+
+@router.get("/probes/{uid}/zone/breakpoints")
+async def zone_breakpoints(uid: str):
+    """列出当前已设置的源码断点"""
+    return {"success": True, "breakpoints": sorted(_BREAKPOINTS.get(uid, {}).values(), key=lambda b: b["address"])}
 
 
 # ── ELF 源码 / 反汇编 ──────────────────────

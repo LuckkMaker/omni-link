@@ -150,6 +150,32 @@ export async function zoneReset(uid: string, mode: ZoneResetMode = 'halt'): Prom
   return data
 }
 
+/** 源码行断点 */
+export interface SourceBreakpoint {
+  address: number
+  file: string
+  line: number
+}
+
+/** 按源码行设置/移除断点 */
+export async function zoneSetBreakpoint(
+  uid: string,
+  file: string,
+  line: number,
+  set: boolean
+): Promise<{ success: boolean; address: number; file: string; line: number; active: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/debug/breakpoint`, { file, line, set })
+  return data
+}
+
+/** 列出已设置的源码断点 */
+export async function zoneListBreakpoints(uid: string): Promise<{ success: boolean; breakpoints: SourceBreakpoint[] }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/breakpoints`)
+  return data
+}
+
 /** 查询调试状态 */
 export async function zoneStatus(uid: string): Promise<ZoneDebugStatus> {
   const client = await api()

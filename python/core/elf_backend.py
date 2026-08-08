@@ -198,6 +198,31 @@ class ElfBackend:
             result["function"] = getattr(func, 'name', '')
         return result
 
+    def get_address_for_line(self, uid: str, file: str, line: int) -> Optional[int]:
+        """源码位置 → 地址（用于源代码行设置断点）
+
+        在 DWARF 行表中查找与给定文件+行匹配的区间，返回其起始地址。
+        文件路径按 basename 后缀比对，兼容相对/绝对路径差异。
+        """
+        entry = self._get(uid)
+        if not entry:
+            return None
+        decoder = entry["decoder"]
+        tree = getattr(decoder, 'line_tree', None)
+        if tree is None:
+            return None
+        target = file.replace('\\', '/')
+        for interval in tree:
+            info = interval.data
+            fname = (info.filename or '').replace('\\', '/')
+            if info.line == line and (
+                fname == target
+                or fname.endswith('/' + target)
+                or target.endswith('/' + fname)
+            ):
+                return interval.start
+        return None
+
     def get_function_for_address(self, uid: str, address: int) -> Optional[str]:
         entry = self._get(uid)
         if not entry:
