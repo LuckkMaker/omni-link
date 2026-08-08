@@ -306,6 +306,15 @@ async def zone_source_line(uid: str, address: int):
     return {"success": result is not None, "line": result}
 
 
+@router.get("/probes/{uid}/zone/source/executable-lines")
+async def zone_source_executable_lines(uid: str, file: str):
+    """获取文件中可执行（有代码地址映射）的行号，用于仅在这些行显示断点标记"""
+    lines = elf_backend.get_executable_lines(uid, file)
+    if lines is None:
+        return {"success": False, "error": "No line table available"}
+    return {"success": True, "lines": lines}
+
+
 @router.get("/probes/{uid}/zone/source/content")
 async def zone_source_content(uid: str, file: str):
     """读取源文件内容（按行返回）"""
@@ -331,6 +340,23 @@ async def zone_source_content(uid: str, file: str):
         return {"success": True, "file": file_path.replace('\\', '/'), "lines": lines}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.delete("/probes/{uid}/zone/debug/breakpoints")
+async def zone_clear_breakpoints(uid: str):
+    """清除全部断点"""
+    from core.monitor_backend import monitor_backend
+    bps = _BREAKPOINTS.get(uid, {})
+    if not bps:
+        return {"success": True, "cleared": 0}
+    core = _get_session_core(uid)
+    with monitor_backend.pause_during(uid):
+        for address in list(bps.keys()):
+            core.remove_breakpoint(address)
+        core.bp_manager.flush()
+    count = len(bps)
+    _BREAKPOINTS[uid] = {}
+    return {"success": True, "cleared": count}
 
 
 @router.post("/probes/{uid}/zone/disasm")

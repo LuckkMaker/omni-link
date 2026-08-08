@@ -32,6 +32,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pcLine, setPcLine] = useState<number | null>(null)
+  // 可执行（可打断点）的行号集合；仅在这些行显示断点标记
+  const [executableLines, setExecutableLines] = useState<Set<number>>(new Set())
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map())
   const containerRef = useRef<HTMLDivElement>(null)
   // 切换源文件后待跳转的 PC 行（文件加载完成后应用）
@@ -52,6 +54,7 @@ export function SourceView({ uid }: SourceViewProps) {
   }, [uid, refreshBreakpoints])
 
   // 将指定行滚动到容器中央（相比 scrollIntoView 更稳定，不受 sticky 与祖先滚动影响）
+  // 使用双重 requestAnimationFrame：首帧布局稳定后，第二帧再滚动，确保行元素已渲染定位
   const scrollToLine = useCallback((lineNo: number) => {
     const container = containerRef.current
     const el = lineRefs.current.get(lineNo)
@@ -60,7 +63,11 @@ export function SourceView({ uid }: SourceViewProps) {
     const eRect = el.getBoundingClientRect()
     const lineH = eRect.height || 16
     const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
-    container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
+      })
+    })
   }, [])
 
   // 加载选中的源文件
@@ -135,7 +142,7 @@ export function SourceView({ uid }: SourceViewProps) {
           }
           pendingPcRef.current = null
           setPcLine(line.line ?? null)
-          requestAnimationFrame(() => scrollToLine(line.line ?? -1))
+          scrollToLine(line.line ?? -1)
         } else {
           setPcLine(null)
         }
@@ -145,6 +152,26 @@ export function SourceView({ uid }: SourceViewProps) {
       cancelled = true
     }
   }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, state, scrollToLine])
+
+  // 加载当前文件的可执行行号（仅这些行可打断点）
+  useEffect(() => {
+    if (!uid || !activeSourceFile) {
+      setExecutableLines(new Set())
+      return
+    }
+    let cancelled = false
+    zoneService
+      .zoneExecutableLines(uid, activeSourceFile)
+      .then((res) => {
+        if (cancelled) return
+        if (res.success && res.lines) setExecutableLines(new Set(res.lines))
+        else setExecutableLines(new Set())
+      })
+      .catch(() => setExecutableLines(new Set()))
+    return () => {
+      cancelled = true
+    }
+  }, [uid, activeSourceFile])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -178,6 +205,8 @@ export function SourceView({ uid }: SourceViewProps) {
                   norm(b.file).endsWith('/' + norm(activeSourceFile ?? '')) ||
                   norm(activeSourceFile ?? '').endsWith('/' + norm(b.file)))
             )
+            // 仅可执行行可打断点；PC 行与已设断点行也始终允许操作
+            const isExecutable = executableLines.has(lineNo) || isPcLine || hasBp
             return (
               <div
                 key={lineNo}
@@ -193,20 +222,24 @@ export function SourceView({ uid }: SourceViewProps) {
               >
                 {/* 断点槽 + PC 标记 + 行号 */}
                 <div className="sticky left-0 flex w-14 shrink-0 select-none items-center gap-1 bg-background pr-1 text-right">
-                  <button
-                    onClick={() => uid && activeSourceFile && toggleBreakpoint(uid, activeSourceFile, lineNo)}
-                    disabled={!uid || !activeSourceFile || state === 'disconnected'}
-                    title={hasBp ? '移除断点' : '设置断点'}
-                    className="flex w-3 shrink-0 cursor-pointer items-center justify-center text-[11px] leading-none transition-transform hover:scale-125 disabled:cursor-default disabled:opacity-40"
-                  >
-                    {hasBp ? (
-                      <span className="text-red-500">●</span>
-                    ) : isPcLine ? (
-                      <span className="font-bold leading-none text-primary">▶</span>
-                    ) : (
-                      <span className="text-gray-300">●</span>
-                    )}
-                  </button>
+                  {isExecutable ? (
+                    <button
+                      onClick={() => uid && activeSourceFile && toggleBreakpoint(uid, activeSourceFile, lineNo)}
+                      disabled={!uid || !activeSourceFile || state === 'disconnected'}
+                      title={hasBp ? '移除断点' : '设置断点'}
+                      className="flex w-3 shrink-0 cursor-pointer items-center justify-center text-[11px] leading-none transition-transform hover:scale-125 disabled:cursor-default disabled:opacity-40"
+                    >
+                      {hasBp ? (
+                        <span className="text-red-500">●</span>
+                      ) : isPcLine ? (
+                        <span className="font-bold leading-none text-primary">▶</span>
+                      ) : (
+                        <span className="text-gray-300">●</span>
+                      )}
+                    </button>
+                  ) : (
+                    <span className="flex w-3 shrink-0" />
+                  )}
                   <span className={isPcLine ? 'font-bold text-primary' : 'text-muted-foreground'}>
                     {lineNo}
                   </span>

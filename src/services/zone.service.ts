@@ -230,6 +230,18 @@ export async function zoneSourceContent(
   return data
 }
 
+/** 获取文件中可执行（可打断点）的行号 */
+export async function zoneExecutableLines(
+  uid: string,
+  file: string
+): Promise<{ success: boolean; lines?: number[]; error?: string }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/source/executable-lines`, {
+    params: { file },
+  })
+  return data
+}
+
 /** 反汇编 */
 export async function zoneDisasm(
   uid: string,

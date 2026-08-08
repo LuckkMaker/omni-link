@@ -223,6 +223,29 @@ class ElfBackend:
                 return interval.start
         return None
 
+    def get_executable_lines(self, uid: str, file: str) -> Optional[list[int]]:
+        """文件在 DWARF 行表中实际有代码的行号（可打断点）
+
+        仅返回存在代码地址映射的行，注释/空白/声明行不在此列。
+        文件路径按 basename 后缀比对。
+        """
+        entry = self._get(uid)
+        if not entry:
+            return None
+        decoder = entry["decoder"]
+        tree = getattr(decoder, 'line_tree', None)
+        if tree is None:
+            return None
+        target = file.replace('\\', '/')
+        lines: set[int] = set()
+        for interval in tree:
+            info = interval.data
+            fname = (info.filename or '').replace('\\', '/')
+            if fname == target or fname.endswith('/' + target) or target.endswith('/' + fname):
+                if info.line:
+                    lines.add(info.line)
+        return sorted(lines)
+
     def get_function_for_address(self, uid: str, address: int) -> Optional[str]:
         entry = self._get(uid)
         if not entry:
