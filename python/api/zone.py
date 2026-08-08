@@ -10,6 +10,7 @@
 import asyncio
 import json
 import os
+import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -47,6 +48,14 @@ class ReadMemoryRequest(BaseModel):
     length: int = 64
 
 
+class ResetRequest(BaseModel):
+    mode: str = 'halt'  # 'halt' | 'run' | 'break_symbol'
+
+
+class StepRequest(BaseModel):
+    mode: str = 'into'  # 'into' | 'over' | 'out'
+
+
 class SessionSaveRequest(BaseModel):
     name: str
     data: dict
@@ -66,14 +75,34 @@ async def zone_halt(uid: str):
 
 
 @router.post("/probes/{uid}/zone/debug/step")
-async def zone_step(uid: str):
-    """单步执行"""
+async def zone_step(uid: str, req: StepRequest = StepRequest()):
+    """单步执行
+
+    mode:
+      - into: 进入（单步执行一条指令）
+      - over: 跳过（若当前指令为 BL/BLX 调用，则执行完子程序返回后暂停；否则单步）
+      - out:  跳出（执行完当前子程序，返回到调用者后暂停）
+    """
     from core.monitor_backend import monitor_backend
+    mode = req.mode
+    session = backend._get_session(uid)
+    if not session:
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    target = session.target
+    if not target.is_halted():
+        raise HTTPException(status_code=400, detail="Target not halted")
+
+    if mode == 'into':
+        with monitor_backend.pause_during(uid):
+            result = await asyncio.to_thread(commander_backend.execute, uid, "step")
+        if not result["success"] and result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+        return {"success": True, "mode": mode}
+
+    core = target.selected_core_or_raise
     with monitor_backend.pause_during(uid):
-        result = await asyncio.to_thread(commander_backend.execute, uid, "step")
-    if not result["success"] and result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
-    return {"success": True}
+        halted = await asyncio.to_thread(_step_over_out, core, session, mode)
+    return {"success": True, "mode": mode, "halted": halted}
 
 
 @router.post("/probes/{uid}/zone/debug/continue")
@@ -88,17 +117,74 @@ async def zone_continue(uid: str):
 
 
 @router.post("/probes/{uid}/zone/debug/reset")
-async def zone_reset(uid: str):
-    """复位目标并暂停"""
+async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
+    """复位目标
+
+    mode:
+      - halt:         复位并暂停（默认，向后兼容）
+      - run:          复位后继续运行
+      - break_symbol: 复位后运行，直到停在入口符号（main → __main → Reset_Handler）
+    """
     from core.monitor_backend import monitor_backend
+    mode = req.mode
+
+    # break_symbol：先解析入口符号地址
+    symbol_name = None
+    symbol_addr = None
+    if mode == 'break_symbol':
+        for name in ('main', '__main', 'Reset_Handler'):
+            addr = elf_backend.get_symbol_address(uid, name)
+            if addr is not None:
+                symbol_name, symbol_addr = name, addr
+                break
+        if symbol_addr is None:
+            # 无法解析符号（未加载 ELF 或不含入口符号），回退到复位并暂停
+            with monitor_backend.pause_during(uid):
+                result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
+            if not result["success"] and result.get("error"):
+                raise HTTPException(status_code=400, detail=result["error"])
+            return {"success": True, "mode": mode, "symbol": None, "address": None}
+
     with monitor_backend.pause_during(uid):
-        result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
-        if not result["success"] and result.get("error"):
-            # 兼容部分目标无 reset halt，改走 reset
+        if mode == 'halt':
+            result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
+            if not result["success"] and result.get("error"):
+                # 兼容部分目标无 reset halt，改走 reset
+                result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
+        else:
+            # run / break_symbol：复位后继续运行
             result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
-    if not result["success"] and result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
-    return {"success": True}
+        if not result["success"] and result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        if mode == 'break_symbol':
+            # 设置入口断点并运行，直到命中
+            await asyncio.to_thread(commander_backend.execute, uid, f"break 0x{symbol_addr:x}")
+            await asyncio.to_thread(commander_backend.execute, uid, "continue")
+
+    # break_symbol：轮询等待目标暂停（超时 8s）
+    halted = False
+    if mode == 'break_symbol':
+        deadline = asyncio.get_event_loop().time() + 8.0
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+            session = backend._get_session(uid)
+            if session is None:
+                break
+            try:
+                if session.target.is_halted():
+                    halted = True
+                    break
+            except Exception:
+                break
+
+    return {
+        "success": True,
+        "mode": mode,
+        "symbol": symbol_name,
+        "address": symbol_addr,
+        "halted": halted,
+    }
 
 
 @router.post("/probes/{uid}/zone/debug/status")
@@ -395,3 +481,66 @@ async def zone_session_delete(name: str):
     if os.path.isfile(path):
         os.remove(path)
     return {"success": True}
+
+
+# ── Step Over / Step Out 辅助 ────────────────────────────
+
+def _is_call_instruction(core, pc: int) -> bool:
+    """判断 PC 处指令是否为 BL/BLX 调用指令（Thumb 模式）"""
+    try:
+        import capstone
+        addr = pc & ~1
+        code = core.read_memory_block8(addr, 4)
+        md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
+        md.detail = True
+        for ins in md.disasm(bytes(bytearray(code)), addr):
+            return ins.mnemonic in ('bl', 'blx')
+    except Exception:
+        return False
+    return False
+
+
+def _resume_until_halted(session, timeout: float = 8.0) -> bool:
+    """resume 目标并轮询等待其暂停（命中临时断点）。返回是否成功暂停。"""
+    core = session.target.selected_core_or_raise
+    core.resume()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        try:
+            if session.target.is_halted():
+                return True
+        except Exception:
+            return False
+    return False
+
+
+def _step_over_out(core, session, mode: str) -> bool:
+    """执行 step over / step out（同步，在 to_thread 中运行）
+
+    over: 当前指令为 BL/BLX 时，在 LR 处设临时断点并 resume；
+          否则退化为单步（step）。
+    out:  在 LR 处设临时断点并 resume，执行完当前子程序后暂停。
+    """
+    ret = None
+    if mode == 'over':
+        pc = core.read_core_register('pc')
+        if _is_call_instruction(core, pc):
+            ret = core.read_core_register('lr')
+        else:
+            core.step()
+            return True
+    else:  # 'out'
+        ret = core.read_core_register('lr')
+
+    if ret is None:
+        core.step()
+        return True
+
+    core.set_breakpoint(ret)
+    core.bp_manager.flush()
+    try:
+        return _resume_until_halted(session)
+    finally:
+        core.remove_breakpoint(ret)
+        core.bp_manager.flush()

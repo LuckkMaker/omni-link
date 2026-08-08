@@ -205,8 +205,20 @@ class ElfBackend:
         func = entry["decoder"].get_function_for_address(address)
         return getattr(func, 'name', '') if func is not None else None
 
+    def get_symbol_address(self, uid: str, name: str) -> Optional[int]:
+        """按名字查询符号地址（用于 Reset & Break at Symbol 等）"""
+        entry = self._get(uid)
+        if not entry:
+            return None
+        sd = entry.get("symbol_decoder")
+        if not sd:
+            return None
+        info = sd.symbol_dict.get(name)
+        return info.address if info else None
+
     def get_symbol_for_address(self, uid: str, address: int) -> Optional[dict]:
-        """PC 地址 → 符号 {name, address, size, type}"""
+        """PC 地址 → 符号 {name, address, size, type}
+        """
         entry = self._get(uid)
         if not entry:
             return None

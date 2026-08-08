@@ -115,22 +115,39 @@ export async function zoneHalt(uid: string): Promise<void> {
   await client.post(`/api/probes/${uid}/zone/debug/halt`)
 }
 
-/** 单步执行 */
-export async function zoneStep(uid: string): Promise<void> {
-  const client = await api()
-  await client.post(`/api/probes/${uid}/zone/debug/step`)
-}
-
 /** 继续运行 */
 export async function zoneContinue(uid: string): Promise<void> {
   const client = await api()
   await client.post(`/api/probes/${uid}/zone/debug/continue`)
 }
 
-/** 复位并暂停 */
-export async function zoneReset(uid: string): Promise<void> {
+/** 复位模式 */
+export type ZoneResetMode = 'halt' | 'run' | 'break_symbol'
+
+/** 单步模式 */
+export type ZoneStepMode = 'into' | 'over' | 'out'
+
+/** 单步执行 */
+export async function zoneStep(
+  uid: string,
+  mode: ZoneStepMode = 'into'
+): Promise<{ success: boolean; mode: ZoneStepMode; halted?: boolean }> {
   const client = await api()
-  await client.post(`/api/probes/${uid}/zone/debug/reset`)
+  const { data } = await client.post(`/api/probes/${uid}/zone/debug/step`, { mode })
+  return data
+}
+
+/** 复位目标 */
+export async function zoneReset(uid: string, mode: ZoneResetMode = 'halt'): Promise<{
+  success: boolean
+  mode: ZoneResetMode
+  symbol?: string | null
+  address?: number | null
+  halted?: boolean
+}> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/debug/reset`, { mode })
+  return data
 }
 
 /** 查询调试状态 */

@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Bell, Usb, ChevronDown, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
+import { Bell, Usb, ChevronDown, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity, AlertCircle, Cpu } from 'lucide-react'
 import { useProbeStore, SPEED_OPTIONS, type DebugInterface } from '@/stores/probe.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import { useRttStore } from '@/stores/rtt.store'
 import { useMonitorStore } from '@/stores/monitor.store'
+import { useZoneStore } from '@/stores/zone.store'
 import { cn } from '@/lib/utils'
 
 const typeConfig = {
@@ -176,6 +178,16 @@ export function StatusBar() {
   const speedLabel = SPEED_OPTIONS.find((s) => s.value === pendingSpeed)?.label ?? `${pendingSpeed} Hz`
   const interfaceDisabled = isConnected || isConnecting
 
+  // Zone 调试状态（仅 Zone 页面显示）
+  const location = useLocation()
+  const isOnZonePage = location.pathname === '/zone'
+  const zoneState = useZoneStore((s) => s.state)
+  const zonePc = useZoneStore((s) => s.pc)
+  const zoneBusy = useZoneStore((s) => s.busy)
+  const zoneError = useZoneStore((s) => s.error)
+  const zoneStateLabel =
+    zoneState === 'halted' ? 'Halted' : zoneState === 'running' ? 'Running' : zoneState === 'disconnected' ? 'Disconnected' : 'Unknown'
+
   /** 格式化字节数为可读字符串 */
   const fmtBytes = (n: number): string => {
     if (n < 1024) return `${n} B`
@@ -229,6 +241,44 @@ export function StatusBar() {
           onSelect={(v) => setPendingSpeed(v as number)}
           disabled={interfaceDisabled}
         />
+
+        {/* Zone 调试状态：仅 Zone 页面显示（目标状态 / PC / 错误） */}
+        {isOnZonePage && (
+          <>
+            <div className="w-px h-3 bg-white/20" />
+            <div className="flex items-center gap-1 px-2" title="目标调试状态">
+              {zoneBusy ? (
+                <Loader2 className="size-3 animate-spin text-white/80" />
+              ) : (
+                <Cpu className="size-3 text-white/60" />
+              )}
+              <span
+                className={cn(
+                  zoneState === 'halted'
+                    ? 'text-amber-300'
+                    : zoneState === 'running'
+                      ? 'text-green-400'
+                      : 'text-white/60'
+                )}
+              >
+                {zoneStateLabel}
+              </span>
+            </div>
+            {zonePc !== null && zonePc !== undefined && (
+              <div className="flex items-center gap-1 px-2" title="程序计数器">
+                <span className="text-white/80 font-mono">
+                  PC=0x{(zonePc ?? 0).toString(16).toUpperCase().padStart(8, '0')}
+                </span>
+              </div>
+            )}
+            {zoneError && (
+              <div className="flex items-center gap-1 px-2" title={zoneError}>
+                <AlertCircle className="size-3 text-red-400" />
+                <span className="max-w-48 truncate text-red-400">{zoneError}</span>
+              </div>
+            )}
+          </>
+        )}
 
         {/* RTT 统计：运行时紧凑内联显示，与左侧项一致分隔 */}
         {rttRunning && (

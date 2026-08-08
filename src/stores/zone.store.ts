@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import * as zoneService from '@/services/zone.service'
-import type { ZoneSession, SourceFileInfo } from '@/services/zone.service'
+import type { ZoneSession, SourceFileInfo, ZoneResetMode, ZoneStepMode } from '@/services/zone.service'
 import * as probeService from '@/services/probe.service'
 import type { ConnectMode } from '@/services/probe.service'
 import { programFlash } from '@/services/flash.service'
@@ -64,9 +64,9 @@ interface ZoneStore {
 
   /** 调试控制动作（调用后端后刷新状态） */
   halt: (uid: string) => Promise<void>
-  step: (uid: string) => Promise<void>
+  step: (uid: string, mode?: ZoneStepMode) => Promise<void>
   continue: (uid: string) => Promise<void>
-  reset: (uid: string) => Promise<void>
+  reset: (uid: string, mode?: ZoneResetMode) => Promise<void>
   refreshStatus: (uid: string) => Promise<void>
 
   /** ELF 加载 */
@@ -141,10 +141,10 @@ export const useZoneStore = create<ZoneStore>()(
         }
       },
 
-      step: async (uid) => {
+      step: async (uid, mode = 'into') => {
         set({ busy: true, error: null })
         try {
-          await zoneService.zoneStep(uid)
+          await zoneService.zoneStep(uid, mode)
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
@@ -167,10 +167,10 @@ export const useZoneStore = create<ZoneStore>()(
         }
       },
 
-      reset: async (uid) => {
+      reset: async (uid, mode = 'halt') => {
         set({ busy: true, error: null })
         try {
-          await zoneService.zoneReset(uid)
+          await zoneService.zoneReset(uid, mode)
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {

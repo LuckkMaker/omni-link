@@ -51,10 +51,10 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
   }, [])
 
   const sections = [
-    { id: 'disasm' as InspectorTabId, label: '反汇编', icon: Binary, content: <DisasmView uid={uid} /> },
-    { id: 'registers' as InspectorTabId, label: '寄存器', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
-    { id: 'peripherals' as InspectorTabId, label: '外设', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
-    { id: 'memory' as InspectorTabId, label: '内存', icon: MemoryStick, content: <MemoryPanel uid={uid} connected={connected} /> },
+    { id: 'disasm' as InspectorTabId, label: 'Disassembly', icon: Binary, content: <DisasmView uid={uid} /> },
+    { id: 'registers' as InspectorTabId, label: 'Registers', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
+    { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
+    { id: 'memory' as InspectorTabId, label: 'Memory', icon: MemoryStick, content: <MemoryPanel uid={uid} connected={connected} /> },
   ]
   const expandedSections = sections.filter((s) => expanded.includes(s.id))
 
