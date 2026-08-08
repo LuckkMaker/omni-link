@@ -1,8 +1,14 @@
 import { useCallback } from 'react'
-import { Pause, StepForward, Play, RotateCcw, Loader2, FolderOpen, AlertCircle } from 'lucide-react'
+import { Pause, StepForward, Play, RotateCcw, Loader2, Power, AlertCircle, ChevronDown, Download } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { useZoneStore } from '../store'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { useZoneStore, type ZoneStartMode } from '../store'
 
 interface ToolbarProps {
   uid: string | null
@@ -19,38 +25,49 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const step = useZoneStore((s) => s.step)
   const continueRun = useZoneStore((s) => s.continue)
   const reset = useZoneStore((s) => s.reset)
-  const loadElf = useZoneStore((s) => s.loadElf)
-  const setActiveSourceFile = useZoneStore((s) => s.setActiveSourceFile)
+  const startSession = useZoneStore((s) => s.startSession)
 
   const disabled = !connected || !uid || busy
 
-  const handleLoadElf = useCallback(async () => {
+  // 启动调试会话：未加载 ELF 时先弹窗选择文件，再按所选方式自动重连并执行动作
+  const handleStart = useCallback(async (mode: ZoneStartMode) => {
     if (!uid) return
-    const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
-    if (!path) return
-    const ok = await loadElf(uid, path)
-    if (ok) {
-      // 加载成功后自动选中第一个源文件
-      const files = useZoneStore.getState().sourceFiles
-      if (files.length > 0) setActiveSourceFile(files[0].path)
+    let path = useZoneStore.getState().elfPath
+    if (!path) {
+      path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
+      if (!path) return
     }
-  }, [uid, loadElf, setActiveSourceFile])
+    await startSession(uid, mode, path)
+  }, [uid, startSession])
 
   const stateLabel =
     state === 'halted' ? 'Halted' : state === 'running' ? 'Running' : state === 'disconnected' ? 'Disconnected' : 'Unknown'
 
   return (
     <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-2">
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={handleLoadElf}
-        disabled={!uid}
-        className="h-8 gap-1.5"
-      >
-        <FolderOpen className="size-3.5" />
-        Load ELF
-      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="sm" disabled={!uid || busy} className="h-8 gap-1.5">
+            <Power className="size-3.5" />
+            Start Session
+            <ChevronDown className="size-3 opacity-60" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" onCloseAutoFocus={(e) => e.preventDefault()}>
+          <DropdownMenuItem onClick={() => handleStart('download_reset')}>
+            <Download className="size-3.5 mr-1.5" />
+            Download &amp; Reset Program
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => handleStart('attach_running')}>
+            <Play className="size-3.5 mr-1.5" />
+            Attach to Running Program
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => handleStart('attach_halt')}>
+            <Pause className="size-3.5 mr-1.5" />
+            Attach &amp; Halt Program
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       <Separator orientation="vertical" className="mx-1 h-5" />
 

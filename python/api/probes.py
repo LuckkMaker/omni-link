@@ -18,6 +18,8 @@ class ConnectRequest(BaseModel):
     speed: int | None = None
     # 连接模式：attach=附加（默认，不复位不暂停）/ halt=复位并暂停 / pre-reset=连接前复位 / under-reset=复位下连接
     connect_mode: str | None = None
+    # 是否强制重连：为 True 时即使已连接也按新 connect_mode 重连（用于切换会话连接模式）
+    force: bool = False
 
 
 @router.get("")
@@ -46,8 +48,9 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
     interface = req.interface if req else "swd"
     speed = req.speed if req else None
     connect_mode = req.connect_mode if req else None
+    force = req.force if req else False
     success = backend.connect(uid, target=target, interface=interface, speed=speed,
-                              connect_mode=connect_mode)
+                              connect_mode=connect_mode, force=force)
     if not success:
         # 获取后端存储的具体错误信息，避免丢失诊断细节
         error_detail = "Connection failed"

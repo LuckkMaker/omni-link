@@ -2,6 +2,9 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import * as zoneService from '@/services/zone.service'
 import type { ZoneSession, SourceFileInfo } from '@/services/zone.service'
+import * as probeService from '@/services/probe.service'
+import type { ConnectMode } from '@/services/probe.service'
+import { programFlash } from '@/services/flash.service'
 import { useNotificationStore } from '@/stores/notification.store'
 
 /** 右侧检查器 dock 的 tab 类型 */
@@ -9,6 +12,9 @@ export type InspectorTabId = 'registers' | 'peripherals' | 'memory'
 
 /** 刷新策略模式（参考 vscode-memory-inspector） */
 export type RefreshMode = 'on_stop' | 'periodic_always' | 'periodic_running' | 'off'
+
+/** Zone 会话启动方式（Load ELF 下拉选项） */
+export type ZoneStartMode = 'download_reset' | 'attach_running' | 'attach_halt'
 
 interface ZoneStore {
   // ── 调试状态 ──────────────────────────────
@@ -65,6 +71,9 @@ interface ZoneStore {
 
   /** ELF 加载 */
   loadElf: (uid: string, path: string) => Promise<boolean>
+
+  /** 启动调试会话（自动重连并绑定连接模式） */
+  startSession: (uid: string, mode: ZoneStartMode, path: string) => Promise<boolean>
 
   /** 会话管理 */
   fetchSessions: () => Promise<void>
@@ -213,6 +222,56 @@ export const useZoneStore = create<ZoneStore>()(
           useNotificationStore.getState().push({
             type: 'error',
             title: 'ELF 加载失败',
+            message: msg,
+          })
+          return false
+        }
+      },
+
+      startSession: async (uid, mode, path) => {
+        set({ busy: true, error: null })
+        // 每个会话启动方式绑定所需连接模式
+        const connectMode: ConnectMode = mode === 'download_reset' ? 'halt' : 'attach'
+        const labels: Record<ZoneStartMode, string> = {
+          download_reset: 'Download & Reset',
+          attach_running: 'Attach to Running',
+          attach_halt: 'Attach & Halt',
+        }
+        try {
+          // 1. 强制以绑定模式重连（自动切换连接模式，避免与全局设置冲突）
+          await probeService.connectProbe(uid, { connect_mode: connectMode, force: true })
+          // 2. 加载 ELF 符号（失败时内部已推送错误通知）
+          const ok = await get().loadElf(uid, path)
+          if (!ok) return false
+          // 3. 会话动作
+          if (mode === 'download_reset') {
+            await programFlash(uid, path, true, true)
+            useNotificationStore.getState().push({
+              type: 'success',
+              title: 'Download & Reset',
+              message: '烧录并复位完成',
+              autoClose: true,
+              autoCloseDelay: 3000,
+            })
+          } else if (mode === 'attach_halt') {
+            await get().halt(uid)
+          }
+          // attach_running：保持目标运行，无需额外动作
+          set({ busy: false })
+          useNotificationStore.getState().push({
+            type: 'success',
+            title: labels[mode],
+            message: '会话已启动',
+            autoClose: true,
+            autoCloseDelay: 3000,
+          })
+          return true
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Start session failed'
+          set({ busy: false, error: msg })
+          useNotificationStore.getState().push({
+            type: 'error',
+            title: '会话启动失败',
             message: msg,
           })
           return false

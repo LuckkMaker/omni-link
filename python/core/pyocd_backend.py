@@ -125,7 +125,7 @@ class PyOCDBackend(BackendInterface):
 
     def connect(self, probe_uid: str, target: str | None = None,
                 interface: str = "swd", speed: int | None = None,
-                connect_mode: str | None = None) -> bool:
+                connect_mode: str | None = None, force: bool = False) -> bool:
         """连接指定探针
 
         Args:
@@ -138,16 +138,17 @@ class PyOCDBackend(BackendInterface):
                 - halt: 复位并暂停在复位向量
                 - pre-reset: 连接前执行复位
                 - under-reset: 拉低复位线时连接（用于深度睡眠/被锁目标）
+            force: 是否强制重连。为 True 时即使已连接也会关闭旧会话并以新参数重连
+                （用于切换连接模式，如 Zone 会话的 attach/halt 绑定）。
         """
         from pyocd.core.helpers import ConnectHelper
 
         with self._lock:
             existing = self._sessions.get(probe_uid)
             if existing and existing.state == ProbeState.CONNECTED:
-                return True
-
-            # 提取旧会话对象（可能来自之前失败的连接）
-            # 旧会话可能持有 USB 句柄，必须先释放才能重新连接
+                if not force:
+                    return True
+                # force=True：关闭旧会话后以新参数重连
             old_session = existing.session if existing else None
 
             # 创建或更新会话记录
