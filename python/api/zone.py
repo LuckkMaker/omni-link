@@ -220,6 +220,73 @@ async def zone_memory_usage(uid: str):
     return result
 
 
+@router.get("/probes/{uid}/zone/stack")
+async def zone_stack(uid: str):
+    """调用栈回溯（需目标暂停）：PC + LR + SP 栈扫描识别返回地址"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    session = backend._get_session(uid)
+    if not session or not session.target.is_halted():
+        raise HTTPException(status_code=400, detail="Target not halted")
+    target = session.target
+    try:
+        pc = target.read_core_register("pc") & ~1
+        sp = target.read_core_register("sp") & ~0x3
+        lr = target.read_core_register("lr") & ~1
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Read registers failed: {e}")
+
+    def resolve(addr: int):
+        try:
+            return elf_backend.resolve_address(uid, addr)
+        except Exception:
+            return None
+
+    frames = []
+    # 帧 0：当前 PC
+    r0 = resolve(pc) or {"address": pc}
+    r0["sp"] = sp
+    frames.append(r0)
+
+    # 帧 1：LR（若为有效函数内地址）
+    if lr and lr != 0xfffffff9 and lr != 0xfffffff1:
+        r = resolve(lr)
+        if r:
+            r["sp"] = None
+            frames.append(r)
+
+    # 从 SP 向上扫描栈字，识别落在函数区间内的返回地址
+    try:
+        stack_data = await asyncio.to_thread(backend.read_memory, uid, sp, min(1024, 64 * 4))
+    except Exception:
+        stack_data = b""
+    for i in range(0, len(stack_data) - 3, 4):
+        val = int.from_bytes(stack_data[i:i + 4], "little") & ~1
+        if val == 0 or val == 0xfffffffe:
+            continue
+        if not elf_backend.is_function_address(uid, val):
+            continue
+        r = resolve(val)
+        if not r or not r.get("function"):
+            continue
+        frames.append(r)
+        if len(frames) >= 40:
+            break
+
+    return {"success": True, "frames": frames, "sp": sp, "pc": pc, "lr": lr}
+
+
+@router.get("/probes/{uid}/zone/callgraph")
+async def zone_callgraph(uid: str, address: int):
+    """调用图：解析指定函数地址的直接 callees"""
+    if not elf_backend.is_loaded(uid):
+        raise HTTPException(status_code=400, detail="No ELF loaded")
+    result = elf_backend.get_callees(uid, address)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Resolve failed"))
+    return result
+
+
 # ── 外设 / 寄存器 / 内存检查器 ──────────────
 
 @router.get("/probes/{uid}/zone/peripherals")

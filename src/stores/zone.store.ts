@@ -7,8 +7,8 @@ import type { ConnectMode } from '@/services/probe.service'
 import { programFlash } from '@/services/flash.service'
 import { useNotificationStore } from '@/stores/notification.store'
 
-/** 右侧检查器 dock 的 tab 类型 */
-export type InspectorTabId = 'registers' | 'peripherals' | 'memory'
+/** 右侧检查器 dock 的 section 类型 */
+export type InspectorTabId = 'disasm' | 'registers' | 'peripherals' | 'memory'
 
 /** 刷新策略模式（参考 vscode-memory-inspector） */
 export type RefreshMode = 'on_stop' | 'periodic_always' | 'periodic_running' | 'off'

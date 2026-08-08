@@ -1,51 +1,86 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Loader2, RefreshCw, AlertCircle, MemoryStick, Cpu, Blocks } from 'lucide-react'
-import { useZoneStore } from '../store'
+import { Loader2, RefreshCw, AlertCircle, MemoryStick, Cpu, Blocks, Binary } from 'lucide-react'
+import { useZoneStore, type InspectorTabId } from '../store'
 import * as zoneService from '@/services/zone.service'
 import type { Peripheral, PeripheralRegister } from '@/services/zone.service'
+import { cn } from '@/lib/utils'
+import { DisasmView } from './DisasmView'
 
 interface InspectorDockProps {
   uid: string | null
   connected: boolean
 }
 
-/** 右侧检查器 dock：寄存器 / 外设 / 内存 多 tab */
+// ── 右侧纵向 tab 按钮（垂直列表：图标 + 完整标签横向排列） ──
+function RailTab({
+  active,
+  onClick,
+  icon: Icon,
+  label,
+  title,
+}: {
+  active: boolean
+  onClick: () => void
+  icon: React.ElementType
+  label: string
+  title?: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title ?? label}
+      className={cn(
+        'flex w-full items-center gap-2 border-l-2 px-3 py-2 text-left text-xs transition-colors',
+        active
+          ? 'border-primary bg-primary/10 font-medium text-primary'
+          : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'
+      )}
+    >
+      <Icon className="size-4 shrink-0" />
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
+
+/** 右侧检查器 dock：寄存器 / 外设 / 内存 手风琴（多选展开） */
 export function InspectorDock({ uid, connected }: InspectorDockProps) {
-  const activeTab = useZoneStore((s) => s.activeInspectorTab)
-  const setActiveTab = useZoneStore((s) => s.setActiveInspectorTab)
-  const state = useZoneStore((s) => s.state)
-  const refreshMode = useZoneStore((s) => s.refreshMode)
+  // 手风琴：可多选展开，共享显示空间，折叠项固定在底部（默认展开反汇编 + 寄存器）
+  const [expanded, setExpanded] = useState<InspectorTabId[]>(['disasm', 'registers'])
+  const toggle = useCallback((id: InspectorTabId) => {
+    setExpanded((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }, [])
+
+  const sections = [
+    { id: 'disasm' as InspectorTabId, label: '反汇编', icon: Binary, content: <DisasmView uid={uid} /> },
+    { id: 'registers' as InspectorTabId, label: '寄存器', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
+    { id: 'peripherals' as InspectorTabId, label: '外设', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
+    { id: 'memory' as InspectorTabId, label: '内存', icon: MemoryStick, content: <MemoryPanel uid={uid} connected={connected} /> },
+  ]
+  const expandedSections = sections.filter((s) => expanded.includes(s.id))
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card">
-      {/* Tab 栏 */}
-      <div className="flex shrink-0 items-center border-b border-border">
-        {(
-          [
-            { id: 'registers', label: '寄存器', icon: Cpu },
-            { id: 'peripherals', label: '外设', icon: Blocks },
-            { id: 'memory', label: '内存', icon: MemoryStick },
-          ] as const
-        ).map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={
-              activeTab === tab.id
-                ? 'flex flex-1 items-center justify-center gap-1.5 border-b-2 border-primary px-2 py-2 text-xs font-medium text-primary'
-                : 'flex flex-1 items-center justify-center gap-1.5 border-b-2 border-transparent px-2 py-2 text-xs text-muted-foreground hover:bg-accent'
-            }
-          >
-            <tab.icon className="size-3.5" />
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'registers' && <RegistersPanel uid={uid} connected={connected} />}
-        {activeTab === 'peripherals' && <PeripheralsPanel uid={uid} connected={connected} />}
-        {activeTab === 'memory' && <MemoryPanel uid={uid} connected={connected} />}
+      {/* 展开的 section：header + 内容（共享剩余高度） */}
+      {expandedSections.map((s) => (
+        <div key={s.id} className="flex min-h-0 flex-1 flex-col">
+          <RailTab active onClick={() => toggle(s.id)} icon={s.icon} label={s.label} title={s.label} />
+          <div className="min-h-0 flex-1 overflow-hidden border-t border-border">{s.content}</div>
+        </div>
+      ))}
+      {/* 折叠的 section 固定在底部 */}
+      <div className="mt-auto flex shrink-0 flex-col">
+        {sections
+          .filter((s) => !expanded.includes(s.id))
+          .map((s) => (
+            <RailTab
+              key={s.id}
+              active={false}
+              onClick={() => toggle(s.id)}
+              icon={s.icon}
+              label={s.label}
+              title={s.label}
+            />
+          ))}
       </div>
     </div>
   )

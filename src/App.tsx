@@ -15,7 +15,7 @@ export default function App() {
   return (
     <Routes>
       <Route element={<MainLayout />}>
-        <Route path="/" element={<Navigate to="/flash" replace />} />
+        <Route path="/" element={<Navigate to="/zone" replace />} />
         <Route path="/flash" element={<FlashPage />} />
         {/* Commander 页面由 MainLayout 通过 keep-alive 常驻渲染。
             此占位路由让父布局能匹配 /commander 路径（element 为 null，Outlet 渲染空），

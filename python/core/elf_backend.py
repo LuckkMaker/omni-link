@@ -244,6 +244,113 @@ class ElfBackend:
         page = funcs[offset:offset + limit]
         return {"success": True, "functions": page, "total": total}
 
+    # ── 地址解析 / 函数区间（供调用栈与调用图使用）─────────
+
+    def _function_ranges(self, uid: str) -> list[tuple]:
+        """构建并缓存函数地址区间列表 [(start, end, name, addr, size)]"""
+        entry = self._get(uid)
+        if not entry:
+            return []
+        ranges = entry.get("_function_ranges")
+        if ranges is None:
+            sd = entry.get("symbol_decoder")
+            ranges = []
+            if sd:
+                for name, info in sd.symbol_dict.items():
+                    if info.type == "STT_FUNC" and info.size > 0:
+                        ranges.append((info.address, info.address + info.size, name, info.address, info.size))
+                ranges.sort(key=lambda r: r[0])
+            entry["_function_ranges"] = ranges
+        return ranges
+
+    def is_function_address(self, uid: str, address: int) -> bool:
+        """判断地址是否落在某个已知函数内（用于栈回溯的返回地址过滤）"""
+        for start, end, *_ in self._function_ranges(uid):
+            if start <= address < end:
+                return True
+            if address < start:
+                break
+        return False
+
+    def resolve_address(self, uid: str, address: int) -> Optional[dict]:
+        """解析地址 → {address, symbol, function, function_address, function_size, file, line}"""
+        entry = self._get(uid)
+        if not entry:
+            return None
+        result = {"address": address}
+        for start, end, name, faddr, fsize in self._function_ranges(uid):
+            if start <= address < end:
+                result["function"] = name
+                result["function_address"] = faddr
+                result["function_size"] = fsize
+                break
+            if address < start:
+                break
+        sd = entry.get("symbol_decoder")
+        if sd:
+            sym = sd.get_symbol_for_address(address)
+            if sym is not None:
+                result["symbol"] = sym.name
+        line_info = entry["decoder"].get_line_for_address(address)
+        if line_info is not None:
+            result["file"] = (line_info.filename or '').replace('\\', '/')
+            result["line"] = line_info.line
+        return result
+
+    def get_callees(self, uid: str, address: int) -> dict:
+        """调用图：解析指定函数地址的直接 callees（反汇编 BL/BLX 指令的目标）"""
+        entry = self._get(uid)
+        if not entry:
+            return {"success": False, "error": "No ELF loaded"}
+        if not self._capstone_available():
+            return {"success": False, "error": "Capstone not installed"}
+        fn = None
+        for start, end, name, faddr, fsize in self._function_ranges(uid):
+            if start <= address < end:
+                fn = {"name": name, "address": faddr, "size": fsize}
+                break
+            if address < start:
+                break
+        if not fn:
+            return {"success": False, "error": "Address not in a function"}
+        try:
+            import capstone
+        except ImportError:
+            return {"success": False, "error": "Capstone not installed"}
+        code = self._read_from_segments(entry["elf"], fn["address"], fn["size"])
+        if not code:
+            return {"success": False, "error": "No code in function"}
+        md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
+        md.detail = True
+        callees = []
+        seen = set()
+        try:
+            for ins in md.disasm(code, fn["address"]):
+                if ins.mnemonic not in ("bl", "blx"):
+                    continue
+                target = None
+                for op in ins.operands:
+                    if op.type == capstone.arm.ARM_OP_IMM:
+                        target = op.imm & ~1
+                        break
+                if target is None:
+                    continue
+                r = self.resolve_address(uid, target)
+                if r and r.get("function"):
+                    key = (r["function"], r["function_address"])
+                    if key not in seen:
+                        seen.add(key)
+                        callees.append({
+                            "name": r["function"],
+                            "address": r["function_address"],
+                            "size": r.get("function_size", 0),
+                        })
+        except Exception as e:
+            logger.exception("Call graph disasm failed")
+            return {"success": False, "error": str(e)}
+        callees.sort(key=lambda c: c["address"])
+        return {"success": True, "function": fn, "callees": callees}
+
     def get_memory_usage(self, uid: str) -> dict:
         """内存使用统计（从 ELF section 近似估算 Flash/RAM 占用）
 

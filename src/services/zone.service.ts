@@ -224,6 +224,57 @@ export async function zoneMemoryUsage(uid: string): Promise<MemoryUsage> {
   return data as MemoryUsage
 }
 
+// ── 调用栈 / 调用图 ──────────────────────────
+
+/** 调用栈帧 */
+export interface CallStackFrame {
+  address: number
+  sp?: number | null
+  symbol?: string
+  function?: string
+  function_address?: number
+  function_size?: number
+  file?: string
+  line?: number
+}
+
+/** 调用栈回溯结果 */
+export interface CallStackResult {
+  success: boolean
+  frames: CallStackFrame[]
+  sp: number
+  pc: number
+  lr: number
+}
+
+/** 调用图 callee */
+export interface CallGraphCallee {
+  name: string
+  address: number
+  size: number
+}
+
+/** 调用图结果 */
+export interface CallGraphResult {
+  success: boolean
+  function: { name: string; address: number; size: number }
+  callees: CallGraphCallee[]
+}
+
+/** 调用栈回溯（需目标暂停） */
+export async function zoneStack(uid: string): Promise<CallStackResult> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/stack`)
+  return data as CallStackResult
+}
+
+/** 调用图：某函数的直接 callees */
+export async function zoneCallGraph(uid: string, address: number): Promise<CallGraphResult> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/callgraph`, { params: { address } })
+  return data as CallGraphResult
+}
+
 // ── 外设 / 寄存器 / 内存 ──────────────────────
 
 /** 外设树元数据 */

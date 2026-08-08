@@ -1,30 +1,28 @@
 import { useEffect, useState, useCallback } from 'react'
-import { FileCode2, FunctionSquare, SquareTerminal, MemoryStick } from 'lucide-react'
+import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, ListTree, Share2, Eye } from 'lucide-react'
 import { Toolbar } from './components/Toolbar'
 import { SourceFilesPanel } from './components/SourceFilesPanel'
 import { FunctionsPanel } from './components/FunctionsPanel'
+import { MemoryUsagePanel } from './components/MemoryUsagePanel'
 import { SourceView } from './components/SourceView'
-import { DisasmView } from './components/DisasmView'
 import { InspectorDock } from './components/InspectorDock'
 import { TerminalDock } from './components/TerminalDock'
-import { MemoryUsagePanel } from './components/MemoryUsagePanel'
+import { CallStackPanel } from './components/CallStackPanel'
+import { CallGraphPanel } from './components/CallGraphPanel'
+import { WatchPanel } from './components/WatchPanel'
 import { ResizeHandle } from '@/components/LogConsole'
 import { useProbeStore } from '@/stores/probe.store'
 import { useZoneStore } from './store'
 import { cn } from '@/lib/utils'
 
 // ── 尺寸常量 ──────────────────────────────
-const SOURCE_PANEL_DEFAULT = 280
+const SOURCE_PANEL_DEFAULT = 300
 const SOURCE_PANEL_MAX_RATIO = 0.3
 
 const DOCK_DEFAULT_WIDTH = 360
 const DOCK_MAX_RATIO = 0.45
 
-const DISASM_DEFAULT_HEIGHT = 260
-const DISASM_MIN_HEIGHT = 120
-const DISASM_MAX_RATIO = 0.6
-
-const TERMINAL_DEFAULT_HEIGHT = 200
+const TERMINAL_DEFAULT_HEIGHT = 220
 const TERMINAL_MIN_HEIGHT = 80
 const TERMINAL_MAX_RATIO = 0.4
 
@@ -32,19 +30,50 @@ function ratioOf(max: number): number {
   return Math.floor((window.innerWidth ?? 1280) * max)
 }
 
-type LeftTab = 'source' | 'functions'
-type BottomTab = 'console' | 'memory'
+type LeftTab = 'source' | 'functions' | 'memory'
+type BottomTab = 'console' | 'callstack' | 'callgraph' | 'watch'
 
-/** 左侧 dock 顶部 tab 按钮 */
-function DockedTab({
+/** 左侧纵向 tab 按钮（垂直列表：图标 + 完整标签横向排列） */
+function RailTab({
   active,
   onClick,
-  icon,
+  icon: Icon,
+  label,
+  title,
+}: {
+  active: boolean
+  onClick: () => void
+  icon: React.ElementType
+  label: string
+  title?: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title ?? label}
+      className={cn(
+        'flex w-full items-center gap-2 border-l-2 px-3 py-2 text-left text-xs transition-colors',
+        active
+          ? 'border-primary bg-primary/10 font-medium text-primary'
+          : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'
+      )}
+    >
+      <Icon className="size-4 shrink-0" />
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
+
+/** 底部横向 tab 按钮 */
+function BottomTab({
+  active,
+  onClick,
+  icon: Icon,
   label,
 }: {
   active: boolean
   onClick: () => void
-  icon: React.ReactNode
+  icon: React.ElementType
   label: string
 }) {
   return (
@@ -57,7 +86,7 @@ function DockedTab({
           : 'border-transparent text-muted-foreground hover:bg-muted/30 hover:text-foreground'
       )}
     >
-      {icon}
+      <Icon className="size-3.5" />
       {label}
     </button>
   )
@@ -65,7 +94,7 @@ function DockedTab({
 
 /**
  * Zone 调试工作台主页（SEGGER Ozone 式布局）
- * 顶部工具栏 + 左侧(源码文件/函数表格) + 主源码视图 + 右侧(反汇编/检查器) + 底部(控制台/内存占用)
+ * 顶部工具栏 + 左侧纵向tab(源码文件/函数/内存占用) + 主源码视图 + 右侧(反汇编/纵向tab检查器) + 底部(控制台/调用栈/调用图/观察)
  */
 export default function ZonePage() {
   const selectedProbe = useProbeStore((s) => {
@@ -75,18 +104,21 @@ export default function ZonePage() {
   const isConnected = selectedProbe?.state === 'connected'
   const uid = selectedProbe?.uid ?? null
 
-  // 左侧源码文件面板宽度（0 = 隐藏）
+  // 左侧 dock 宽度（0 = 隐藏）
   const [sourceWidth, setSourceWidth] = useState(SOURCE_PANEL_DEFAULT)
   // 右侧 dock 宽度（0 = 隐藏）
   const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT_WIDTH)
-  // 右侧上半部分（反汇编）高度
-  const [disasmHeight, setDisasmHeight] = useState(DISASM_DEFAULT_HEIGHT)
   // 底部 dock 高度（0 = 隐藏）
   const [dockHeight, setDockHeight] = useState(TERMINAL_DEFAULT_HEIGHT)
 
-  // 左侧 tab / 底部 tab
-  const [leftTab, setLeftTab] = useState<LeftTab>('source')
+  // 左侧手风琴：可同时展开多个 section，折叠的固定在底部（Source Files 默认展开）
+  const [expandedLeft, setExpandedLeft] = useState<LeftTab[]>(['source'])
+  // 底部 tab
   const [bottomTab, setBottomTab] = useState<BottomTab>('console')
+
+  const toggleLeft = useCallback((id: LeftTab) => {
+    setExpandedLeft((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }, [])
 
   // 连接断开时重置调试状态，避免残留
   const refreshStatus = useZoneStore((s) => s.refreshStatus)
@@ -99,7 +131,7 @@ export default function ZonePage() {
     }
   }, [isConnected, uid, refreshStatus, setState])
 
-  // 左侧源码面板宽度拖拽（面板在分隔条左侧：向右拖动→变宽）
+  // 左侧面板宽度拖拽（面板在分隔条左侧：向右拖动→变宽）
   const handleSourceResize = useCallback((delta: number) => {
     setSourceWidth((w) => Math.max(0, Math.min(ratioOf(SOURCE_PANEL_MAX_RATIO), w + delta)))
   }, [])
@@ -115,54 +147,54 @@ export default function ZonePage() {
     setDockWidth((w) => (w > 0 ? 0 : DOCK_DEFAULT_WIDTH))
   }, [])
 
-  // 右侧上半（反汇编）高度拖拽
-  const handleDisasmResize = useCallback((deltaY: number) => {
-    setDisasmHeight((h) =>
-      Math.max(DISASM_MIN_HEIGHT, Math.min(window.innerHeight * DISASM_MAX_RATIO, h - deltaY))
-    )
-  }, [])
-  const handleToggleDisasm = useCallback(() => {
-    setDisasmHeight((h) => (h > DISASM_MIN_HEIGHT ? DISASM_MIN_HEIGHT : DISASM_DEFAULT_HEIGHT))
-  }, [])
-
-  // 底部 dock 高度拖拽
+  // 底部 dock 高度拖拽（保留手动拖拽，设最小高度，不再支持双击隐藏）
   const handleDockHeightResize = useCallback((deltaY: number) => {
     setDockHeight((h) =>
-      Math.max(0, Math.min(window.innerHeight * TERMINAL_MAX_RATIO, h - deltaY))
+      Math.max(TERMINAL_MIN_HEIGHT, Math.min(window.innerHeight * TERMINAL_MAX_RATIO, h - deltaY))
     )
   }, [])
-  const handleToggleDockHeight = useCallback(() => {
-    setDockHeight((h) => (h > 0 ? 0 : TERMINAL_DEFAULT_HEIGHT))
-  }, [])
+
+  // 左侧手风琴 section 配置：可多选展开，共享显示空间，折叠项固定在底部
+  const leftSections = [
+    { id: 'source' as LeftTab, label: 'Source Files', icon: FileCode2, content: <SourceFilesPanel uid={uid} /> },
+    { id: 'functions' as LeftTab, label: 'Functions', icon: FunctionSquare, content: <FunctionsPanel uid={uid} /> },
+    { id: 'memory' as LeftTab, label: 'Memory Usage', icon: MemoryStick, content: <MemoryUsagePanel uid={uid} /> },
+  ]
+  const expandedLeftSections = leftSections.filter((s) => expandedLeft.includes(s.id))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* 顶部工具栏 */}
       <Toolbar uid={uid} connected={isConnected} />
 
-      {/* 中部：左侧文件窗 | 主源码 | 右侧(反汇编/检查器) */}
+      {/* 中部：左侧dock | 主源码 | 右侧dock */}
       <div className="flex min-h-0 flex-1">
-        {/* 左侧 dock：Source Files / Functions */}
+        {/* 左侧 dock：手风琴（多选展开，共享高度） */}
         <div
           className={sourceWidth > 0 ? 'flex shrink-0 flex-col overflow-hidden border-r border-border bg-card' : 'hidden'}
           style={sourceWidth > 0 ? { width: sourceWidth } : undefined}
         >
-          <div className="flex shrink-0 items-center border-b border-border">
-            <DockedTab
-              active={leftTab === 'source'}
-              onClick={() => setLeftTab('source')}
-              icon={<FileCode2 className="size-3.5" />}
-              label="Source Files"
-            />
-            <DockedTab
-              active={leftTab === 'functions'}
-              onClick={() => setLeftTab('functions')}
-              icon={<FunctionSquare className="size-3.5" />}
-              label="Functions"
-            />
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {leftTab === 'source' ? <SourceFilesPanel uid={uid} /> : <FunctionsPanel uid={uid} />}
+          {/* 展开的 section：header + 内容（共享剩余高度） */}
+          {expandedLeftSections.map((s) => (
+            <div key={s.id} className="flex min-h-0 flex-1 flex-col">
+              <RailTab active onClick={() => toggleLeft(s.id)} icon={s.icon} label={s.label} title={s.label} />
+              <div className="min-h-0 flex-1 overflow-hidden border-t border-border">{s.content}</div>
+            </div>
+          ))}
+          {/* 折叠的 section 固定在底部 */}
+          <div className="mt-auto flex shrink-0 flex-col">
+            {leftSections
+              .filter((s) => !expandedLeft.includes(s.id))
+              .map((s) => (
+                <RailTab
+                  key={s.id}
+                  active={false}
+                  onClick={() => toggleLeft(s.id)}
+                  icon={s.icon}
+                  label={s.label}
+                  title={s.label}
+                />
+              ))}
           </div>
         </div>
         <ResizeHandle
@@ -187,58 +219,37 @@ export default function ZonePage() {
           expanded={dockWidth > 0}
         />
 
-        {/* 右侧 dock：上半反汇编，下半检查器 */}
+        {/* 右侧 dock：检查器手风琴（反汇编/寄存器/外设/内存，多选展开） */}
         <div
           className={dockWidth > 0 ? 'flex shrink-0 flex-col overflow-hidden border-l border-border bg-card' : 'hidden'}
           style={dockWidth > 0 ? { width: dockWidth } : undefined}
         >
-          {/* 上半：反汇编 */}
-          <div className="shrink-0 overflow-hidden" style={{ height: disasmHeight }}>
-            <DisasmView uid={uid} />
-          </div>
-
-          {/* 反汇编 / 检查器 分隔条 */}
-          <ResizeHandle
-            onResize={handleDisasmResize}
-            onToggle={handleToggleDisasm}
-            expanded={disasmHeight > DISASM_MIN_HEIGHT}
-          />
-
-          {/* 下半：检查器（寄存器/外设/内存） */}
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <InspectorDock uid={uid} connected={isConnected} />
-          </div>
+          <InspectorDock uid={uid} connected={isConnected} />
         </div>
       </div>
 
-      {/* 底部特宽分隔条 */}
+      {/* 底部拖拽把手（保留拖拽，无双击隐藏） */}
       <ResizeHandle
         onResize={handleDockHeightResize}
-        onToggle={handleToggleDockHeight}
         expanded={dockHeight > 0}
       />
 
-      {/* 底部 dock：Console / Memory Usage */}
+      {/* 底部 dock：Console / Call Stack / Call Graph / Watch */}
       <div
         className={dockHeight > 0 ? 'flex shrink-0 flex-col border-t border-border bg-card' : 'hidden'}
         style={dockHeight > 0 ? { height: dockHeight } : undefined}
       >
         <div className="flex shrink-0 items-center border-b border-border">
-          <DockedTab
-            active={bottomTab === 'console'}
-            onClick={() => setBottomTab('console')}
-            icon={<SquareTerminal className="size-3.5" />}
-            label="Console"
-          />
-          <DockedTab
-            active={bottomTab === 'memory'}
-            onClick={() => setBottomTab('memory')}
-            icon={<MemoryStick className="size-3.5" />}
-            label="Memory Usage"
-          />
+          <BottomTab active={bottomTab === 'console'} onClick={() => setBottomTab('console')} icon={SquareTerminal} label="Console" />
+          <BottomTab active={bottomTab === 'callstack'} onClick={() => setBottomTab('callstack')} icon={ListTree} label="Call Stack" />
+          <BottomTab active={bottomTab === 'callgraph'} onClick={() => setBottomTab('callgraph')} icon={Share2} label="Call Graph" />
+          <BottomTab active={bottomTab === 'watch'} onClick={() => setBottomTab('watch')} icon={Eye} label="Watch" />
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          {bottomTab === 'console' ? <TerminalDock /> : <MemoryUsagePanel uid={uid} />}
+          {bottomTab === 'console' && <TerminalDock />}
+          {bottomTab === 'callstack' && <CallStackPanel uid={uid} />}
+          {bottomTab === 'callgraph' && <CallGraphPanel uid={uid} />}
+          {bottomTab === 'watch' && <WatchPanel uid={uid} connected={isConnected} />}
         </div>
       </div>
     </div>
