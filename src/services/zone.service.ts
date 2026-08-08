@@ -67,14 +67,24 @@ export interface PeripheralRegister {
   address: number
   size: number
   access: string
+  description?: string
   fields: PeripheralField[]
 }
 
 /** 外设 */
 export interface Peripheral {
   name: string
-  base_address: number
+  description?: string
+  base_address?: number
+  /** 寄存器列表（三级结构：外设 → 寄存器 → 位域） */
   registers: PeripheralRegister[]
+}
+
+/** 核心寄存器（Name/Value/Description） */
+export interface CoreRegister {
+  name: string
+  value: number
+  description: string
 }
 
 /** 寄存器读取结果 */
@@ -344,6 +354,15 @@ export async function zoneReadRegisters(uid: string, addresses: number[]): Promi
   const client = await api()
   const { data } = await client.post(`/api/probes/${uid}/zone/registers/read`, { addresses })
   return data as RegisterReadResult
+}
+
+/** 读取 CPU 核心寄存器（Name/Value/Description） */
+export async function zoneCoreRegisters(
+  uid: string
+): Promise<{ success: boolean; registers: CoreRegister[] }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/registers/core`)
+  return data as { success: boolean; registers: CoreRegister[] }
 }
 
 /** 读取内存 */

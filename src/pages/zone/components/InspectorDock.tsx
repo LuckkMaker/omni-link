@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Loader2, RefreshCw, AlertCircle, MemoryStick, Cpu, Blocks, Binary } from 'lucide-react'
+import { Loader2, AlertCircle, Cpu, Blocks, Binary, ListTree, Share2, ChevronRight, ChevronDown } from 'lucide-react'
 import { useZoneStore, type InspectorTabId } from '../store'
 import * as zoneService from '@/services/zone.service'
-import type { Peripheral, PeripheralRegister } from '@/services/zone.service'
+import type { Peripheral, PeripheralRegister, PeripheralField, CoreRegister } from '@/services/zone.service'
 import { cn } from '@/lib/utils'
 import { DisasmView } from './DisasmView'
+import { CallStackPanel } from './CallStackPanel'
+import { CallGraphPanel } from './CallGraphPanel'
 
 interface InspectorDockProps {
   uid: string | null
@@ -42,19 +44,20 @@ function RailTab({
   )
 }
 
-/** 右侧检查器 dock：寄存器 / 外设 / 内存 手风琴（多选展开） */
+/** 右侧检查器 dock：寄存器 / 外设 手风琴（多选展开） */
 export function InspectorDock({ uid, connected }: InspectorDockProps) {
-  // 手风琴：可多选展开，共享显示空间，折叠项固定在底部（默认展开反汇编 + 寄存器）
-  const [expanded, setExpanded] = useState<InspectorTabId[]>(['disasm', 'registers'])
+  // 手风琴：可多选展开，共享显示空间，折叠项固定在底部（默认只展开反汇编，Registers 默认折叠）
+  const [expanded, setExpanded] = useState<InspectorTabId[]>(['disasm'])
   const toggle = useCallback((id: InspectorTabId) => {
     setExpanded((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }, [])
 
   const sections = [
     { id: 'disasm' as InspectorTabId, label: 'Disassembly', icon: Binary, content: <DisasmView uid={uid} /> },
+    { id: 'callstack' as InspectorTabId, label: 'Call Stack', icon: ListTree, content: <CallStackPanel uid={uid} /> },
+    { id: 'callgraph' as InspectorTabId, label: 'Call Graph', icon: Share2, content: <CallGraphPanel uid={uid} /> },
     { id: 'registers' as InspectorTabId, label: 'Registers', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
     { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
-    { id: 'memory' as InspectorTabId, label: 'Memory', icon: MemoryStick, content: <MemoryPanel uid={uid} connected={connected} /> },
   ]
   const expandedSections = sections.filter((s) => expanded.includes(s.id))
 
@@ -124,9 +127,37 @@ function useAutoRefresh(uid: string | null, connected: boolean, refresh: () => v
   }, [uid, connected, state, pc, refreshMode, refresh])
 }
 
-// ── 寄存器面板 ────────────────────────────
+/** 十六进制格式化（32 位） */
+function fmtHex(v: number): string {
+  return '0x' + (v >>> 0).toString(16).toUpperCase().padStart(8, '0')
+}
+
+/** 从寄存器值提取位域当前值（参考 vscode-peripheral-inspector 的字段值解码） */
+function decodeFieldValue(value: number, field: PeripheralField): number {
+  const mask = field.bit_width >= 32 ? 0xffffffff : (1 << field.bit_width) - 1
+  return (value >> field.bit_offset) & mask
+}
+
+/** 十六进制地址（0xXXXX_XXXX 下划线分隔，与 Flash HexViewer 的 formatHexAddr 一致） */
+function formatHexAddr(addr: number): string {
+  const hex = (addr >>> 0).toString(16).toUpperCase().padStart(8, '0')
+  return `0x${hex.slice(0, 4)}_${hex.slice(4)}`
+}
+
+/** 按字组装十六进制（参考 Flash HexViewer 的 readLeU16/readLeU32 + wordToHex） */
+function wordHex(bytes: number[], width: 1 | 2 | 4, bigEndian: boolean): string {
+  let val = 0
+  if (bigEndian) {
+    for (let i = 0; i < width; i++) val = (val << 8) | (bytes[i] & 0xff)
+  } else {
+    for (let i = width - 1; i >= 0; i--) val = (val << 8) | (bytes[i] & 0xff)
+  }
+  return (val >>> 0).toString(16).toUpperCase().padStart(width * 2, '0')
+}
+
+// ── 寄存器面板（CPU Core：Name / Value / Description） ──────────
 function RegistersPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
-  const [registers, setRegisters] = useState<{ name: string; value: number }[]>([])
+  const [registers, setRegisters] = useState<CoreRegister[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -134,11 +165,11 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
     if (!uid || !connected) return
     setLoading(true)
     try {
-      // 读取核心寄存器：复用 commander 的 reg 命令输出
-      // 这里通过 status + 简化：读取通用寄存器集
-      const result = await loadCoreRegisters(uid)
-      setRegisters(result)
-      setError(null)
+      const res = await zoneService.zoneCoreRegisters(uid)
+      if (res.success) {
+        setRegisters(res.registers)
+        setError(null)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取失败')
     } finally {
@@ -154,101 +185,56 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center border-b border-border px-2 py-1">
-        <span className="text-xs font-medium">核心寄存器</span>
-        <button
-          className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent"
-          onClick={() => void refresh()}
-          disabled={!connected}
-          title="刷新"
-        >
-          <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        {!connected ? (
-          <Empty text="未连接" />
-        ) : error ? (
-          <Empty text={error} isError />
-        ) : (
-          <table className="w-full text-xs">
-            <tbody>
-              {registers.map((r) => (
-                <tr key={r.name} className="border-b border-border/50 hover:bg-muted/30">
-                  <td className="px-2 py-1 font-mono text-muted-foreground">{r.name}</td>
-                  <td className="px-2 py-1 text-right font-mono">
-                    0x{r.value.toString(16).toUpperCase().padStart(8, '0')}
-                  </td>
-                </tr>
-              ))}
-              {registers.length === 0 && !loading && (
-                <tr><td className="px-2 py-4 text-center text-muted-foreground">暂无数据</td></tr>
-              )}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {loading && registers.length === 0 ? (
+        <div className="flex h-full items-center justify-center text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" />
+          读取中...
+        </div>
+      ) : !connected ? (
+        <Empty text="未连接" />
+      ) : error ? (
+        <Empty text={error} isError />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto">
+          {/* 列表头（三列网格，居左显示，底部边框 + 列间纵向边框） */}
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-[10px] font-medium text-muted-foreground">
+            <span className="px-2 py-1 text-left">Name</span>
+            <span className="border-l border-border px-2 py-1 text-left">Value</span>
+            <span className="border-l border-border px-2 py-1 text-left">Description</span>
+          </div>
+          {registers.map((r) => (
+            <div key={r.name} className="grid grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-xs hover:bg-muted/30">
+              <span className="min-w-0 truncate px-2 py-1 font-mono">{r.name}</span>
+              <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-primary">{fmtHex(r.value)}</span>
+              <span className="min-w-0 truncate border-l border-border px-2 py-1 text-muted-foreground" title={r.description}>{r.description}</span>
+            </div>
+          ))}
+          {registers.length === 0 && (
+            <div className="px-2 py-4 text-center text-muted-foreground">暂无数据</div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-/** 读取核心寄存器（通过 commander 的 reg 命令） */
-async function loadCoreRegisters(uid: string): Promise<{ name: string; value: number }[]> {
-  const { execCommand } = await import('@/services/commander.service')
-  const result = await execCommand(uid, 'reg')
-  const out = result.output || ''
-  const regs: { name: string; value: number }[] = []
-  // 解析 "r0                 = 0x00000000" 或 "r0 = 0x0" 格式
-  const lines = out.split('\n')
-  const validNames = new Set([
-    'r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9', 'r10', 'r11', 'r12',
-    'sp', 'lr', 'pc', 'xpsr', 'msp', 'psp', 'control', 'primask', 'basepri',
-    'faultmask', 'basepri_max', 'ipsr', 'splim', 'fpscr', 'apsr', 'lr',
-  ])
-  for (const line of lines) {
-    const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+|\d+)/)
-    if (!m) continue
-    const name = m[1].toLowerCase()
-    if (!validNames.has(name)) continue
-    let value: number
-    try {
-      value = m[2].startsWith('0x') ? parseInt(m[2], 16) : parseInt(m[2], 10)
-    } catch {
-      continue
-    }
-    regs.push({ name: name.toUpperCase(), value })
-  }
-  return regs
-}
-
-// ── 外设面板 ──────────────────────────────
+// ── 外设面板（外设 → 寄存器 → 位域 三级折叠：Name / Value / Description） ──
 function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const [peripherals, setPeripherals] = useState<Peripheral[]>([])
-  const [selected, setSelected] = useState<Peripheral | null>(null)
+  const [expandedPeriph, setExpandedPeriph] = useState<Set<string>>(new Set())
+  const [expandedReg, setExpandedReg] = useState<Set<string>>(new Set())
   const [regValues, setRegValues] = useState<Map<number, number>>(new Map())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const refreshPeripherals = useCallback(async () => {
-    if (!uid || !connected) return
-    setLoading(true)
-    try {
-      const res = await zoneService.zonePeripherals(uid)
-      if (res.success) {
-        setPeripherals(res.peripherals)
-        setError(null)
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '读取外设失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [uid, connected])
-
   const refreshValues = useCallback(async () => {
-    if (!uid || !connected || !selected) return
-    // 读取选中外设所有寄存器值
-    const addrs = selected.registers.map((r) => r.address)
+    if (!uid || !connected) return
+    // 收集所有寄存器的地址
+    const allRegs: PeripheralRegister[] = []
+    for (const p of peripherals) {
+      allRegs.push(...(p.registers ?? []))
+    }
+    const addrs = allRegs.map((r) => r.address)
     if (addrs.length === 0) return
     try {
       const res = await zoneService.zoneReadRegisters(uid, addrs)
@@ -260,7 +246,27 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
     } catch {
       // 忽略
     }
-  }, [uid, connected, selected])
+  }, [uid, connected, peripherals])
+
+  const refreshPeripherals = useCallback(async () => {
+    if (!uid || !connected) return
+    setLoading(true)
+    try {
+      const res = await zoneService.zonePeripherals(uid)
+      if (res.success) {
+        setPeripherals(res.peripherals)
+        setError(null)
+        // 默认展开第一个外设
+        if (res.peripherals.length > 0) {
+          setExpandedPeriph((prev) => (prev.size > 0 ? prev : new Set([res.peripherals[0].name])))
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '读取外设失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [uid, connected])
 
   useAutoRefresh(uid, connected, refreshValues)
 
@@ -269,112 +275,177 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
       void refreshPeripherals()
     } else {
       setPeripherals([])
-      setSelected(null)
       setRegValues(new Map())
+      setExpandedPeriph(new Set())
+      setExpandedReg(new Set())
     }
   }, [connected, refreshPeripherals])
 
+  // 外设/寄存器展开后读取寄存器值
   useEffect(() => {
-    if (selected) void refreshValues()
-  }, [selected, refreshValues])
+    if (connected && (expandedPeriph.size > 0 || expandedReg.size > 0)) void refreshValues()
+  }, [connected, expandedPeriph, expandedReg, refreshValues])
+
+  const togglePeriph = useCallback((name: string) => {
+    setExpandedPeriph((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }, [])
+  const toggleReg = useCallback((key: string) => {
+    setExpandedReg((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center border-b border-border px-2 py-1">
-        <span className="text-xs font-medium">外设</span>
-        <button
-          className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent"
-          onClick={() => void refreshPeripherals()}
-          disabled={!connected}
-          title="刷新外设列表"
-        >
-          <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
-      <div className="flex min-h-0 flex-1">
-        {/* 外设树（左） */}
-        <div className="w-2/5 shrink-0 overflow-auto border-r border-border">
-          {!connected ? (
-            <Empty text="未连接" />
-          ) : error ? (
-            <Empty text={error} isError />
-          ) : (
-            <div className="py-1">
-              {peripherals.map((p) => (
-                <button
-                  key={p.name}
-                  onClick={() => setSelected(p)}
-                  className={
-                    selected?.name === p.name
-                      ? 'flex w-full items-center justify-between px-2 py-1 text-left text-xs font-medium text-primary'
-                      : 'flex w-full items-center justify-between px-2 py-1 text-left text-xs text-muted-foreground hover:bg-accent'
-                  }
-                >
-                  <span className="truncate">{p.name}</span>
-                  <span className="font-mono text-[10px] text-muted-foreground/60">
-                    0x{p.base_address.toString(16).toUpperCase()}
-                  </span>
-                </button>
-              ))}
-              {peripherals.length === 0 && !loading && (
-                <div className="px-2 py-4 text-center text-xs text-muted-foreground">无外设</div>
-              )}
-            </div>
-          )}
+      {loading && peripherals.length === 0 ? (
+        <div className="flex h-full items-center justify-center text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" />
+          读取中...
         </div>
-
-        {/* 寄存器值（右） */}
-        <div className="min-w-0 flex-1 overflow-auto">
-          {!selected ? (
-            <Empty text="选择外设查看寄存器" />
-          ) : (
-            <div className="py-1">
-              {selected.registers.map((reg) => (
-                <RegisterRow key={reg.name} reg={reg} value={regValues.get(reg.address)} />
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function RegisterRow({ reg, value }: { reg: PeripheralRegister; value: number | undefined }) {
-  return (
-    <div className="border-b border-border/50 px-2 py-1">
-      <div className="flex items-center justify-between">
-        <span className="truncate text-xs font-medium">{reg.name}</span>
-        <span className="ml-2 font-mono text-xs text-primary">
-          {value !== undefined
-            ? '0x' + value.toString(16).toUpperCase().padStart((reg.size / 4 || 8), '0')
-            : '—'}
-        </span>
-      </div>
-      {reg.fields.length > 0 && (
-        <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
-          {reg.fields.map((f) => (
-            <span key={f.name} className="text-[10px] text-muted-foreground">
-              {f.name}[{f.bit_offset + (f.bit_width || 1) - 1}:{f.bit_offset}]
-              {value !== undefined && (
-                <span className="ml-1 font-mono text-foreground/80">
-                  = {((value >> f.bit_offset) & ((1 << (f.bit_width || 1)) - 1)).toString(16).toUpperCase()}
-                </span>
-              )}
-            </span>
-          ))}
+      ) : !connected ? (
+        <Empty text="未连接" />
+      ) : error ? (
+        <Empty text={error} isError />
+      ) : peripherals.length === 0 ? (
+        <Empty text="无外设" />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto">
+          {/* 列表头（与 Registers 一致：三列网格，居左显示，底部边框 + 列间纵向边框） */}
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-[10px] font-medium text-muted-foreground">
+            <span className="px-2 py-1 text-left">Name</span>
+            <span className="border-l border-border px-2 py-1 text-left">Value</span>
+            <span className="border-l border-border px-2 py-1 text-left">Description</span>
+          </div>
+          {peripherals.map((p) => {
+            const periphOpen = expandedPeriph.has(p.name)
+            return (
+              <div key={p.name}>
+                <PeriphRow
+                  open={periphOpen}
+                  onToggle={() => togglePeriph(p.name)}
+                  name={p.name}
+                  value={p.base_address !== undefined ? fmtHex(p.base_address) : ''}
+                  description={p.description}
+                />
+                {periphOpen &&
+                  (p.registers ?? []).map((reg) => {
+                    const regKey = `${p.name}:${reg.address}`
+                    const regOpen = expandedReg.has(regKey)
+                    return (
+                      <div key={regKey}>
+                        <RegisterRow
+                          open={regOpen}
+                          onToggle={() => toggleReg(regKey)}
+                          reg={reg}
+                          value={regValues.get(reg.address)}
+                        />
+                        {regOpen &&
+                          (reg.fields ?? []).map((f) => {
+                            const regVal = regValues.get(reg.address)
+                            const fv = regVal !== undefined ? decodeFieldValue(regVal, f) : undefined
+                            return (
+                              <FieldRow key={`${regKey}:${f.name}`} field={f} value={fv} />
+                            )
+                          })}
+                      </div>
+                    )
+                  })}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
   )
 }
 
-// ── 内存面板 ──────────────────────────────
-function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
+function PeriphRow({ open, onToggle, name, value, description }: {
+  open: boolean; onToggle: () => void; name: string; value: string; description?: string
+}) {
+  return (
+    <button onClick={onToggle} className="grid w-full grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-left text-xs hover:bg-muted/30">
+      <span className="flex min-w-0 items-center gap-1 px-2 py-1">
+        <ChevronDownGlyph open={open} />
+        <span className="truncate font-medium text-primary">{name}</span>
+      </span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-muted-foreground">{value}</span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-1 text-[10px] text-muted-foreground" title={description}>{description}</span>
+    </button>
+  )
+}
+
+function RegisterRow({ open, onToggle, reg, value }: {
+  open: boolean; onToggle: () => void; reg: PeripheralRegister; value: number | undefined
+}) {
+  const hasFields = (reg.fields ?? []).length > 0
+  return (
+    <button
+      onClick={onToggle}
+      disabled={!hasFields}
+      className="grid w-full grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-left text-xs hover:bg-muted/30"
+    >
+      <span className="flex min-w-0 items-center gap-1 py-1 pl-6 pr-2">
+        {hasFields ? <ChevronDownGlyph open={open} /> : <span className="size-3.5 shrink-0" />}
+        <span className="truncate font-mono text-foreground">{reg.name}</span>
+      </span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-primary">
+        {value !== undefined ? fmtHex(value) : '—'}
+      </span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-1 text-[10px] text-muted-foreground" title={reg.description}>
+        {reg.description || `0x${reg.offset.toString(16).toUpperCase()}`}
+      </span>
+    </button>
+  )
+}
+
+function FieldRow({ field, value }: { field: PeripheralField; value: number | undefined }) {
+  const bitDesc = field.bit_width === 1
+    ? `bit ${field.bit_offset}`
+    : `bits [${field.bit_offset + field.bit_width - 1}:${field.bit_offset}]`
+  // 匹配枚举值（参考 vscode-peripheral-inspector：位域值显示枚举名义）
+  const enumMatch = value !== undefined
+    ? field.values.find((v) => (v.value >>> 0) === (value >>> 0))
+    : undefined
+  const valueText = value !== undefined
+    ? (enumMatch ? `${enumMatch.name} (${fmtHex(value)})` : fmtHex(value))
+    : '—'
+  return (
+    <div className="grid w-full grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-left text-xs hover:bg-muted/30">
+      <span className="min-w-0 truncate py-0.5 pl-12 pr-2 font-mono text-muted-foreground" title={bitDesc}>
+        {field.name}
+      </span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-0.5 font-mono text-primary" title={bitDesc}>
+        {valueText}
+      </span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-0.5 text-[10px] text-muted-foreground/70" title={field.description}>
+        {field.description || bitDesc}
+      </span>
+    </div>
+  )
+}
+
+function ChevronDownGlyph({ open }: { open: boolean }) {
+  return open
+    ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+    : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+}
+
+// ── 内存面板（底部 tab 使用；导出以便被 Zone 底部 tab 复用） ──
+export function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const memoryAddress = useZoneStore((s) => s.memoryAddress)
   const setMemoryAddress = useZoneStore((s) => s.setMemoryAddress)
-  // 每行字节数（可配置显示密度，参考 vscode-memory-inspector 的 Groups per Row）
-  const [bytesPerRow, setBytesPerRow] = useState<'8' | '16' | '32'>('16')
+  // 字节宽度（1/2/4 字节分组，参考 Flash FilePanel 的 HexToolbar）
+  const [byteWidth, setByteWidth] = useState<1 | 2 | 4>(1)
+  // 端序：小端 / 大端（参考 vscode-memory-inspector 的 Group Endianness）
+  const [bigEndian, setBigEndian] = useState(false)
   const [rows, setRows] = useState<{ address: number; bytes: number[]; ascii: string }[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -387,8 +458,13 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
       if (isNaN(addr)) throw new Error('无效地址')
       const res = await zoneService.zoneReadMemory(uid, addr & ~0xf, 256)
       if (res.success) {
-        const bytes = Buffer.from(res.data_hex, 'hex')
-        const bpr = Number(bytesPerRow)
+        // 浏览器环境无 Buffer，手动解析十六进制字符串为字节数组
+        const hex = res.data_hex
+        const bytes = new Uint8Array(hex.length / 2)
+        for (let i = 0; i < bytes.length; i++) {
+          bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
+        }
+        const bpr = 16 // 每行固定 16 字节，组粒度由 groupSize 控制
         const newRows: { address: number; bytes: number[]; ascii: string }[] = []
         for (let i = 0; i < bytes.length; i += bpr) {
           const chunk = Array.from(bytes.slice(i, i + bpr))
@@ -406,7 +482,7 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
     } finally {
       setLoading(false)
     }
-  }, [uid, connected, memoryAddress, bytesPerRow])
+  }, [uid, connected, memoryAddress])
 
   useAutoRefresh(uid, connected, refresh)
 
@@ -415,60 +491,131 @@ function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolea
     if (connected) void refresh()
   }, [connected, refresh])
 
+  const readLength = rows.length * 16
+  const startAddr = rows.length > 0 ? rows[0].address : NaN
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1">
-        <span className="text-xs font-medium">内存</span>
-        <input
-          value={memoryAddress}
-          onChange={(e) => setMemoryAddress(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void refresh() }}
-          className="ml-1 w-28 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-xs"
-          placeholder="0x20000000"
-        />
-        <select
-          value={bytesPerRow}
-          onChange={(e) => setBytesPerRow(e.target.value as '8' | '16' | '32')}
-          className="h-6 rounded border border-border bg-background px-1 font-mono text-[11px] text-muted-foreground"
-          title="每行字节数"
-        >
-          <option value="8">×8</option>
-          <option value="16">×16</option>
-          <option value="32">×32</option>
-        </select>
+      {/* 工具栏（参考 Flash FilePanel：字节宽度分段 + 端序 + 地址跳转 + 右侧信息） */}
+      <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-border px-2 py-1.5">
+        {/* 字节宽度切换 */}
+        <div className="flex items-center rounded border border-border">
+          {([1, 2, 4] as const).map((w) => (
+            <button
+              key={w}
+              onClick={() => setByteWidth(w)}
+              className={cn(
+                'px-1.5 py-0.5 text-[11px] font-medium transition-colors',
+                byteWidth === w
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+              )}
+            >
+              {w}B
+            </button>
+          ))}
+        </div>
+
+        {/* 端序切换 */}
+        <div className="flex items-center rounded border border-border">
+          {[{ v: false, l: 'LE' }, { v: true, l: 'BE' }].map((o) => (
+            <button
+              key={o.l}
+              onClick={() => setBigEndian(o.v)}
+              className={cn(
+                'px-2 py-0.5 text-[11px] font-medium transition-colors',
+                bigEndian === o.v
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+              )}
+            >
+              {o.l}
+            </button>
+          ))}
+        </div>
+
+        <div className="h-5 w-px bg-border mx-0.5" />
+
+        {/* 地址跳转 — 固定 0x 前缀 */}
+        <div className="flex items-center h-6 rounded-md border border-border overflow-hidden">
+          <span className="flex items-center px-1.5 h-full text-xs font-mono text-muted-foreground bg-muted/50 border-r border-border">0x</span>
+          <input
+            value={memoryAddress}
+            onChange={(e) => setMemoryAddress(e.target.value.replace(/[^0-9a-fA-F]/g, ''))}
+            onKeyDown={(e) => { if (e.key === 'Enter') void refresh() }}
+            placeholder="20000000"
+            spellCheck={false}
+            autoComplete="off"
+            className="h-6 w-20 bg-transparent px-1.5 font-mono text-xs outline-none"
+          />
+        </div>
         <button
-          className="rounded p-1 text-muted-foreground hover:bg-accent"
+          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={() => void refresh()}
           disabled={!connected}
           title="刷新"
         >
-          <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshGlyph spinning={loading} />
         </button>
+
+        <div className="h-5 w-px bg-border mx-0.5" />
+
+        {/* 右侧信息：地址范围 */}
+        <div className="ml-auto text-[11px] text-muted-foreground">
+          {!isNaN(startAddr) ? `${formatHexAddr(startAddr)} · ${readLength} B` : '—'}
+        </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-relaxed">
+
+      {/* Hex 内容区（参考 Flash HexViewer：地址 0xXXXX_XXXX | 按字分组 Hex | ASCII） */}
+      <div className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-5">
         {!connected ? (
           <Empty text="未连接" />
         ) : error ? (
           <Empty text={error} isError />
         ) : (
-          rows.map((row) => (
-            <div key={row.address} className="flex px-2 py-0.5 hover:bg-muted/30">
-              <span className="w-24 shrink-0 text-muted-foreground">
-                {row.address.toString(16).toUpperCase().padStart(8, '0')}
-              </span>
-              <span className="flex-1">
-                {row.bytes.map((b, i) => (
-                  <span key={i} className="mr-2 last:mr-0">
-                    {b.toString(16).toUpperCase().padStart(2, '0')}
-                  </span>
-                ))}
-              </span>
-              <span className="w-24 shrink-0 text-muted-foreground/60">{row.ascii}</span>
-            </div>
-          ))
+          rows.map((row) => {
+            // 按 byteWidth 切成等宽字（16 字节一行 → 1B:16 字 / 2B:8 字 / 4B:4 字）
+            const words: string[] = []
+            for (let i = 0; i < row.bytes.length; i += byteWidth) {
+              words.push(wordHex(row.bytes.slice(i, i + byteWidth), byteWidth, bigEndian))
+            }
+            return (
+              <div key={row.address} className="flex gap-3 px-2 py-0.5 hover:bg-muted/30">
+                <span className="shrink-0 text-muted-foreground">{formatHexAddr(row.address)}</span>
+                <span className="shrink-0 flex items-center">
+                  {words.map((w, wi) => {
+                    // 8 字节中线处加更宽间距（与 Flash HexViewer 一致）
+                    const isMidpoint = wi === 8 / byteWidth
+                    return (
+                      <span key={wi} className="flex items-center">
+                        {wi > 0 && <span className={isMidpoint ? 'w-[1.5ch]' : 'w-[0.5ch]'} />}
+                        <span>{w}</span>
+                      </span>
+                    )
+                  })}
+                </span>
+                <span className="text-muted-foreground flex items-center">
+                  {row.ascii.split('').map((ch, i) => (
+                    <span key={i} className="w-[1ch] text-center">{ch}</span>
+                  ))}
+                </span>
+              </div>
+            )
+          })
         )}
       </div>
     </div>
+  )
+}
+
+function RefreshGlyph({ spinning }: { spinning: boolean }) {
+  return (
+    <svg className={`size-3.5 ${spinning ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M3 21v-5h5" />
+    </svg>
   )
 }
 

@@ -191,7 +191,7 @@ export function SourceView({ uid }: SourceViewProps) {
           </div>
         ) : lines.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
-            请在左侧 Source Files 面板选择源码文件
+           Session 未启动
           </div>
         ) : (
           lines.map((content, idx) => {

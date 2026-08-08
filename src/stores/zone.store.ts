@@ -12,9 +12,20 @@ import * as probeService from '@/services/probe.service'
 import type { ConnectMode } from '@/services/probe.service'
 import { programFlash } from '@/services/flash.service'
 import { useNotificationStore } from '@/stores/notification.store'
+import { useLogStore } from '@/stores/log.store'
+
+/** 推送 Zone 操作日志到全局日志区（来源 commander，便于全局筛选查看） */
+function zoneLog(level: 'info' | 'warning' | 'error', message: string) {
+  useLogStore.getState().addLog({
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    source: 'commander',
+  })
+}
 
 /** 右侧检查器 dock 的 section 类型 */
-export type InspectorTabId = 'disasm' | 'registers' | 'peripherals' | 'memory'
+export type InspectorTabId = 'disasm' | 'callstack' | 'callgraph' | 'registers' | 'peripherals'
 
 /** 刷新策略模式（参考 vscode-memory-inspector） */
 export type RefreshMode = 'on_stop' | 'periodic_always' | 'periodic_running' | 'off'
@@ -151,11 +162,13 @@ export const useZoneStore = create<ZoneStore>()(
         set({ busy: true, error: null })
         try {
           await zoneService.zoneHalt(uid)
+          zoneLog('info', 'Zone Halt')
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Halt failed'
           set({ busy: false, error: msg })
+          zoneLog('error', `Zone Halt failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: 'Halt failed', message: msg })
         }
       },
@@ -163,12 +176,18 @@ export const useZoneStore = create<ZoneStore>()(
       step: async (uid, mode = 'into') => {
         set({ busy: true, error: null })
         try {
+          // 目标运行中先暂停，再单步（后端 step 要求目标 halt）
+          if (get().state === 'running') {
+            await zoneService.zoneHalt(uid)
+          }
           await zoneService.zoneStep(uid, mode)
+          zoneLog('info', `Zone Step [${mode}]`)
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Step failed'
           set({ busy: false, error: msg })
+          zoneLog('error', `Zone Step failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: 'Step failed', message: msg })
         }
       },
@@ -177,11 +196,13 @@ export const useZoneStore = create<ZoneStore>()(
         set({ busy: true, error: null })
         try {
           await zoneService.zoneContinue(uid)
+          zoneLog('info', 'Zone Run (continue)')
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Continue failed'
           set({ busy: false, error: msg })
+          zoneLog('error', `Zone Run failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: 'Continue failed', message: msg })
         }
       },
@@ -190,11 +211,13 @@ export const useZoneStore = create<ZoneStore>()(
         set({ busy: true, error: null })
         try {
           await zoneService.zoneReset(uid, mode)
+          zoneLog('info', `Zone Reset [${mode}]`)
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Reset failed'
           set({ busy: false, error: msg })
+          zoneLog('error', `Zone Reset failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: 'Reset failed', message: msg })
         }
       },
@@ -213,6 +236,7 @@ export const useZoneStore = create<ZoneStore>()(
         try {
           await probeService.disconnectProbe(uid)
           set({ state: 'disconnected', pc: null, busy: false })
+          zoneLog('info', 'Zone Stop debug session')
           useNotificationStore.getState().push({
             type: 'success',
             title: 'Stop debug session',
@@ -223,6 +247,7 @@ export const useZoneStore = create<ZoneStore>()(
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Stop failed'
           set({ busy: false, error: msg })
+          zoneLog('error', `Zone Stop debug session failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '停止调试会话失败', message: msg })
         }
       },
@@ -245,11 +270,13 @@ export const useZoneStore = create<ZoneStore>()(
         )
         try {
           await zoneService.zoneSetBreakpoint(uid, file, line, !existing)
+          zoneLog('info', `Zone ${existing ? 'Remove' : 'Set'} breakpoint at ${file}:${line}`)
           await get().refreshBreakpoints(uid)
           return true
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Breakpoint failed'
           set({ error: msg })
+          zoneLog('error', `Zone breakpoint failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '断点操作失败', message: msg })
           return false
         }
@@ -312,6 +339,7 @@ export const useZoneStore = create<ZoneStore>()(
           // 3. 会话动作
           if (mode === 'download_reset') {
             await programFlash(uid, path, true, true)
+            zoneLog('info', 'Zone Download & Reset Program')
             useNotificationStore.getState().push({
               type: 'success',
               title: 'Download & Reset',

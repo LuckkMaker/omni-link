@@ -24,7 +24,7 @@ export function SourceFilesPanel({ uid }: { uid: string | null }) {
       <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-xs text-muted-foreground">
         <FolderOpen className="size-6 opacity-50" />
         <span>未加载 ELF 或 ELF 无 DWARF 源码信息</span>
-        <span className="text-[10px] opacity-70">点击工具栏「Load ELF」导入</span>
+        <span className="text-[10px] opacity-70">点击工具栏「Start Session」导入</span>
       </div>
     )
   }

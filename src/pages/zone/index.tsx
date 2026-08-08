@@ -1,14 +1,12 @@
 import { useEffect, useState, useCallback } from 'react'
-import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, ListTree, Share2, Eye } from 'lucide-react'
+import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, Eye } from 'lucide-react'
 import { Toolbar } from './components/Toolbar'
 import { SourceFilesPanel } from './components/SourceFilesPanel'
 import { FunctionsPanel } from './components/FunctionsPanel'
 import { MemoryUsagePanel } from './components/MemoryUsagePanel'
 import { SourceView } from './components/SourceView'
-import { InspectorDock } from './components/InspectorDock'
+import { InspectorDock, MemoryPanel } from './components/InspectorDock'
 import { TerminalDock } from './components/TerminalDock'
-import { CallStackPanel } from './components/CallStackPanel'
-import { CallGraphPanel } from './components/CallGraphPanel'
 import { WatchPanel } from './components/WatchPanel'
 import { ResizeHandle } from '@/components/LogConsole'
 import { useProbeStore } from '@/stores/probe.store'
@@ -19,8 +17,8 @@ import { cn } from '@/lib/utils'
 const SOURCE_PANEL_DEFAULT = 300
 const SOURCE_PANEL_MAX_RATIO = 0.3
 
-const DOCK_DEFAULT_WIDTH = 360
-const DOCK_MAX_RATIO = 0.45
+const DOCK_DEFAULT_WIDTH = 440
+const DOCK_MAX_RATIO = 0.5
 
 const TERMINAL_DEFAULT_HEIGHT = 220
 const TERMINAL_MIN_HEIGHT = 80
@@ -31,7 +29,7 @@ function ratioOf(max: number): number {
 }
 
 type LeftTab = 'source' | 'functions' | 'memory'
-type BottomTab = 'console' | 'callstack' | 'callgraph' | 'watch'
+type BottomTab = 'console' | 'watch' | 'memory'
 
 /** 左侧纵向 tab 按钮（垂直列表：图标 + 完整标签横向排列） */
 function RailTab({
@@ -241,15 +239,13 @@ export default function ZonePage() {
       >
         <div className="flex shrink-0 items-center border-b border-border">
           <BottomTab active={bottomTab === 'console'} onClick={() => setBottomTab('console')} icon={SquareTerminal} label="Console" />
-          <BottomTab active={bottomTab === 'callstack'} onClick={() => setBottomTab('callstack')} icon={ListTree} label="Call Stack" />
-          <BottomTab active={bottomTab === 'callgraph'} onClick={() => setBottomTab('callgraph')} icon={Share2} label="Call Graph" />
           <BottomTab active={bottomTab === 'watch'} onClick={() => setBottomTab('watch')} icon={Eye} label="Watch" />
+          <BottomTab active={bottomTab === 'memory'} onClick={() => setBottomTab('memory')} icon={MemoryStick} label="Memory" />
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
           {bottomTab === 'console' && <TerminalDock />}
-          {bottomTab === 'callstack' && <CallStackPanel uid={uid} />}
-          {bottomTab === 'callgraph' && <CallGraphPanel uid={uid} />}
           {bottomTab === 'watch' && <WatchPanel uid={uid} connected={isConnected} />}
+          {bottomTab === 'memory' && <MemoryPanel uid={uid} connected={isConnected} />}
         </div>
       </div>
     </div>

@@ -475,6 +475,69 @@ async def zone_registers_read(uid: str, req: ReadRegistersRequest):
     return result
 
 
+# ── CPU 核心寄存器（Registers 面板） ──────────
+
+# 核心寄存器描述（用于 Registers 面板的 Description 列）
+_CORE_REG_DESCRIPTIONS = {
+    "r0": "通用寄存器 0", "r1": "通用寄存器 1", "r2": "通用寄存器 2",
+    "r3": "通用寄存器 3", "r4": "通用寄存器 4", "r5": "通用寄存器 5",
+    "r6": "通用寄存器 6", "r7": "通用寄存器 7", "r8": "通用寄存器 8",
+    "r9": "通用寄存器 9", "r10": "通用寄存器 10", "r11": "通用寄存器 11",
+    "r12": "通用寄存器 12",
+    "sp": "栈指针 (Stack Pointer)",
+    "lr": "链接寄存器 (Link Register)",
+    "pc": "程序计数器 (Program Counter)",
+    "xpsr": "程序状态寄存器 (Program Status Register)",
+    "msp": "主栈指针 (Main Stack Pointer)",
+    "psp": "进程栈指针 (Process Stack Pointer)",
+    "control": "控制寄存器 (CONTROL)",
+    "primask": "优先级屏蔽寄存器 (PRIMASK)",
+    "basepri": "基础优先级寄存器 (BASEPRI)",
+    "faultmask": "错误屏蔽寄存器 (FAULTMASK)",
+    "ipsr": "中断程序状态寄存器 (IPSR)",
+    "fpscr": "浮点状态与控制寄存器 (FPSCR)",
+}
+
+# 读取顺序（按 ARM 惯例排列）
+_CORE_REG_ORDER = [
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12",
+    "sp", "lr", "pc", "xpsr", "msp", "psp",
+    "control", "primask", "basepri", "faultmask", "ipsr", "fpscr",
+]
+
+
+@router.get("/probes/{uid}/zone/registers/core")
+async def zone_registers_core(uid: str):
+    """读取 CPU 核心寄存器（名称/值/描述），供 Registers 面板列表展示"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    session = backend._get_session(uid)
+    if not session:
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    try:
+        core = session.target.selected_core_or_raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Target not available: {e}")
+
+    registers = []
+    errors = []
+    for name in _CORE_REG_ORDER:
+        try:
+            value = core.read_core_register(name)
+            # 浮点寄存器可能返回 float，统一转整数展示
+            if isinstance(value, float):
+                value = int(value)
+            registers.append({
+                "name": name.upper(),
+                "value": value,
+                "description": _CORE_REG_DESCRIPTIONS.get(name, ""),
+            })
+        except Exception as e:
+            errors.append({"name": name, "error": str(e)})
+
+    return {"success": True, "registers": registers, "errors": errors}
+
+
 @router.post("/probes/{uid}/zone/memory/read")
 async def zone_memory_read(uid: str, req: ReadMemoryRequest):
     """读取内存（字节）"""

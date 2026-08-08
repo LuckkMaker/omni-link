@@ -44,16 +44,19 @@ class PeripheralBackend:
     def get_peripherals(self, uid: str) -> dict:
         """外设树元数据（不含寄存器值，仅结构）
 
+        三级结构：外设(Peripheral) → 寄存器(Register) → 位域(Field)。
+        外设按名称字母序排列，寄存器按地址偏移排序。
+
         Returns:
-            {success, peripherals: [{name, base_address,
-                registers: [{name, offset, address, size, access,
+            {success, peripherals: [{name, description, base_address,
+                registers: [{name, offset, address, size, access, description,
                     fields: [{name, bit_offset, bit_width, description, values}]}]}]}
         """
         svd = self._get_svd_device(uid)
         if svd is None:
             return {"success": False, "error": "No SVD device (target not connected or no SVD)"}
 
-        peripherals = []
+        peripherals: list[dict] = []
         for p in svd.peripherals:
             regs = []
             base = p.base_address or 0
@@ -82,13 +85,22 @@ class PeripheralBackend:
                     "address": base + getattr(r, 'address_offset', 0),
                     "size": getattr(r, 'size', 32),
                     "access": getattr(r, 'access', ''),
+                    "description": getattr(r, 'description', ''),
                     "fields": fields,
                 })
+
+            # 寄存器按地址偏移排序
+            regs.sort(key=lambda r: r["offset"])
+
             peripherals.append({
                 "name": p.name,
+                "description": getattr(p, 'description', '') or '',
                 "base_address": base,
                 "registers": regs,
             })
+
+        # 外设默认按名称字母序排列
+        peripherals.sort(key=lambda p: p["name"].lower())
 
         return {"success": True, "peripherals": peripherals}
 

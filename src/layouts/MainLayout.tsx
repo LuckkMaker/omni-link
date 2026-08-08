@@ -14,6 +14,7 @@ import { NotificationContainer } from '@/components/NotificationContainer'
 import { ResizeHandle } from '@/components/LogConsole'
 import { GlobalLogArea } from '@/components/GlobalLogConsole'
 import CommanderPage from '@/pages/commander'
+import ZonePage from '@/pages/zone'
 
 /** 全局日志区最小高度（0 = 完全隐藏）与默认展开高度 */
 const LOG_MIN_HEIGHT = 0
@@ -58,6 +59,20 @@ export default function MainLayout() {
       return () => clearTimeout(timer)
     }
   }, [isOnCommander])
+
+  // Zone keep-alive：首次进入 /zone 才挂载，之后切走仅隐藏（display:none），
+  // 保留源码视图、面板展开/宽度、终端等全部内容与 UI 状态；切回时触发 resize 让布局重算。
+  const isOnZone = location.pathname === '/zone'
+  const [zoneMounted, setZoneMounted] = useState(false)
+  useEffect(() => {
+    if (isOnZone) setZoneMounted(true)
+  }, [isOnZone])
+  useEffect(() => {
+    if (isOnZone) {
+      const timer = setTimeout(() => window.dispatchEvent(new Event('resize')), 50)
+      return () => clearTimeout(timer)
+    }
+  }, [isOnZone])
 
   // ── 全局日志区：高度拖拽/折叠（双击恢复/隐藏，记录上次展开高度）──
   const [logHeight, setLogHeight] = useState(LOG_MIN_HEIGHT)
@@ -181,12 +196,18 @@ export default function MainLayout() {
         <main className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
           {/* 页面内容区（滚动） */}
           <div className="relative flex-1 min-h-0 overflow-auto">
-            {/* 非 Commander 页面：正常路由渲染 */}
-            {!isOnCommander && <Outlet />}
+            {/* 非 Commander / Zone 页面：正常路由渲染 */}
+            {!isOnCommander && !isOnZone && <Outlet />}
             {/* Commander 页面：keep-alive 常驻，切走仅隐藏 */}
             {commanderMounted && (
               <div className={cn('absolute inset-0', isOnCommander ? 'block' : 'hidden')}>
                 <CommanderPage />
+              </div>
+            )}
+            {/* Zone 页面：keep-alive 常驻，切走仅隐藏（保留内容与 UI 状态） */}
+            {zoneMounted && (
+              <div className={cn('absolute inset-0', isOnZone ? 'block' : 'hidden')}>
+                <ZonePage />
               </div>
             )}
           </div>

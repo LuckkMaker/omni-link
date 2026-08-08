@@ -28,18 +28,18 @@ export function createHighlightState(): HighlightState {
   return { blockComment: false }
 }
 
-// ── 颜色类 ──────────────────────────────
+// ── 颜色类（C/C++ 经典配色：注释绿色 / 关键字蓝色 / 字符串红色 / 其他黑色） ──
 const CLS = {
-  keyword: 'text-violet-700',
-  type: 'text-teal-700',
-  string: 'text-emerald-700',
-  char: 'text-emerald-700',
-  comment: 'italic text-slate-400',
-  number: 'text-orange-600',
-  function: 'text-blue-600',
-  preproc: 'text-sky-700',
-  register: 'text-teal-700',
-  plain: '',
+  keyword: 'font-semibold text-blue-600',
+  type: 'font-semibold text-blue-600',
+  string: 'text-red-600',
+  char: 'text-red-600',
+  comment: 'italic text-green-700',
+  number: 'text-black dark:text-gray-200',
+  function: 'text-black dark:text-gray-200',
+  preproc: 'text-black dark:text-gray-200',
+  register: 'text-black dark:text-gray-200',
+  plain: 'text-black dark:text-gray-200',
 }
 
 // ── C/C++ 关键字 ────────────────────────
@@ -117,10 +117,13 @@ export function tokenizeLine(line: string, state: HighlightState, lang: Highligh
     i = end + 2
   }
 
-  // 预处理指令（# 位于行首）
+  // 预处理指令（# 位于行首）：# + 指令名作为关键字高亮，其余内容继续走主循环（字符串/宏名等可高亮）
   if (i === 0 && /^\s*#/.test(line)) {
-    tokenizePreprocessor(line, tokens)
-    return tokens
+    const m = line.match(/^\s*(#[A-Za-z]+)/)
+    if (m) {
+      tokens.push({ text: m[1], cls: CLS.keyword })
+      i = m[0].length
+    }
   }
 
   while (i < n) {
@@ -233,19 +236,6 @@ function classifyWord(word: string, line: string, end: number, lang: HighlightLa
   while (k < line.length && line[k] === ' ') k++
   if (line[k] === '(') return CLS.function
   return CLS.plain
-}
-
-function tokenizePreprocessor(line: string, tokens: Token[]): void {
-  // 匹配开头的 # 与指令关键字（如 #include #define #ifdef）
-  const m = line.match(/^(\s*#\s*)([A-Za-z]+)/)
-  if (m) {
-    const head = m[1] + m[2]
-    if (head.length > 0) tokens.push({ text: head, cls: CLS.preproc })
-    const rest = line.slice(head.length)
-    if (rest.length > 0) tokens.push({ text: rest, cls: CLS.preproc })
-    return
-  }
-  if (line.length > 0) tokens.push({ text: line, cls: CLS.preproc })
 }
 
 /** 根据文件路径推断语言 */

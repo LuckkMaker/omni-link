@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Loader2, AlertCircle, Cpu } from 'lucide-react'
+import { Loader2, AlertCircle } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
 import type { DisasmInstruction } from '@/services/zone.service'
@@ -8,7 +8,7 @@ interface DisasmViewProps {
   uid: string | null
 }
 
-/** 反汇编视图：地址 + 指令 + 符号标注，PC 高亮 */
+/** 反汇编视图：地址 + 指令 + 符号标注，PC 高亮（与源码窗口一致的箭头 + 行高亮 + 自动滚动） */
 export function DisasmView({ uid }: DisasmViewProps) {
   const pc = useZoneStore((s) => s.pc)
   const state = useZoneStore((s) => s.state)
@@ -19,7 +19,8 @@ export function DisasmView({ uid }: DisasmViewProps) {
   const [baseAddress, setBaseAddress] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const pcRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map())
 
   const loadDisasm = useCallback(
     async (addr: number) => {
@@ -51,7 +52,6 @@ export function DisasmView({ uid }: DisasmViewProps) {
       return
     }
     const startAddr = pc ?? 0x08000000
-    // 若 PC 变化且不在当前已加载范围内，重新加载
     if (pc !== null && pc !== undefined) {
       const inRange =
         baseAddress !== null &&
@@ -68,57 +68,29 @@ export function DisasmView({ uid }: DisasmViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [elfPath, pc, state])
 
-  // PC 行滚动到可见
+  // PC 指令行滚动到容器中央（双重 rAF，布局稳定后滚动）
   useEffect(() => {
     if (pc === null || pc === undefined) return
-    const inList = instructions.some((i) => i.address === pc)
-    if (inList) {
+    const container = containerRef.current
+    const el = lineRefs.current.get(pc)
+    if (!container || !el) return
+    const cRect = container.getBoundingClientRect()
+    const eRect = el.getBoundingClientRect()
+    const lineH = eRect.height || 16
+    const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
+    requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        pcRef.current?.scrollIntoView({ block: 'center', behavior: 'auto' })
+        container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
       })
-    }
+    })
   }, [instructions, pc])
 
-  const handleUp = useCallback(async () => {
-    if (baseAddress === null) return
-    await loadDisasm(Math.max(0, baseAddress - 32))
-  }, [baseAddress, loadDisasm])
-
-  const handleDown = useCallback(async () => {
-    if (instructions.length === 0) return
-    const last = instructions[instructions.length - 1]
-    await loadDisasm(last.address + last.size)
-  }, [instructions, loadDisasm])
-
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1">
-        <Cpu className="size-3.5 text-muted-foreground" />
-        <span className="text-xs font-medium">反汇编</span>
-        {baseAddress !== null && (
-          <span className="ml-1 font-mono text-xs text-muted-foreground">
-            @ 0x{baseAddress.toString(16).toUpperCase().padStart(8, '0')}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          <button
-            className="rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
-            onClick={handleUp}
-            disabled={loading || !elfPath}
-          >
-            ↑
-          </button>
-          <button
-            className="rounded px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
-            onClick={handleDown}
-            disabled={loading || !elfPath}
-          >
-            ↓
-          </button>
-        </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-relaxed">
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div
+        ref={containerRef}
+        className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed"
+      >
         {!elfPath ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
             请先加载 ELF 文件
@@ -148,22 +120,28 @@ export function DisasmView({ uid }: DisasmViewProps) {
             return (
               <div
                 key={ins.address}
-                ref={isPc ? pcRef : undefined}
+                ref={(el) => {
+                  if (el) lineRefs.current.set(ins.address, el)
+                  else lineRefs.current.delete(ins.address)
+                }}
                 className={
                   isPc
                     ? 'flex border-b border-primary/20 bg-primary/10'
                     : 'flex border-b border-transparent hover:bg-muted/30'
                 }
               >
-                <span className="w-10 shrink-0 select-none pl-1 text-red-500">
-                  {isPc ? '▶' : ''}
-                </span>
+                {/* 断点槽/PC 标记列（与源码窗口一致） */}
+                <div className="sticky left-0 flex w-10 shrink-0 select-none items-center justify-center bg-background">
+                  <span className={isPc ? 'font-bold leading-none text-primary' : 'text-transparent'}>
+                    ▶
+                  </span>
+                </div>
                 <span className={isPc ? 'w-24 shrink-0 font-bold text-primary' : 'w-24 shrink-0 text-muted-foreground'}>
                   {ins.address.toString(16).toUpperCase().padStart(8, '0')}
                 </span>
                 <span className="w-20 shrink-0 text-muted-foreground/70">{ins.bytes}</span>
                 <span className="w-16 shrink-0">{ins.mnemonic}</span>
-                <span className="flex-1">{ins.op_str}</span>
+                <span className="flex-1 pr-4">{ins.op_str}</span>
               </div>
             )
           })
