@@ -742,6 +742,30 @@ def _is_call_instruction(core, pc: int) -> bool:
     return False
 
 
+def _call_target(core, pc: int) -> Optional[int]:
+    """取 BL/BLX 调用指令的目标地址（Thumb 模式）。
+
+    仅对立即数形式的 BL（最常见，GCC 生成子程序调用即此形式）返回目标地址；
+    BLX(寄存器)的目标是运行时值、无法静态解析，返回 None。非调用或解析失败也返回
+    None。目标用于判断被调函数是否含调试信息，以决定 Step Into 是进入还是跳过。
+    """
+    try:
+        import capstone
+        addr = pc & ~1
+        code = core.read_memory_block8(addr, 4)
+        md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
+        md.detail = True
+        for ins in md.disasm(bytes(bytearray(code)), addr):
+            if ins.mnemonic not in ('bl', 'blx'):
+                return None
+            if ins.operands and ins.operands[0].type == capstone.CS_OP_IMM:
+                return ins.operands[0].imm & ~1
+            return None  # BLX(寄存器) 目标运行时才能确定
+    except Exception:
+        return None
+    return None
+
+
 def _resume_until_halted(session, timeout: float = 8.0) -> bool:
     """resume 目标并轮询等待其暂停（命中临时断点）。返回是否成功暂停。"""
     core = session.target.selected_core_or_raise
@@ -809,9 +833,16 @@ def _read_pc(core) -> int:
 
 
 def _line_at(uid: str, pc: int):
-    """PC 的源码定位 (file, line)；无调试信息返回 None"""
+    """PC 的源码定位 (file, line)；无调试信息或行为无效行返回 None。
+
+    DWARF 行号表中 line <= 0 代表「无明确源行」的指令（编译器在优化时对跳转
+    延迟槽、分支填充、内联合并等地址会写入 line 0）。这类指令若被当作有效行
+    停驻，前端会丢失 C 源码指示（只剩汇编指示）——典型如 `if (ret != 0) { return; }`
+    中条件为假时跳过 return 的那条跳转指令。将其视为无效行后，
+    单步会继续执行到下一个真实源行才停。
+    """
     info = elf_backend.get_line_for_address(uid, pc)
-    if not info or info.get('line') is None:
+    if not info or info.get('line') is None or info['line'] <= 0:
         return None
     return (info.get('file', ''), info['line'])
 
@@ -877,6 +908,11 @@ def _step_source_into(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIM
     进入被调函数时，被调函数首条语句所在行号与调用处不同，因此会自动停在函数体内。
     当前行无调试信息时回退为指令级单步（core.step）。
     以时间预算 + 步数上限双重约束，避免在慢速调试器上表现为卡死。
+
+    关键点：只停在「有有效行号且与起始行不同」的地址。单步可能落到无 DWARF 行号
+    的地址（分支、填充、或被调库函数内部），若在此停下会使 C 源码运行指示丢失
+    （只剩汇编指示）。参照 GDB：无行号地址继续单步；调用一个无调试信息的函数时
+    按 Step Over 跨过（GDB 对无调试信息的 step 等价于 next），避免一路单步进库函数。
     """
     restore = _step_over_current_breakpoint(core)
     try:
@@ -888,8 +924,29 @@ def _step_source_into(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIM
         for _ in range(max_steps):
             if time.monotonic() > deadline:
                 break
+            pc = _read_pc(core)
+            # 调用目标无调试信息 → 按 Step Over 跨过（在返回地址处暂停）
+            if _is_call_instruction(core, pc):
+                target = _call_target(core, pc)
+                if target is not None and _line_at(uid, target) is None:
+                    ret = _call_return_address(pc)
+                    core.set_breakpoint(ret)
+                    core.bp_manager.flush()
+                    try:
+                        if not _resume_to_return_ignore_others(session, ret):
+                            _halt_core(core)
+                            return False
+                    finally:
+                        core.remove_breakpoint(ret)
+                        core.bp_manager.flush()
+                    loc = _line_at(uid, _read_pc(core))
+                    if loc is not None and loc != start:
+                        return True
+                    continue
             core.step()
-            if _line_at(uid, _read_pc(core)) != start:
+            loc = _line_at(uid, _read_pc(core))
+            # 无行号地址（分支/填充/库函数内部）不停留，继续单步到有效行
+            if loc is not None and loc != start:
                 return True
         return True
     finally:
@@ -930,11 +987,13 @@ def _step_source_over(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIM
                 finally:
                     core.remove_breakpoint(ret)
                     core.bp_manager.flush()
-                if _line_at(uid, _read_pc(core)) != start:
+                loc = _line_at(uid, _read_pc(core))
+                if loc is not None and loc != start:
                     return True
                 continue
             core.step()
-            if _line_at(uid, _read_pc(core)) != start:
+            loc = _line_at(uid, _read_pc(core))
+            if loc is not None and loc != start:
                 return True
         return True
     finally:

@@ -94,6 +94,46 @@ class ElfBackend:
             logger.exception("ELF load failed")
             return {"success": False, "error": str(e)}
 
+    @staticmethod
+    def _line_full_path(info) -> str:
+        """组合 DWARF 行区间信息为完整源码路径（/ 分隔，不带尾斜杠）。
+
+        DWARF 中 filename 常只有 basename（如 `timing.c`），真正的目录来自
+        dirname + comp_dir。不同目录下可能存在同名文件（如 omni 的两个 timing.c），
+        若只用 basename 会把它们混为一谈。此函数把三者拼成可区分的完整路径，
+        供可断点行 / 断点定位等按文件查询时精确匹配。
+        """
+        rel = (getattr(info, 'filename', '') or '').replace('\\', '/')
+        comp_dir = (getattr(info, 'comp_dir', '') or '').replace('\\', '/')
+        dirname = (getattr(info, 'dirname', '') or '').replace('\\', '/')
+        full = rel
+        if dirname and rel and not rel.startswith('/'):
+            full = dirname + '/' + rel
+        if comp_dir and full and not full.startswith('/') and not comp_dir.startswith('/'):
+            full = comp_dir + '/' + full
+        return full.rstrip('/')
+
+    @staticmethod
+    def _path_matches(full: str, target: str) -> bool:
+        """判断 DWARF 完整路径 full 是否匹配查询路径 target。
+
+        优先精确匹配（区分同名但不同目录的文件）；target 为相对路径时去掉
+        前导 `./` 再精确匹配；仅当 target 是纯 basename（无斜杠，无法区分同名
+        文件）时才退化为 basename 后缀匹配。
+        """
+        full = full.replace('\\', '/').rstrip('/')
+        target = target.replace('\\', '/').rstrip('/')
+        if not full or not target:
+            return False
+        if full == target:
+            return True
+        t = target.lstrip('./')
+        if t and full == t:
+            return True
+        if '/' not in target and full.endswith('/' + target):
+            return True
+        return False
+
     def _collect_source_files(self, decoder) -> list[str]:
         """收集所有源文件路径（去重、排序）"""
         files: set[str] = set()
@@ -101,18 +141,8 @@ class ElfBackend:
         if tree is None:
             return []
         for interval in tree:
-            info = interval.data
-            rel = getattr(info, 'filename', '') or ''
-            comp_dir = getattr(info, 'comp_dir', '') or ''
-            dirname = getattr(info, 'dirname', '') or ''
-            # 组合完整路径：comp_dir + dirname + filename
-            full = rel
-            if dirname and rel and not rel.startswith(('/', '\\')):
-                full = os.path.join(dirname, rel)
-            if comp_dir and full and not os.path.isabs(full):
-                full = os.path.join(comp_dir, full)
-            files.add(full.replace('\\', '/'))
-        return sorted(files)
+            files.add(self._line_full_path(interval.data))
+        return sorted(f for f in files if f)
 
     def get_source_files(self, uid: str) -> dict:
         """源文件列表（含磁盘大小），供左侧 Source Files 表格展示
@@ -191,7 +221,7 @@ class ElfBackend:
         line_info = decoder.get_line_for_address(address)
         result = {"address": address}
         if line_info is not None:
-            result["file"] = (line_info.filename or '').replace('\\', '/')
+            result["file"] = self._line_full_path(line_info)
             result["dirname"] = (line_info.dirname or '').replace('\\', '/')
             result["line"] = line_info.line
             result["comp_dir"] = (line_info.comp_dir or '').replace('\\', '/')
@@ -204,7 +234,7 @@ class ElfBackend:
         """源码位置 → 地址（用于源代码行设置断点）
 
         在 DWARF 行表中查找与给定文件+行匹配的区间，返回其起始地址。
-        文件路径按 basename 后缀比对，兼容相对/绝对路径差异。
+        按完整路径精确匹配，区分不同目录下的同名文件（如 omni 的两个 timing.c）。
         """
         entry = self._get(uid)
         if not entry:
@@ -214,22 +244,20 @@ class ElfBackend:
         if tree is None:
             return None
         target = file.replace('\\', '/')
-        for interval in tree:
-            info = interval.data
-            fname = (info.filename or '').replace('\\', '/')
-            if info.line == line and (
-                fname == target
-                or fname.endswith('/' + target)
-                or target.endswith('/' + fname)
-            ):
-                return interval.begin
-        return None
+        candidates = [interval for interval in tree
+                      if interval.data.line == line
+                      and self._path_matches(self._line_full_path(interval.data), target)]
+        if not candidates:
+            return None
+        # 取该行区间集合中地址最小者（该源行的第一条指令）
+        return min(c.begin for c in candidates)
 
     def get_executable_lines(self, uid: str, file: str) -> Optional[list[int]]:
         """文件在 DWARF 行表中实际有代码的行号（可打断点）
 
         仅返回存在代码地址映射的行，注释/空白/声明行不在此列。
-        文件路径按 basename 后缀比对。
+        按完整路径精确匹配，区分不同目录下的同名文件（如 omni 的两个 timing.c），
+        避免把 A 文件的行号错误地当作 B 文件的可断点行。
         """
         entry = self._get(uid)
         if not entry:
@@ -241,11 +269,9 @@ class ElfBackend:
         target = file.replace('\\', '/')
         lines: set[int] = set()
         for interval in tree:
-            info = interval.data
-            fname = (info.filename or '').replace('\\', '/')
-            if fname == target or fname.endswith('/' + target) or target.endswith('/' + fname):
-                if info.line:
-                    lines.add(info.line)
+            if self._path_matches(self._line_full_path(interval.data), target):
+                if interval.data.line:
+                    lines.add(interval.data.line)
         return sorted(lines)
 
     def get_function_for_address(self, uid: str, address: int) -> Optional[str]:
@@ -355,7 +381,7 @@ class ElfBackend:
                 result["symbol"] = sym.name
         line_info = entry["decoder"].get_line_for_address(address)
         if line_info is not None:
-            result["file"] = (line_info.filename or '').replace('\\', '/')
+            result["file"] = self._line_full_path(line_info)
             result["line"] = line_info.line
         return result
 
