@@ -8,6 +8,17 @@ interface DisasmViewProps {
   uid: string | null
 }
 
+/** 反汇编操作数语法高亮：寄存器（绿）、立即数 #0x/#n（橙），其余保持默认 */
+function highlightOperand(op: string) {
+  const upper = op.toUpperCase()
+  const parts = upper.split(/(#0X[0-9A-F]+|#\d+|\b(?:R\d{1,2}|SP|LR|PC)\b)/g).filter((p) => p !== '')
+  return parts.map((p, i) => {
+    if (/^#/.test(p)) return <span key={i} className="text-orange-500">{p}</span>
+    if (/\b(?:R\d{1,2}|SP|LR|PC)\b/.test(p)) return <span key={i} className="text-emerald-600">{p}</span>
+    return <span key={i}>{p}</span>
+  })
+}
+
 /** 反汇编视图：地址 + 指令 + 符号标注，PC 高亮（与源码窗口一致的箭头 + 行高亮 + 自动滚动） */
 export function DisasmView({ uid }: DisasmViewProps) {
   const pc = useZoneStore((s) => s.pc)
@@ -140,8 +151,8 @@ export function DisasmView({ uid }: DisasmViewProps) {
                   {ins.address.toString(16).toUpperCase().padStart(8, '0')}
                 </span>
                 <span className="w-20 shrink-0 text-muted-foreground/70">{ins.bytes.toUpperCase()}</span>
-                <span className="w-16 shrink-0">{ins.mnemonic.toUpperCase()}</span>
-                <span className="flex-1 pr-4">{ins.op_str.toUpperCase()}</span>
+                <span className="w-16 shrink-0 font-medium text-sky-600">{ins.mnemonic.toUpperCase()}</span>
+                <span className="flex-1 pr-4">{highlightOperand(ins.op_str)}</span>
               </div>
             )
           })

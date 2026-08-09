@@ -181,7 +181,7 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
     setAdded((prev) => {
       let changed = false
       const next = new Set<string>()
-      for (const name of prev) {
+      for (const name of Array.from(prev)) {
         if (storeNames.has(name)) next.add(name)
         else changed = true
       }
@@ -191,7 +191,7 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
     setChecked((prev) => {
       let changed = false
       const next = new Set<string>()
-      for (const name of prev) {
+      for (const name of Array.from(prev)) {
         if (storeNames.has(name)) { changed = true; continue }
         next.add(name)
       }

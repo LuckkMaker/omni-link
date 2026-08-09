@@ -185,7 +185,7 @@ export function InfoPanel() {
       >
         <Row label="Bank" value="Bank 1" />
         <Row label="基地址" value={target ? formatHex(target.flash_start) : (deviceInfo?.flash_base_address ?? null)} />
-        <Row label="大小" value={target ? formatSize(target.flash_size) : (deviceInfo ? formatKb(deviceInfo.flash_size) : null)} />
+        <Row label="大小" value={target ? formatSize(target.flash_size) : (deviceInfo ? fmtKb(deviceInfo.flash_size) : null)} />
       </CollapsibleSection>
 
       <FlashConfigDialog

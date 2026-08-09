@@ -60,17 +60,23 @@ export function SourceView({ uid }: SourceViewProps) {
   }, [uid, refreshBreakpoints])
 
   // 将指定行滚动到容器中央（相比 scrollIntoView 更稳定，不受 sticky 与祖先滚动影响）
-  // 使用双重 requestAnimationFrame：首帧布局稳定后，第二帧再滚动，确保行元素已渲染定位
-  const scrollToLine = useCallback((lineNo: number) => {
+  // 使用双重 requestAnimationFrame：首帧布局稳定后，第二帧再滚动，确保行元素已渲染定位。
+  // 关键：元素（lineRefs）的获取也必须在 rAF 内完成——若在同步阶段读取，React 尚未渲染
+  // 新内容，会拿到 undefined 导致不滚动（这是"停在 main 却不滚动"的根因）。
+  // onlyIfOutOfView=true 时，仅当该行中心不在可视区内才滚动居中，避免打断用户阅读。
+  const scrollToLine = useCallback((lineNo: number, onlyIfOutOfView = true) => {
     const container = containerRef.current
-    const el = lineRefs.current.get(lineNo)
-    if (!container || !el) return
-    const cRect = container.getBoundingClientRect()
-    const eRect = el.getBoundingClientRect()
-    const lineH = eRect.height || 16
-    const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
+    if (!container) return
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        const el = lineRefs.current.get(lineNo)
+        if (!container || !el) return
+        const cRect = container.getBoundingClientRect()
+        const eRect = el.getBoundingClientRect()
+        const lineH = eRect.height || 16
+        const center = eRect.top + lineH / 2
+        if (onlyIfOutOfView && center >= cRect.top && center <= cRect.bottom) return
+        const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
         container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
       })
     })
@@ -97,7 +103,7 @@ export function SourceView({ uid }: SourceViewProps) {
           if (pending && norm(pending.file) === norm(activeSourceFile)) {
             pendingPcRef.current = null
             setPcLine(pending.line)
-            requestAnimationFrame(() => scrollToLine(pending.line))
+            scrollToLine(pending.line)
           } else {
             setPcLine(null)
           }
