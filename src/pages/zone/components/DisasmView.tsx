@@ -6,6 +6,7 @@ import type { DisasmInstruction } from '@/services/zone.service'
 
 interface DisasmViewProps {
   uid: string | null
+  connected: boolean
 }
 
 /** 反汇编操作数语法高亮：寄存器（绿）、立即数 #0x/#n（橙），其余保持默认 */
@@ -20,7 +21,7 @@ function highlightOperand(op: string) {
 }
 
 /** 反汇编视图：地址 + 指令 + 符号标注，PC 高亮（与源码窗口一致的箭头 + 行高亮 + 自动滚动） */
-export function DisasmView({ uid }: DisasmViewProps) {
+export function DisasmView({ uid, connected }: DisasmViewProps) {
   const pc = useZoneStore((s) => s.pc)
   const state = useZoneStore((s) => s.state)
   const disasmAvailable = useZoneStore((s) => s.disasmAvailable)
@@ -102,7 +103,9 @@ export function DisasmView({ uid }: DisasmViewProps) {
         ref={containerRef}
         className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed"
       >
-        {!elfPath ? (
+        {!connected ? (
+          <div className="min-h-0 flex-1" />
+        ) : !elfPath ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
             请先加载 ELF 文件
           </div>

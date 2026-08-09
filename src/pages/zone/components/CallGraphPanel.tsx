@@ -6,6 +6,7 @@ import { useZoneStore } from '../store'
 
 interface CallGraphPanelProps {
   uid: string | null
+  connected: boolean
 }
 
 interface GNode {
@@ -26,7 +27,7 @@ function fmtAddr(addr: number): string {
  * 底部 Call Graph tab：调用图（树形下钻）。
  * 根节点默认取当前 PC 所在函数，可点击节点展开其直接 callees。
  */
-export function CallGraphPanel({ uid }: CallGraphPanelProps) {
+export function CallGraphPanel({ uid, connected }: CallGraphPanelProps) {
   const pc = useZoneStore((s) => s.pc)
   const elfPath = useZoneStore((s) => s.elfPath)
 
@@ -255,7 +256,9 @@ export function CallGraphPanel({ uid }: CallGraphPanelProps) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {!uid || !elfPath ? (
+        {!connected ? (
+          <div className="min-h-0 flex-1" />
+        ) : !uid || !elfPath ? (
           <Empty text="未加载 ELF" />
         ) : error ? (
           <Empty text={error} isError />

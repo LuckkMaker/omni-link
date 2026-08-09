@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { FolderOpen } from 'lucide-react'
 import { useZoneStore } from '../store'
 import { cn } from '@/lib/utils'
@@ -14,10 +15,20 @@ function formatSize(size: number | null | undefined): string {
  * 左侧源码文件窗：File / Size / Path 三栏表格布局（紧凑多列横向展示）。
  * 点击行后主窗口显示对应源码。标题栏由外层 tab 提供，本组件仅渲染表格内容。
  */
-export function SourceFilesPanel({ uid }: { uid: string | null }) {
+export function SourceFilesPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const activeSourceFile = useZoneStore((s) => s.activeSourceFile)
   const openSourceFile = useZoneStore((s) => s.openSourceFile)
+
+  // 按文件名首字母排序（忽略大小写），保证列表顺序稳定可寻
+  const sortedFiles = useMemo(
+    () => [...sourceFiles].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })),
+    [sourceFiles]
+  )
+
+  if (!connected) {
+    return <div className="h-full min-h-0" />
+  }
 
   if (sourceFiles.length === 0) {
     return (
@@ -40,7 +51,7 @@ export function SourceFilesPanel({ uid }: { uid: string | null }) {
           </tr>
         </thead>
         <tbody>
-          {sourceFiles.map((f) => {
+          {sortedFiles.map((f) => {
             const isActive = f.path === activeSourceFile
             return (
               <tr

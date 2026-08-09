@@ -11,6 +11,7 @@ import { WatchPanel } from './components/WatchPanel'
 import { ResizeHandle } from '@/components/LogConsole'
 import { useProbeStore } from '@/stores/probe.store'
 import { useZoneStore } from './store'
+import * as zoneService from '@/services/zone.service'
 import { cn } from '@/lib/utils'
 
 // ── 尺寸常量 ──────────────────────────────
@@ -121,13 +122,39 @@ export default function ZonePage() {
   // 连接断开时重置调试状态，避免残留
   const refreshStatus = useZoneStore((s) => s.refreshStatus)
   const setState = useZoneStore((s) => s.setState)
+  const setBreakpoints = useZoneStore((s) => s.setBreakpoints)
   useEffect(() => {
     if (isConnected && uid) {
       void refreshStatus(uid)
     } else {
       setState('disconnected')
+      // 断开/重连后清除所有断点，避免 UI 残留
+      useZoneStore.getState().breakpoints.length > 0 && setBreakpoints([])
     }
-  }, [isConnected, uid, refreshStatus, setState])
+  }, [isConnected, uid, refreshStatus, setState, setBreakpoints])
+
+  // 跟踪 PC 所在函数：暂停时把 PC 解析为函数名，供 Step Out 按钮禁用判断（非函数行禁用）
+  const setCurrentFunction = useZoneStore((s) => s.setCurrentFunction)
+  const zoneState = useZoneStore((s) => s.state)
+  const pc = useZoneStore((s) => s.pc)
+  useEffect(() => {
+    if (!uid || zoneState !== 'halted' || pc == null) {
+      setCurrentFunction(null)
+      return
+    }
+    let cancelled = false
+    zoneService
+      .zoneSourceLine(uid, pc)
+      .then((line) => {
+        if (!cancelled) setCurrentFunction(line?.function ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentFunction(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [uid, zoneState, pc, setCurrentFunction])
 
   // 周期轮询目标运行状态：在 on_stop 刷新模式下，Run 后目标若命中断点而暂停，
   // 状态不会自动同步到 store —— 必须主动轮询才能把 run→halt 的转变反映到 state/pc，
@@ -165,9 +192,9 @@ export default function ZonePage() {
 
   // 左侧手风琴 section 配置：可多选展开，共享显示空间，折叠项固定在底部
   const leftSections = [
-    { id: 'source' as LeftTab, label: 'Source Files', icon: FileCode2, content: <SourceFilesPanel uid={uid} /> },
-    { id: 'functions' as LeftTab, label: 'Functions', icon: FunctionSquare, content: <FunctionsPanel uid={uid} /> },
-    { id: 'memory' as LeftTab, label: 'Memory Usage', icon: MemoryStick, content: <MemoryUsagePanel uid={uid} /> },
+    { id: 'source' as LeftTab, label: 'Source Files', icon: FileCode2, content: <SourceFilesPanel uid={uid} connected={isConnected} /> },
+    { id: 'functions' as LeftTab, label: 'Functions', icon: FunctionSquare, content: <FunctionsPanel uid={uid} connected={isConnected} /> },
+    { id: 'memory' as LeftTab, label: 'Memory Usage', icon: MemoryStick, content: <MemoryUsagePanel uid={uid} connected={isConnected} /> },
   ]
   const expandedLeftSections = leftSections.filter((s) => expandedLeft.includes(s.id))
 

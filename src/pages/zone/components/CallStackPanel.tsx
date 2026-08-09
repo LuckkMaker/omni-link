@@ -5,6 +5,7 @@ import { useZoneStore } from '../store'
 
 interface CallStackPanelProps {
   uid: string | null
+  connected: boolean
 }
 
 function fmtAddr(addr: number): string {
@@ -15,7 +16,7 @@ function fmtAddr(addr: number): string {
  * 底部 Call Stack tab：调用栈回溯。
  * 需目标暂停；在 halt/step（PC 变化）时自动刷新。
  */
-export function CallStackPanel({ uid }: CallStackPanelProps) {
+export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
 
@@ -77,7 +78,9 @@ export function CallStackPanel({ uid }: CallStackPanelProps) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto font-mono text-xs">
-        {!uid ? (
+        {!connected ? (
+          <div className="min-h-0 flex-1" />
+        ) : !uid ? (
           <Empty text="未连接" />
         ) : state !== 'halted' ? (
           <Empty text="目标运行中，暂停后查看调用栈" />

@@ -332,6 +332,70 @@ class ElfBackend:
         page = funcs[offset:offset + limit]
         return {"success": True, "functions": page, "total": total}
 
+    def resolve_symbol(self, uid: str, name: str) -> Optional[dict]:
+        """按名字解析符号定义位置（供「转到定义」）。
+
+        先在符号表精确匹配；未命中时退化到大小写不敏感的子串匹配
+        （优先以 name 开头的符号）。返回
+        {name, address, size, type, file, line, function}，无源码位置时 file/line 为 None。
+        """
+        if not name:
+            return None
+        entry = self._get(uid)
+        if not entry:
+            return None
+        sd = entry.get("symbol_decoder")
+        if not sd:
+            return None
+        info = sd.symbol_dict.get(name)
+        if info is None:
+            lower = name.lower()
+            cands = [(n, i) for n, i in sd.symbol_dict.items() if lower in n.lower()]
+            if not cands:
+                return None
+            cands.sort(key=lambda x: (not x[0].lower().startswith(lower), x[0].lower()))
+            info = cands[0][1]
+        if info is None or info.address == 0:
+            return None
+        loc = self.get_line_for_address(uid, info.address)
+        return {
+            "name": info.name,
+            "address": info.address,
+            "size": info.size,
+            "type": info.type,
+            "file": loc.get("file") if loc else None,
+            "line": loc.get("line") if loc else None,
+            "function": loc.get("function") if loc else None,
+        }
+
+    def search_source(self, uid: str, query: str, limit: int = 200) -> dict:
+        """在全部源文件中做文本搜索（供「转到引用」的轻量实现）。
+
+        Returns:
+            {success, results: [{file, line, text}], truncated}
+        """
+        entry = self._get(uid)
+        if not entry:
+            return {"success": False, "error": "No ELF loaded"}
+        if not query:
+            return {"success": True, "results": []}
+        paths = self._collect_source_files(entry["decoder"])
+        results: list[dict] = []
+        lower = query.lower()
+        for p in paths:
+            try:
+                if not os.path.isfile(p):
+                    continue
+                with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                    for line_no, raw in enumerate(fh, 1):
+                        if lower in raw.lower():
+                            results.append({"file": p, "line": line_no, "text": raw.rstrip("\n")})
+                            if len(results) >= limit:
+                                return {"success": True, "results": results, "truncated": True}
+            except OSError:
+                continue
+        return {"success": True, "results": results}
+
     # ── 地址解析 / 函数区间（供调用栈与调用图使用）─────────
 
     def _function_ranges(self, uid: str) -> list[tuple]:

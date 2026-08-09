@@ -412,6 +412,20 @@ async def zone_source_executable_lines(uid: str, file: str):
     return {"success": True, "lines": lines}
 
 
+@router.get("/probes/{uid}/zone/source/symbol")
+async def zone_source_symbol(uid: str, name: str):
+    """按名字解析符号定义位置（转到定义）"""
+    result = elf_backend.resolve_symbol(uid, name)
+    return {"success": result is not None, "symbol": result}
+
+
+@router.get("/probes/{uid}/zone/source/search")
+async def zone_source_search(uid: str, query: str, limit: int = 200):
+    """在全部源文件中做文本搜索（转到引用的轻量实现）"""
+    result = elf_backend.search_source(uid, query, limit)
+    return result
+
+
 @router.get("/probes/{uid}/zone/source/content")
 async def zone_source_content(uid: str, file: str):
     """读取源文件内容（按行返回）"""

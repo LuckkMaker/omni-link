@@ -167,7 +167,7 @@ export function WatchPanel({ uid, connected }: WatchPanelProps) {
 
       <div className="min-h-0 flex-1 overflow-auto">
         {!connected ? (
-          <Empty text="未连接" />
+          <div className="min-h-0 flex-1" />
         ) : error ? (
           <Empty text={error} isError />
         ) : items.length === 0 ? (

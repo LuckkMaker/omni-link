@@ -66,9 +66,12 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const startSession = useZoneStore((s) => s.startSession)
   const stopSession = useZoneStore((s) => s.stopSession)
   const state = useZoneStore((s) => s.state)
+  const currentFunction = useZoneStore((s) => s.currentFunction)
   const clearBreakpoints = useZoneStore((s) => s.clearBreakpoints)
 
   const disabled = !connected || !uid || busy
+  // Step Out 仅在当前行位于函数内才可用（参考 Keil MDK：非 function 行禁用）
+  const stepOutDisabled = disabled || (state === 'halted' && !currentFunction)
 
   // 会话进行中 = 目标非断连态（running/halted/unknown）→ 图标红色；未启动（disconnected）→ 绿色
   const sessionActive = state !== 'disconnected'
@@ -191,14 +194,18 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         <CornerDownRight className="size-4" />
         Step Over
       </Button>
-      {/* Step Out：Step out of the current function */}
+      {/* Step Out：Step out of the current function（非函数行禁用） */}
       <Button
         variant="ghost"
         size="sm"
         onClick={() => uid && step(uid, 'out')}
-        disabled={disabled}
+        disabled={stepOutDisabled}
         className="h-8 gap-1.5"
-        title="Step out of the current function"
+        title={
+          state === 'halted' && !currentFunction
+            ? '当前行不在函数内，无法 Step Out'
+            : 'Step out of the current function'
+        }
       >
         <CornerUpRight className="size-4" />
         Step Out

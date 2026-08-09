@@ -270,6 +270,49 @@ export async function zoneExecutableLines(
   return data
 }
 
+/** 符号定义位置（转到定义） */
+export interface SourceSymbol {
+  name: string
+  address: number
+  size: number
+  type: string
+  file?: string | null
+  line?: number | null
+  function?: string | null
+}
+
+/** 按名字解析符号定义位置 */
+export async function zoneResolveSymbol(
+  uid: string,
+  name: string
+): Promise<{ success: boolean; symbol?: SourceSymbol | null }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/source/symbol`, {
+    params: { name },
+  })
+  return data
+}
+
+/** 源文件搜索结果（转到引用） */
+export interface SourceSearchHit {
+  file: string
+  line: number
+  text: string
+}
+
+/** 在全部源文件中做文本搜索 */
+export async function zoneSearchSource(
+  uid: string,
+  query: string,
+  limit = 200
+): Promise<{ success: boolean; results?: SourceSearchHit[]; truncated?: boolean; error?: string }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/source/search`, {
+    params: { query, limit },
+  })
+  return data
+}
+
 /** 反汇编 */
 export async function zoneDisasm(
   uid: string,

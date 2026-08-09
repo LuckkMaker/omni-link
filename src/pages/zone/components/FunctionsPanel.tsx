@@ -18,7 +18,7 @@ function fmtAddr(addr: number): string {
  * 左侧 Functions 窗口：函数符号表（Name / Address / Size）。
  * 支持关键字过滤（防抖），点击行跳转主源码视图到对应函数地址。
  */
-export function FunctionsPanel({ uid }: { uid: string | null }) {
+export function FunctionsPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const [filter, setFilter] = useState('')
   const [functions, setFunctions] = useState<FuncRow[]>([])
   const [total, setTotal] = useState(0)
@@ -70,6 +70,8 @@ export function FunctionsPanel({ uid }: { uid: string | null }) {
       <div className="min-h-0 flex-1 overflow-auto">
         {error ? (
           <div className="p-3 text-xs text-red-500">{error}</div>
+        ) : !connected ? (
+          <div className="min-h-0 flex-1" />
         ) : !uid ? (
           <div className="flex h-full items-center justify-center p-4 text-center text-xs text-muted-foreground">
             未加载 ELF

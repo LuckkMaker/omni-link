@@ -53,9 +53,9 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
   }, [])
 
   const sections = [
-    { id: 'disasm' as InspectorTabId, label: 'Disassembly', icon: Binary, content: <DisasmView uid={uid} /> },
-    { id: 'callstack' as InspectorTabId, label: 'Call Stack', icon: ListTree, content: <CallStackPanel uid={uid} /> },
-    { id: 'callgraph' as InspectorTabId, label: 'Call Graph', icon: Share2, content: <CallGraphPanel uid={uid} /> },
+    { id: 'disasm' as InspectorTabId, label: 'Disassembly', icon: Binary, content: <DisasmView uid={uid} connected={connected} /> },
+    { id: 'callstack' as InspectorTabId, label: 'Call Stack', icon: ListTree, content: <CallStackPanel uid={uid} connected={connected} /> },
+    { id: 'callgraph' as InspectorTabId, label: 'Call Graph', icon: Share2, content: <CallGraphPanel uid={uid} connected={connected} /> },
     { id: 'registers' as InspectorTabId, label: 'Registers', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
     { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
   ]
@@ -191,7 +191,7 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
           读取中...
         </div>
       ) : !connected ? (
-        <Empty text="未连接" />
+        <div className="min-h-0 flex-1" />
       ) : error ? (
         <Empty text={error} isError />
       ) : (
@@ -311,7 +311,7 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
           读取中...
         </div>
       ) : !connected ? (
-        <Empty text="未连接" />
+        <div className="min-h-0 flex-1" />
       ) : error ? (
         <Empty text={error} isError />
       ) : peripherals.length === 0 ? (
@@ -569,7 +569,7 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
       {/* Hex 内容区（参考 Flash HexViewer：地址 0xXXXX_XXXX | 按字分组 Hex | ASCII） */}
       <div className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-5">
         {!connected ? (
-          <Empty text="未连接" />
+          <div className="min-h-0 flex-1" />
         ) : error ? (
           <Empty text={error} isError />
         ) : (

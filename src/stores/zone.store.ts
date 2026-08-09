@@ -39,6 +39,8 @@ interface ZoneStore {
   state: 'disconnected' | 'running' | 'halted' | 'unknown'
   /** 当前 PC */
   pc: number | null
+  /** PC 所在函数名（为空表示当前不在函数内，用于禁用 Step Out） */
+  currentFunction: string | null
   /** 调试操作是否进行中 */
   busy: boolean
   /** 错误信息 */
@@ -76,10 +78,13 @@ interface ZoneStore {
   breakpoints: SourceBreakpoint[]
   /** 源码视图当前光标所在行（供 Run to Cursor / Insert-Remove Breakpoint 使用） */
   cursorLine: { file: string; line: number } | null
+  /** 「转到定义/引用」导航目标：打开该文件并滚动到指定行 */
+  navGoto: { file: string; line: number } | null
 
   // ── 操作 ──────────────────────────────────
   setState: (s: ZoneStore['state']) => void
   setPc: (pc: number | null) => void
+  setCurrentFunction: (fn: string | null) => void
   setBusy: (busy: boolean) => void
   setError: (error: string | null) => void
   setElfPath: (path: string | null) => void
@@ -93,12 +98,20 @@ interface ZoneStore {
   ensureSourceFile: (file: string) => void
   /** 关闭源码 tab；若关闭的是激活项则激活相邻 tab */
   closeSourceFile: (file: string) => void
+  /** 关闭指定文件之外的所有 tab（保留 file，其余关闭并标记为已关闭） */
+  closeOtherFiles: (file: string) => void
+  /** 关闭全部 tab */
+  closeAllFiles: () => void
   setActiveInspectorTab: (tab: InspectorTabId) => void
   setMemoryAddress: (addr: string) => void
   setRefreshMode: (mode: RefreshMode) => void
   setBreakpoints: (bps: SourceBreakpoint[]) => void
   /** 设置源码视图当前光标所在行 */
   setCursorLine: (loc: { file: string; line: number } | null) => void
+  /** 打开文件并导航到指定行（转到定义/引用） */
+  gotoSource: (file: string, line: number) => void
+  /** 清除导航目标 */
+  clearGoto: () => void
 
   /** 调试控制动作（调用后端后刷新状态） */
   halt: (uid: string) => Promise<void>
@@ -148,6 +161,7 @@ export const useZoneStore = create<ZoneStore>()(
       // ── 初始状态 ──────────────────────────
       state: 'disconnected',
       pc: null,
+      currentFunction: null,
       busy: false,
       error: null,
 
@@ -168,10 +182,12 @@ export const useZoneStore = create<ZoneStore>()(
 
       breakpoints: [],
       cursorLine: null,
+      navGoto: null,
 
       // ── 操作 ──────────────────────────────
       setState: (state) => set({ state }),
       setPc: (pc) => set({ pc }),
+      setCurrentFunction: (currentFunction) => set({ currentFunction }),
       setBusy: (busy) => set({ busy }),
       setError: (error) => set({ error }),
       setElfPath: (elfPath) => set({ elfPath }),
@@ -211,11 +227,34 @@ export const useZoneStore = create<ZoneStore>()(
             closedByUser: s.closedByUser.includes(file) ? s.closedByUser : [...s.closedByUser, file],
           }
         }),
+      closeOtherFiles: (file) =>
+        set((s) => {
+          const closed = s.openFiles.filter((f) => f !== file)
+          return {
+            openFiles: [file],
+            activeSourceFile: file,
+            // 仅保留 file 未标记关闭；其余关闭的文件加入 closedByUser，避免 PC 自动重新打开
+            closedByUser: [...s.closedByUser.filter((f) => f !== file), ...closed],
+          }
+        }),
+      closeAllFiles: () =>
+        set((s) => ({
+          openFiles: [],
+          activeSourceFile: null,
+          // 全部 tab 关闭：所有已打开文件标记为已关闭，避免 PC 自动跟随重新打开
+          closedByUser: [...s.closedByUser, ...s.openFiles],
+        })),
       setActiveInspectorTab: (activeInspectorTab) => set({ activeInspectorTab }),
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
       setRefreshMode: (refreshMode) => set({ refreshMode }),
       setBreakpoints: (breakpoints) => set({ breakpoints }),
       setCursorLine: (cursorLine) => set({ cursorLine }),
+      gotoSource: (file, line) => {
+        // 打开并激活文件（用户主动导航，暂停 PC 自动跟随），记录导航目标
+        get().openSourceFile(file)
+        set({ navGoto: { file, line } })
+      },
+      clearGoto: () => set({ navGoto: null }),
 
       halt: async (uid) => {
         set({ busy: true, error: null, followSource: true })
@@ -296,7 +335,8 @@ export const useZoneStore = create<ZoneStore>()(
         set({ busy: true, error: null })
         try {
           await probeService.disconnectProbe(uid)
-          set({ state: 'disconnected', pc: null, busy: false })
+          // 停止会话后清除全部断点，避免残留影响下次会话
+          set({ state: 'disconnected', pc: null, busy: false, breakpoints: [] })
           zoneLog('info', 'Zone Stop debug session')
           useNotificationStore.getState().push({
             type: 'success',

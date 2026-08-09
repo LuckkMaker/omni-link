@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, AlertCircle, X } from 'lucide-react'
+import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
 import { tokenizeLine, createHighlightState, detectLang } from '@/lib/source-highlight'
@@ -32,6 +32,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const closedByUser = useZoneStore((s) => s.closedByUser)
   const openSourceFile = useZoneStore((s) => s.openSourceFile)
   const closeSourceFile = useZoneStore((s) => s.closeSourceFile)
+  const closeOtherFiles = useZoneStore((s) => s.closeOtherFiles)
+  const closeAllFiles = useZoneStore((s) => s.closeAllFiles)
   const ensureSourceFile = useZoneStore((s) => s.ensureSourceFile)
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const pc = useZoneStore((s) => s.pc)
@@ -41,6 +43,9 @@ export function SourceView({ uid }: SourceViewProps) {
   const refreshBreakpoints = useZoneStore((s) => s.refreshBreakpoints)
   const cursorLine = useZoneStore((s) => s.cursorLine)
   const setCursorLine = useZoneStore((s) => s.setCursorLine)
+  const navGoto = useZoneStore((s) => s.navGoto)
+  const clearGoto = useZoneStore((s) => s.clearGoto)
+  const gotoSource = useZoneStore((s) => s.gotoSource)
   // 始终持有最新 pc；文件加载 effect 内读取它但不在依赖中，避免每次 pc 变化都重拉文件
   const pcRef = useRef(pc)
   useEffect(() => {
@@ -59,6 +64,150 @@ export function SourceView({ uid }: SourceViewProps) {
   const pendingPcRef = useRef<{ file: string; line: number } | null>(null)
   // 最近一次解析到的 PC 源码位置；供文件加载完成后滚动居中（覆盖自动跟随之外的场景）
   const pcLocationRef = useRef<{ file: string; line: number } | null>(null)
+  // 文件 tab 右键菜单（触发位置 + 目标文件）
+  const [tabMenu, setTabMenu] = useState<{ file: string; x: number; y: number } | null>(null)
+  // tab 栏横向滚动（滚轮 + 左右按钮切换）
+  const tabScrollRef = useRef<HTMLDivElement>(null)
+  const [tabOverflow, setTabOverflow] = useState({ left: false, right: false })
+
+  const updateTabOverflow = useCallback(() => {
+    const el = tabScrollRef.current
+    if (!el) return
+    setTabOverflow({
+      left: el.scrollLeft > 2,
+      right: el.scrollLeft + el.clientWidth < el.scrollWidth - 2,
+    })
+  }, [])
+
+  // tab 栏挂载/文件变化时：绑定滚轮横向滚动（阻止页面随之滚动）+ 监听 scroll 更新按钮可用态
+  useEffect(() => {
+    const el = tabScrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        el.scrollLeft += e.deltaY
+        e.preventDefault()
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('scroll', updateTabOverflow)
+    updateTabOverflow()
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('scroll', updateTabOverflow)
+    }
+  }, [openFiles, updateTabOverflow])
+
+  const scrollTabs = useCallback((dir: -1 | 1) => {
+    tabScrollRef.current?.scrollBy({ left: dir * 220, behavior: 'smooth' })
+  }, [])
+  // 代码区右键菜单（触发位置 + 光标处标识符）
+  const [codeMenu, setCodeMenu] = useState<{ x: number; y: number; word: string } | null>(null)
+  // 转到引用结果面板（触发位置 + 查询词 + 命中列表）
+  const [refsPanel, setRefsPanel] = useState<{
+    x: number
+    y: number
+    query: string
+    hits: { file: string; line: number; text: string }[]
+    loading: boolean
+  } | null>(null)
+
+  // 取点击位置处的标识符（转到定义/引用使用）。Electron 基于 Chromium，支持 caretRangeFromPoint。
+  const wordAtPoint = useCallback((clientX: number, clientY: number): string => {
+    const range = document.caretRangeFromPoint?.(clientX, clientY)
+    if (!range || range.startContainer.nodeType !== Node.TEXT_NODE) return ''
+    const text = range.startContainer.textContent ?? ''
+    let start = range.startOffset
+    while (start > 0 && /[A-Za-z0-9_]/.test(text[start - 1])) start--
+    let end = range.startOffset
+    while (end < text.length && /[A-Za-z0-9_]/.test(text[end])) end++
+    const word = text.slice(start, end)
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(word) ? word : ''
+  }, [])
+
+  // 复制当前选区文本（无选区时复制光标处单词）
+  const copySelection = useCallback(() => {
+    const sel = window.getSelection()
+    const text = sel && sel.toString().length > 0 ? sel.toString() : codeMenu?.word ?? ''
+    if (text) void navigator.clipboard?.writeText(text).catch(() => {})
+    setCodeMenu(null)
+  }, [codeMenu])
+
+  // 全选当前文件全部代码
+  const selectAll = useCallback(() => {
+    const node = containerRef.current
+    if (!node) return
+    const range = document.createRange()
+    range.selectNodeContents(node)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    setCodeMenu(null)
+  }, [])
+
+  // 把符号文件路径映射到 sourceFiles 中的已知路径（不同目录同名文件按完整路径匹配，否则退化为 basename）
+  const matchSourceFile = useCallback((file: string): string | null => {
+    const n = norm(file)
+    return (
+      sourceFiles.find((f) => {
+        const fp = norm(f.path)
+        return fp === n || fp.endsWith('/' + n) || n.endsWith('/' + fp)
+      })?.path ?? null
+    )
+  }, [sourceFiles])
+
+  // 转到定义：后端符号表解析 → 打开文件并滚动到对应行
+  const goToDefinition = useCallback(async () => {
+    if (!uid || !codeMenu?.word) return
+    setCodeMenu(null)
+    const res = await zoneService.zoneResolveSymbol(uid, codeMenu.word)
+    if (!res.success || !res.symbol || !res.symbol.file || res.symbol.line == null) {
+      useZoneStore.getState().setError?.(`未找到符号定义: ${codeMenu.word}`)
+      return
+    }
+    const target = matchSourceFile(res.symbol.file)
+    if (target) gotoSource(target, res.symbol.line)
+    else useZoneStore.getState().setError?.(`定义文件不在源码列表: ${res.symbol.file}`)
+  }, [uid, codeMenu, matchSourceFile, gotoSource])
+
+  // 转到引用：轻量全文检索，结果在面板中列出
+  const goToReferences = useCallback(async () => {
+    if (!uid || !codeMenu?.word) return
+    const query = codeMenu.word
+    const base = { x: codeMenu.x, y: codeMenu.y, query }
+    setCodeMenu(null)
+    setRefsPanel({ ...base, hits: [], loading: true })
+    try {
+      const res = await zoneService.zoneSearchSource(uid, query)
+      setRefsPanel((p) => (p && p.query === query ? { ...p, hits: res.results ?? [], loading: false } : p))
+    } catch {
+      setRefsPanel((p) => (p && p.query === query ? { ...p, hits: [], loading: false } : p))
+    }
+  }, [uid, codeMenu])
+
+  // 关闭右键菜单/引用面板：点击外部 / 按 ESC / 窗口失焦
+  useEffect(() => {
+    if (!tabMenu && !codeMenu && !refsPanel) return
+    const close = () => {
+      setTabMenu(null)
+      setCodeMenu(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setTabMenu(null)
+        setCodeMenu(null)
+        setRefsPanel(null)
+      }
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [tabMenu, codeMenu, refsPanel])
 
   const lang = detectLang(activeSourceFile)
 
@@ -128,6 +277,15 @@ export function SourceView({ uid }: SourceViewProps) {
         if (cancelled) return
         if (res.success) {
           setLines(res.lines ?? [])
+          // 「转到定义/引用」导航目标优先：打开文件后滚动到目标行并清除
+          const nav = navGoto
+          if (nav && norm(nav.file) === norm(activeSourceFile)) {
+            clearGoto()
+            setPcLine(null)
+            setCursorLine({ file: activeSourceFile, line: nav.line })
+            scrollToLine(nav.line, false)
+            return
+          }
           // 优先应用待跳转 PC 行（自动跟随切换文件时由 PC 定位 effect 设置）
           const pending = pendingPcRef.current
           if (pending && norm(pending.file) === norm(activeSourceFile)) {
@@ -285,48 +443,114 @@ export function SourceView({ uid }: SourceViewProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      {/* 源码 tab 栏：已打开文件列表，点击切换（用户手动切换后暂停 PC 自动跟随） */}
+      {/* 源码 tab 栏（参考 RTT Viewer 风格）：点击切换，tab 过多时滚轮横向滚动 + 左右按钮切换 */}
       {openFiles.length > 0 && (
-        <div className="flex shrink-0 items-stretch overflow-x-auto border-b border-border bg-muted/20">
-          {openFiles.map((f) => {
-            const active = norm(f) === norm(activeSourceFile ?? '')
-            const name = f.replace(/\\/g, '/').split('/').pop() ?? f
-            return (
-              <div
-                key={f}
-                className={cn(
-                  'flex shrink-0 items-stretch border-r border-border',
-                  active ? 'bg-background' : 'hover:bg-muted/40'
-                )}
-                title={f}
-              >
-                <button
+        <div className="flex shrink-0 items-stretch border-b border-border bg-muted/10">
+          {/* 左切换按钮 */}
+          <button
+            onClick={() => scrollTabs(-1)}
+            disabled={!tabOverflow.left}
+            className="flex w-6 shrink-0 items-center justify-center border-r border-border text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+            title="向左切换"
+          >
+            <ChevronLeft className="size-3.5" />
+          </button>
+          <div
+            ref={tabScrollRef}
+            className="flex min-w-0 flex-1 items-stretch overflow-x-auto"
+            style={{ scrollbarWidth: 'none' }}
+          >
+            {openFiles.map((f) => {
+              const active = norm(f) === norm(activeSourceFile ?? '')
+              const name = f.replace(/\\/g, '/').split('/').pop() ?? f
+              return (
+                <div
+                  key={f}
+                  className={cn(
+                    'group flex shrink-0 cursor-pointer select-none items-center gap-1 whitespace-nowrap border-b-2 px-2.5 py-1 text-xs transition-colors',
+                    active
+                      ? 'border-primary bg-primary/10 font-medium text-primary'
+                      : 'border-transparent text-muted-foreground hover:bg-muted/30 hover:text-foreground'
+                  )}
+                  title={f}
                   onClick={() => openSourceFile(f)}
-                  className={cn(
-                    'flex h-7 items-center gap-1 whitespace-nowrap px-3 text-xs',
-                    active ? 'font-medium text-primary' : 'text-muted-foreground'
-                  )}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setTabMenu({ file: f, x: e.clientX, y: e.clientY })
+                  }}
                 >
-                  {name}
-                </button>
-                <button
-                  onClick={() => closeSourceFile(f)}
-                  className={cn(
-                    'flex h-7 w-6 shrink-0 items-center justify-center text-muted-foreground/60 hover:bg-red-500/10 hover:text-red-500',
-                    active && 'text-primary/60'
-                  )}
-                  title="关闭"
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            )
-          })}
+                  <span>{name}</span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      closeSourceFile(f)
+                    }}
+                    className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/60 opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-500 group-hover:opacity-100"
+                    title="关闭"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+          {/* 右切换按钮 */}
+          <button
+            onClick={() => scrollTabs(1)}
+            disabled={!tabOverflow.right}
+            className="flex w-6 shrink-0 items-center justify-center border-l border-border text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+            title="向右切换"
+          >
+            <ChevronRight className="size-3.5" />
+          </button>
+        </div>
+      )}
+      {/* 文件 tab 右键菜单：关闭 / 关闭其他 */}
+      {tabMenu && (
+        <div
+          className="fixed z-50 min-w-[9rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
+          style={{ left: tabMenu.x, top: tabMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
+            onClick={() => {
+              closeSourceFile(tabMenu.file)
+              setTabMenu(null)
+            }}
+          >
+            关闭
+          </button>
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            onClick={() => {
+              closeOtherFiles(tabMenu.file)
+              setTabMenu(null)
+            }}
+            disabled={openFiles.length <= 1}
+          >
+            关闭其他
+          </button>
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            onClick={() => {
+              closeAllFiles()
+              setTabMenu(null)
+            }}
+            disabled={openFiles.length === 0}
+          >
+            关闭所有
+          </button>
         </div>
       )}
       <div
         ref={containerRef}
         className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed"
+        onContextMenu={(e) => {
+          e.preventDefault()
+          const word = wordAtPoint(e.clientX, e.clientY)
+          setCodeMenu({ x: e.clientX, y: e.clientY, word })
+        }}
       >
         {loading ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -368,14 +592,17 @@ export function SourceView({ uid }: SourceViewProps) {
                   if (el) lineRefs.current.set(lineNo, el)
                   else lineRefs.current.delete(lineNo)
                 }}
-                onClick={() =>
+                onClick={() => {
+                  // 正在拖选文本时不触发光标行切换
+                  const sel = window.getSelection()
+                  if (sel && sel.toString().length > 0) return
                   activeSourceFile &&
-                  setCursorLine(
-                    cursorLine && cursorLine.file === activeSourceFile && cursorLine.line === lineNo
-                      ? null
-                      : { file: activeSourceFile, line: lineNo }
-                  )
-                }
+                    setCursorLine(
+                      cursorLine && cursorLine.file === activeSourceFile && cursorLine.line === lineNo
+                        ? null
+                        : { file: activeSourceFile, line: lineNo }
+                    )
+                }}
                 className={
                   isPcLine
                     ? 'flex cursor-pointer border-b border-primary/15 bg-primary/10 select-none'
@@ -401,9 +628,18 @@ export function SourceView({ uid }: SourceViewProps) {
                       onClick={() => uid && activeSourceFile && toggleBreakpoint(uid, activeSourceFile, lineNo)}
                       disabled={!uid || !activeSourceFile || state === 'disconnected'}
                       title={hasBp ? '移除断点' : '设置断点'}
-                      className="flex w-3 shrink-0 cursor-pointer items-center justify-center text-[11px] leading-none transition-transform hover:scale-125 disabled:cursor-default disabled:opacity-40"
+                      className={cn(
+                        'flex w-3 shrink-0 cursor-pointer items-center justify-center text-[11px] leading-none transition-transform hover:scale-125 disabled:cursor-default disabled:opacity-40'
+                      )}
                     >
-                      {hasBp ? (
+                      {hasBp && isPcLine ? (
+                        // 断点与运行指示重叠：红点与运行指示在同一 12px 格内层叠，
+                        // 位置大小与普通状态一致，仅运行指示附加半透明
+                        <span className="relative block size-3">
+                          <span className="absolute inset-0 flex items-center justify-center text-red-500">●</span>
+                          <span className="absolute inset-0 flex items-center justify-center font-bold leading-none text-primary opacity-50">▶</span>
+                        </span>
+                      ) : hasBp ? (
                         <span className="text-red-500">●</span>
                       ) : isPcLine ? (
                         <span className="font-bold leading-none text-primary">▶</span>
@@ -418,8 +654,8 @@ export function SourceView({ uid }: SourceViewProps) {
                     {lineNo}
                   </span>
                 </div>
-                {/* 代码（带语法高亮） */}
-                <pre className="flex-1 whitespace-pre pr-4">
+                {/* 代码（带语法高亮，可选中文本） */}
+                <pre className="flex-1 whitespace-pre select-text pr-4">
                   {tokens.length
                     ? tokens.map((t, ti) =>
                         t.cls ? (
@@ -437,6 +673,88 @@ export function SourceView({ uid }: SourceViewProps) {
           })
         )}
       </div>
+
+      {/* 代码区右键菜单：复制 / 全选 / 转到定义 / 转到引用 */}
+      {codeMenu && (
+        <div
+          className="fixed z-50 min-w-[10rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
+          style={{ left: codeMenu.x, top: codeMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
+            onClick={copySelection}
+          >
+            复制
+          </button>
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
+            onClick={selectAll}
+          >
+            全选
+          </button>
+          <div className="-mx-1 my-1 h-px bg-muted/60" />
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            onClick={() => void goToDefinition()}
+            disabled={!codeMenu.word}
+          >
+            转到定义
+          </button>
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            onClick={() => void goToReferences()}
+            disabled={!codeMenu.word}
+          >
+            转到引用
+          </button>
+        </div>
+      )}
+
+      {/* 转到引用结果面板 */}
+      {refsPanel && (
+        <div
+          className="fixed z-50 w-96 max-w-[70vw] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
+          style={{ left: refsPanel.x, top: refsPanel.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-2 py-1 text-xs font-medium">
+            <span className="truncate">引用: {refsPanel.query}</span>
+            <button
+              className="ml-2 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setRefsPanel(null)}
+            >
+              ×
+            </button>
+          </div>
+          {refsPanel.loading ? (
+            <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" /> 搜索中...
+            </div>
+          ) : refsPanel.hits.length === 0 ? (
+            <div className="px-2 py-1 text-xs text-muted-foreground">无匹配结果</div>
+          ) : (
+            <div className="max-h-72 overflow-auto">
+              {refsPanel.hits.map((h, i) => (
+                <button
+                  key={i}
+                  className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-1 text-left text-xs hover:bg-accent"
+                  onClick={() => {
+                    const target = matchSourceFile(h.file)
+                    if (target) gotoSource(target, h.line)
+                    setRefsPanel(null)
+                  }}
+                >
+                  <span className="truncate font-mono text-[10px] text-muted-foreground">
+                    {h.file}:{h.line}
+                  </span>
+                  <span className="truncate">{h.text}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

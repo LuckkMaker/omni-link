@@ -39,6 +39,7 @@ const CLS = {
   function: 'text-black dark:text-gray-200',
   preproc: 'text-black dark:text-gray-200',
   register: 'text-black dark:text-gray-200',
+  include: 'text-red-600',
   plain: 'text-black dark:text-gray-200',
 }
 
@@ -123,6 +124,15 @@ export function tokenizeLine(line: string, state: HighlightState, lang: Highligh
     if (m) {
       tokens.push({ text: m[1], cls: CLS.keyword })
       i = m[0].length
+      // #include 的头文件路径（<xxx.h> / "xxx.h"）单独用 include 类高亮
+      if (/^#include$/i.test(m[1])) {
+        const hm = line.slice(i).match(/^(\s*)(<[^>\r\n]+>|"[^"\r\n]+")/)
+        if (hm) {
+          if (hm[1]) tokens.push({ text: hm[1], cls: CLS.plain })
+          tokens.push({ text: hm[2], cls: CLS.include })
+          i += hm[0].length
+        }
+      }
     }
   }
 
@@ -145,6 +155,12 @@ export function tokenizeLine(line: string, state: HighlightState, lang: Highligh
 
     // 行注释
     if (ch === '/' && next === '/') {
+      tokens.push({ text: line.slice(i), cls: CLS.comment })
+      break
+    }
+
+    // 汇编行注释（GAS 部分汇编器/ARM 风格用 ; 表示注释）
+    if (ch === ';' && lang === 'asm') {
       tokens.push({ text: line.slice(i), cls: CLS.comment })
       break
     }
@@ -212,7 +228,9 @@ export function tokenizeLine(line: string, state: HighlightState, lang: Highligh
 
     // 其余字符（标点 / 空白）按连续段合并
     let j = i
-    while (j < n && !isSpecialStart(line[j], line[j + 1] ?? '')) j++
+    while (j < n && !isSpecialStart(line[j], line[j + 1] ?? '', lang)) j++
+    // 防止死循环：若合并段长度为 0（当前字符即特殊字符），必须推进一位，否则 i 永不前进
+    if (j === i) j = i + 1
     tokens.push({ text: line.slice(i, j), cls: CLS.plain })
     i = j
   }
@@ -220,8 +238,11 @@ export function tokenizeLine(line: string, state: HighlightState, lang: Highligh
   return tokens
 }
 
-const isSpecialStart = (c: string, next: string): boolean =>
-  /[A-Za-z0-9_"']/.test(c) || (c === '/' && (next === '/' || next === '*'))
+// 特殊字符作为"下一段"的起始：普通字符合并段须在此处停下。
+// 注意：';' 仅当 lang === 'asm' 时作为特殊字符（汇编行注释）。在 C 语言中 ';' 是普通标点，
+// 若也作为特殊字符，普通合并段长度为 0 且无后续分支处理，会导致死循环。
+const isSpecialStart = (c: string, next: string, lang: HighlightLang): boolean =>
+  /[A-Za-z0-9_"']/.test(c) || (lang === 'asm' && c === ';') || (c === '/' && (next === '/' || next === '*'))
 
 function classifyWord(word: string, line: string, end: number, lang: HighlightLang): string {
   if (lang === 'asm') {

@@ -35,7 +35,7 @@ function UsageBar({ label, value, max, color }: { label: string; value: number; 
  * 底部 Memory Usage tab：ELF section 近似估算的 Flash/RAM 占用 + section 明细表。
  * 默认 flash 上限 2MB、ram 上限 512KB（可随实际调整），用于进度条可视化。
  */
-export function MemoryUsagePanel({ uid }: { uid: string | null }) {
+export function MemoryUsagePanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const [usage, setUsage] = useState<MemoryUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -85,6 +85,8 @@ export function MemoryUsagePanel({ uid }: { uid: string | null }) {
       <div className="min-h-0 flex-1 overflow-auto pt-2">
         {error ? (
           <div className="flex h-full items-center justify-center text-xs text-red-500">{error}</div>
+        ) : !connected ? (
+          <div className="min-h-0 flex-1" />
         ) : !uid || !usage ? (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
             {uid ? '未加载 ELF' : '未连接探针'}
