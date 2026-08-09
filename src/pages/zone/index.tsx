@@ -129,6 +129,17 @@ export default function ZonePage() {
     }
   }, [isConnected, uid, refreshStatus, setState])
 
+  // 周期轮询目标运行状态：在 on_stop 刷新模式下，Run 后目标若命中断点而暂停，
+  // 状态不会自动同步到 store —— 必须主动轮询才能把 run→halt 的转变反映到 state/pc，
+  // 否则断点命中后界面仍停留在"运行中"，表现为"没停在断点处"。
+  useEffect(() => {
+    if (!isConnected || !uid) return
+    const timer = setInterval(() => {
+      void refreshStatus(uid)
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [isConnected, uid, refreshStatus])
+
   // 左侧面板宽度拖拽（面板在分隔条左侧：向右拖动→变宽）
   const handleSourceResize = useCallback((delta: number) => {
     setSourceWidth((w) => Math.max(0, Math.min(ratioOf(SOURCE_PANEL_MAX_RATIO), w + delta)))

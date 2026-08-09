@@ -33,6 +33,11 @@ export function SourceView({ uid }: SourceViewProps) {
   const breakpoints = useZoneStore((s) => s.breakpoints)
   const toggleBreakpoint = useZoneStore((s) => s.toggleBreakpoint)
   const refreshBreakpoints = useZoneStore((s) => s.refreshBreakpoints)
+  // 始终持有最新 pc；文件加载 effect 内读取它但不在依赖中，避免每次 pc 变化都重拉文件
+  const pcRef = useRef(pc)
+  useEffect(() => {
+    pcRef.current = pc
+  }, [pc])
 
   const [lines, setLines] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
@@ -44,6 +49,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   // 切换源文件后待跳转的 PC 行（文件加载完成后应用）
   const pendingPcRef = useRef<{ file: string; line: number } | null>(null)
+  // 最近一次解析到的 PC 源码位置；供文件加载完成后滚动居中（覆盖自动跟随之外的场景）
+  const pcLocationRef = useRef<{ file: string; line: number } | null>(null)
 
   const lang = detectLang(activeSourceFile)
 
@@ -82,6 +89,17 @@ export function SourceView({ uid }: SourceViewProps) {
     })
   }, [])
 
+  // 回到容器顶部（切换到的文件不含当前 PC 时的默认定位，避免停留在上一文件的滚动偏移）
+  const scrollToTop = useCallback(() => {
+    const container = containerRef.current
+    if (!container) return
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        containerRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+      })
+    })
+  }, [])
+
   // 加载选中的源文件
   useEffect(() => {
     if (!uid || !activeSourceFile) {
@@ -98,14 +116,48 @@ export function SourceView({ uid }: SourceViewProps) {
         if (cancelled) return
         if (res.success) {
           setLines(res.lines ?? [])
-          // 若存在待跳转的 PC 行且属于当前文件，加载后应用；否则当前文件无执行位置
+          // 优先应用待跳转 PC 行（自动跟随切换文件时由 PC 定位 effect 设置）
           const pending = pendingPcRef.current
           if (pending && norm(pending.file) === norm(activeSourceFile)) {
             pendingPcRef.current = null
             setPcLine(pending.line)
             scrollToLine(pending.line)
+            return
+          }
+          // 用户手动切换到含 PC 的文件：pending 未命中，改用最近一次解析到的 PC 位置居中
+          const pcLoc = pcLocationRef.current
+          if (pcLoc && norm(pcLoc.file) === norm(activeSourceFile)) {
+            setPcLine(pcLoc.line)
+            scrollToLine(pcLoc.line)
+            return
+          }
+          // 兜底：实时查询当前 PC 在该文件对应的行（覆盖 pcLocationRef 尚未就绪的时序）
+          const curPc = pcRef.current
+          if (curPc != null && curPc !== undefined) {
+            zoneService
+              .zoneSourceLine(uid, curPc)
+              .then((line) => {
+                if (cancelled) return
+                if (
+                  line &&
+                  line.file &&
+                  (norm(line.file) === norm(activeSourceFile) ||
+                    norm(line.file).endsWith('/' + norm(activeSourceFile)))
+                ) {
+                  setPcLine(line.line ?? null)
+                  scrollToLine(line.line ?? -1)
+                } else {
+                  setPcLine(null)
+                  scrollToTop()
+                }
+              })
+              .catch(() => {
+                setPcLine(null)
+                scrollToTop()
+              })
           } else {
             setPcLine(null)
+            scrollToTop()
           }
         } else {
           setLines([])
@@ -122,7 +174,7 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => {
       cancelled = true
     }
-  }, [uid, activeSourceFile, scrollToLine])
+  }, [uid, activeSourceFile, scrollToLine, scrollToTop])
 
   // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
   useEffect(() => {
@@ -150,6 +202,8 @@ export function SourceView({ uid }: SourceViewProps) {
           }
           // 始终保证执行文件已作为 tab 打开（不覆盖用户当前选择）
           ensureSourceFile(targetFull)
+          // 记录最近一次 PC 源码位置，供文件加载完成后滚动居中
+          pcLocationRef.current = { file: targetFull, line: line.line ?? 1 }
           if (targetFull !== activeSourceFile) {
             if (followSource) {
               // 跟随：记录待跳转行并切换文件，加载完成后由上面 effect 应用

@@ -222,7 +222,7 @@ class ElfBackend:
                 or fname.endswith('/' + target)
                 or target.endswith('/' + fname)
             ):
-                return interval.start
+                return interval.begin
         return None
 
     def get_executable_lines(self, uid: str, file: str) -> Optional[list[int]]:

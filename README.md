@@ -123,6 +123,28 @@ npm run python:dev
 npm run typecheck
 ```
 
+### 端口占用与进程清理
+
+开发模式下 Python 后端固定监听 `8765` 端口。若上次后端进程未正常退出，重新启动会遇到绑定失败（`[Errno 10048]`）。使用以下命令查看并清理占用端口的进程：
+
+```powershell
+# 1. 查看 8765 端口被哪个进程占用（记录 OwningProcess 列返回的 PID）
+Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue |
+    Select-Object State, LocalAddress, LocalPort, OwningProcess
+
+# 2. 查看占用进程的详细信息（确认是否为本项目遗留的 Python 进程）
+Get-Process -Id <PID> -ErrorAction SilentlyContinue |
+    Select-Object Id, ProcessName, Path, StartTime
+
+# 3. 强制结束该进程
+Stop-Process -Id <PID> -Force
+
+# 4. 确认端口已释放（无输出即说明已释放）
+Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue
+```
+
+> 提示：`Stop-Process` 后端口可能因 `TIME_WAIT` 状态短暂占用，稍等 1-2 秒再启动即可。若存在多个遗留进程，可重复步骤 1-3 直到步骤 4 无输出。
+
 ### 打包
 
 ```bash

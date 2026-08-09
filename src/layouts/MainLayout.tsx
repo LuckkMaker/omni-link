@@ -111,7 +111,7 @@ export default function MainLayout() {
             <DeviceSwitcher />
           </div>
 
-          <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 p-3">
+          <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 p-3 select-none">
             {navItems.slice(0, 5).map((item) => (
               <NavLink
                 key={item.to}

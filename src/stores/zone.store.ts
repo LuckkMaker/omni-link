@@ -372,7 +372,7 @@ export const useZoneStore = create<ZoneStore>()(
           attach_halt: 'Attach & Halt',
         }
         const summary: Record<ZoneStartMode, string> = {
-          download_reset: '烧录完成，已停在 main 入口',
+          download_reset: '下载完成，运行到 main 入口',
           attach_running: '已附加到运行中的程序，会话已启动',
           attach_halt: '目标已暂停，会话已启动',
         }

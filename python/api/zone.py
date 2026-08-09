@@ -83,12 +83,14 @@ async def zone_halt(uid: str):
 
 @router.post("/probes/{uid}/zone/debug/step")
 async def zone_step(uid: str, req: StepRequest = StepRequest()):
-    """单步执行
+    """单步执行（源码级）
 
-    mode:
-      - into: 进入（单步执行一条指令）
-      - over: 跳过（若当前指令为 BL/BLX 调用，则执行完子程序返回后暂停；否则单步）
+    借助 ELF 的 DWARF 行号表，使 Step 以「源代码行」为粒度执行：
+      - into: 进入（执行到下一条源代码行；若调用函数则进入被调函数的第一条语句）
+      - over: 跳过（执行到下一条源代码行；当前行内的函数调用整体跨过，不进入）
       - out:  跳出（执行完当前子程序，返回到调用者后暂停）
+
+    若目标无调试信息（未加载 ELF / 无 DWARF 行表），自动回退为指令级单步。
     """
     from core.monitor_backend import monitor_backend
     mode = req.mode
@@ -106,16 +108,14 @@ async def zone_step(uid: str, req: StepRequest = StepRequest()):
         if not halt_result["success"] and halt_result.get("error"):
             raise HTTPException(status_code=400, detail=halt_result["error"])
 
-    if mode == 'into':
-        with monitor_backend.pause_during(uid):
-            result = await asyncio.to_thread(commander_backend.execute, uid, "step")
-        if not result["success"] and result.get("error"):
-            raise HTTPException(status_code=400, detail=result["error"])
-        return {"success": True, "mode": mode}
-
     core = target.selected_core_or_raise
     with monitor_backend.pause_during(uid):
-        halted = await asyncio.to_thread(_step_over_out, core, session, mode)
+        if mode == 'into':
+            halted = await asyncio.to_thread(_step_source_into, core, session, uid)
+        elif mode == 'over':
+            halted = await asyncio.to_thread(_step_source_over, core, session, uid)
+        else:  # 'out'
+            halted = await asyncio.to_thread(_step_over_out, core, session, 'out')
     return {"success": True, "mode": mode, "halted": halted}
 
 
@@ -192,6 +192,14 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
                     break
             except Exception:
                 break
+
+        # 目标已停在入口符号断点。此刻必须移除该一次性断点：
+        # 若保留，FPB 断点仍武装，后续 Step 在入口指令 fetch 阶段会立即再次触发断点，
+        # 导致 PC 永远停在入口、单步"无反应"（指令不执行、反汇编/源码窗口都不变）。
+        if halted:
+            await asyncio.to_thread(
+                commander_backend.execute, uid, f"rmbreak 0x{symbol_addr:x}"
+            )
 
     return {
         "success": True,
@@ -668,6 +676,134 @@ def _resume_until_halted(session, timeout: float = 8.0) -> bool:
     return False
 
 
+# 源码级单步安全上限（防止调试信息异常导致死循环）
+_SOURCE_STEP_LIMIT = 10000
+# 指令级单步总时间预算（秒）。CMSIS-DAP v1 (HID) 单步极慢，
+# 若某条源码行展开为大量指令，无时间预算会表现为"卡死转圈"。
+_STEP_TIME_BUDGET = 2.5
+
+
+def _read_pc(core) -> int:
+    return core.read_core_register('pc')
+
+
+def _line_at(uid: str, pc: int):
+    """PC 的源码定位 (file, line)；无调试信息返回 None"""
+    info = elf_backend.get_line_for_address(uid, pc)
+    if not info or info.get('line') is None:
+        return None
+    return (info.get('file', ''), info['line'])
+
+
+def _halt_core(core) -> None:
+    """异常时强制暂停目标，避免跨过调用超时后目标失控"""
+    try:
+        core.halt()
+        core.wait_until_halted()
+    except Exception:
+        pass
+
+
+def _call_return_lr(core) -> int:
+    """读取调用返回地址 LR 并清除 Thumb 位。
+
+    Cortex-M 的 LR 低 bit0 为 Thumb 指示、恒为 1。若直接把含 Thumb 位的
+    LR 用作断点地址，FPB 断点将永远无法命中（PC 是偶地址），resume 后会
+    一直运行直到超时——这是 Step Over / Step Out "卡死"的根因。
+    """
+    lr = core.read_core_register('lr')
+    return (lr & ~1) if lr else 0
+
+
+def _step_over_current_breakpoint(core):
+    """停在断点上时，临时移除当前 PC 的断点；返回恢复函数（无断点返回 None）。
+
+    Cortex-M 停在断点上时，当前 PC 的那条指令尚未执行。若该断点仍武装，单步/resume
+    时 FPB 会在该指令 fetch 阶段立即再次触发，导致 PC 永远停在原地、单步"无反应"。
+    参照 GDB/Keil/Ozone 的通用做法：单步前先移除当前 PC 的断点，跨过指令后再装回。
+    """
+    pc = core.read_core_register('pc') & ~1
+    if core.find_breakpoint(pc) is None:
+        return None
+    core.remove_breakpoint(pc)
+    core.bp_manager.flush()
+
+    def restore():
+        core.set_breakpoint(pc)
+        core.bp_manager.flush()
+
+    return restore
+
+
+def _step_source_into(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIMIT) -> bool:
+    """源码级 Step Into：单步执行直到 PC 进入下一条源代码行。
+
+    进入被调函数时，被调函数首条语句所在行号与调用处不同，因此会自动停在函数体内。
+    当前行无调试信息时回退为指令级单步（core.step）。
+    以时间预算 + 步数上限双重约束，避免在慢速调试器上表现为卡死。
+    """
+    restore = _step_over_current_breakpoint(core)
+    try:
+        start = _line_at(uid, _read_pc(core))
+        if start is None:
+            core.step()
+            return True
+        deadline = time.monotonic() + _STEP_TIME_BUDGET
+        for _ in range(max_steps):
+            if time.monotonic() > deadline:
+                break
+            core.step()
+            if _line_at(uid, _read_pc(core)) != start:
+                return True
+        return True
+    finally:
+        if restore is not None:
+            restore()
+
+
+def _step_source_over(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIMIT) -> bool:
+    """源码级 Step Over：执行到下一条源代码行；当前行内的函数调用整体跨过。
+
+    遇到 BL/BLX 调用时，在 LR 处设临时断点并 resume，回到调用行后继续，
+    直到 PC 进入新的源代码行。当前行无调试信息时回退为指令级 step over。
+    """
+    restore = _step_over_current_breakpoint(core)
+    try:
+        start = _line_at(uid, _read_pc(core))
+        if start is None:
+            return _step_over_out(core, session, 'over')
+        deadline = time.monotonic() + _STEP_TIME_BUDGET
+        for _ in range(max_steps):
+            if time.monotonic() > deadline:
+                break
+            pc = _read_pc(core)
+            if _is_call_instruction(core, pc):
+                lr = _call_return_lr(core)
+                if not lr:
+                    # 异常：LR 无效（尚未建立堆栈），退化为指令级单步
+                    core.step()
+                    continue
+                core.set_breakpoint(lr)
+                core.bp_manager.flush()
+                try:
+                    if not _resume_until_halted(session):
+                        _halt_core(core)
+                        return False
+                finally:
+                    core.remove_breakpoint(lr)
+                    core.bp_manager.flush()
+                if _line_at(uid, _read_pc(core)) != start:
+                    return True
+                continue
+            core.step()
+            if _line_at(uid, _read_pc(core)) != start:
+                return True
+        return True
+    finally:
+        if restore is not None:
+            restore()
+
+
 def _step_over_out(core, session, mode: str) -> bool:
     """执行 step over / step out（同步，在 to_thread 中运行）
 
@@ -675,25 +811,30 @@ def _step_over_out(core, session, mode: str) -> bool:
           否则退化为单步（step）。
     out:  在 LR 处设临时断点并 resume，执行完当前子程序后暂停。
     """
-    ret = None
-    if mode == 'over':
-        pc = core.read_core_register('pc')
-        if _is_call_instruction(core, pc):
-            ret = core.read_core_register('lr')
-        else:
+    restore = _step_over_current_breakpoint(core)
+    try:
+        ret = None
+        if mode == 'over':
+            pc = core.read_core_register('pc')
+            if _is_call_instruction(core, pc):
+                ret = _call_return_lr(core)
+            else:
+                core.step()
+                return True
+        else:  # 'out'
+            ret = _call_return_lr(core)
+
+        if not ret:
             core.step()
             return True
-    else:  # 'out'
-        ret = core.read_core_register('lr')
 
-    if ret is None:
-        core.step()
-        return True
-
-    core.set_breakpoint(ret)
-    core.bp_manager.flush()
-    try:
-        return _resume_until_halted(session)
-    finally:
-        core.remove_breakpoint(ret)
+        core.set_breakpoint(ret)
         core.bp_manager.flush()
+        try:
+            return _resume_until_halted(session)
+        finally:
+            core.remove_breakpoint(ret)
+            core.bp_manager.flush()
+    finally:
+        if restore is not None:
+            restore()

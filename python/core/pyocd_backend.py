@@ -203,7 +203,8 @@ class PyOCDBackend(BackendInterface):
 
         # 连接超时（秒）。目标未 reset 或无响应时，pyOCD 内部 DP 连接会重试 4 次 SWJ 序列，
         # 可能阻塞数秒到数十秒。用线程池 + future.result(timeout) 强制中断。
-        CONNECT_TIMEOUT = 5.0
+        # CMSIS-DAP v1 (HID) 单包仅 64B、轮询慢，完整 SWJ 序列需更长时间，故放宽到 15s。
+        CONNECT_TIMEOUT = 15.0
         # JTAG 连接失败时的降速重试频率（Hz）
         JTAG_FALLBACK_SPEED = 1000000
 
@@ -239,7 +240,8 @@ class PyOCDBackend(BackendInterface):
         last_error = None
         try:
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 future = executor.submit(_do_connect, actual_speed, interface)
                 try:
                     session = future.result(timeout=CONNECT_TIMEOUT)
@@ -280,6 +282,12 @@ class PyOCDBackend(BackendInterface):
                                 "建议：尝试使用 SWD 接口连接"
                             )
                             event_manager.log("error", f"JTAG connection failed: {last_error}")
+
+            finally:
+                # 不等待 worker 线程完成：DAPLink/USB 卡死时，
+                # shutdown(wait=True) 会在此处阻塞，进而卡死 asyncio 事件循环。
+                # wait=False 立即返回，让卡住的底层线程在后台自行结束。
+                executor.shutdown(wait=False, cancel_futures=True)
 
             if session is None:
                 # _do_connect 返回 None 表示探针未找到
