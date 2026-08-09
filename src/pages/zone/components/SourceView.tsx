@@ -64,6 +64,15 @@ export function SourceView({ uid }: SourceViewProps) {
   const pendingPcRef = useRef<{ file: string; line: number } | null>(null)
   // 最近一次解析到的 PC 源码位置；供文件加载完成后滚动居中（覆盖自动跟随之外的场景）
   const pcLocationRef = useRef<{ file: string; line: number } | null>(null)
+  // 每个已打开文件记住的滚动位置（完整路径 -> scrollTop），切换 tab 回来时恢复
+  const scrollPositionsRef = useRef<Map<string, number>>(new Map())
+  // 当前正在显示的文件（用于切换时记录旧文件的滚动位置）
+  const currentFileRef = useRef<string | null>(null)
+  // 最新 followSource 值（用户手动切换 vs PC 自动跟随判断）
+  const followSourceRef = useRef(followSource)
+  useEffect(() => {
+    followSourceRef.current = followSource
+  }, [followSource])
   // 文件 tab 右键菜单（触发位置 + 目标文件）
   const [tabMenu, setTabMenu] = useState<{ file: string; x: number; y: number } | null>(null)
   // tab 栏横向滚动（滚轮 + 左右按钮切换）
@@ -257,6 +266,26 @@ export function SourceView({ uid }: SourceViewProps) {
     })
   }, [])
 
+  // 恢复到指定滚动位置（用户手动切换回已打开文件时使用）
+  const restoreScrollPosition = useCallback((top: number) => {
+    const container = containerRef.current
+    if (!container) return
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        containerRef.current?.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
+      })
+    })
+  }, [])
+
+  // 文件切换时记录旧文件的滚动位置（需在内容更新前记录，故在 activeSourceFile 变化的副作用里读取当前容器）
+  useEffect(() => {
+    const prev = currentFileRef.current
+    if (prev && prev !== activeSourceFile && containerRef.current) {
+      scrollPositionsRef.current.set(prev, containerRef.current.scrollTop)
+    }
+    currentFileRef.current = activeSourceFile ?? null
+  }, [activeSourceFile])
+
   // 加载选中的源文件
   useEffect(() => {
     if (!uid || !activeSourceFile) {
@@ -285,6 +314,22 @@ export function SourceView({ uid }: SourceViewProps) {
             setCursorLine({ file: activeSourceFile, line: nav.line })
             scrollToLine(nav.line, false)
             return
+          }
+          // 用户手动切换回已打开并滚动过的文件：恢复记住的滚动位置（优先于 PC 定位滚动）；
+          // 自动跟随（单步/运行）切换时 followSource 为 true，不在此分支，仍滚动到 PC 行
+          if (followSourceRef.current === false) {
+            const saved = scrollPositionsRef.current.get(activeSourceFile)
+            if (saved !== undefined) {
+              // 仍标记 PC 行高亮（若 PC 在此文件），但不滚动到 PC
+              const pcLoc = pcLocationRef.current
+              if (pcLoc && norm(pcLoc.file) === norm(activeSourceFile)) {
+                setPcLine(pcLoc.line)
+              } else {
+                setPcLine(null)
+              }
+              restoreScrollPosition(saved)
+              return
+            }
           }
           // 优先应用待跳转 PC 行（自动跟随切换文件时由 PC 定位 effect 设置）
           const pending = pendingPcRef.current
@@ -388,7 +433,10 @@ export function SourceView({ uid }: SourceViewProps) {
           }
           pendingPcRef.current = null
           setPcLine(line.line ?? null)
-          scrollToLine(line.line ?? -1)
+          // 仅自动跟随（单步/运行）时滚动到 PC 行；用户手动切换回文件时保持其记住的滚动位置
+          if (followSourceRef.current) {
+            scrollToLine(line.line ?? -1)
+          }
         } else {
           setPcLine(null)
         }
