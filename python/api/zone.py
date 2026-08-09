@@ -231,6 +231,12 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
         if not result["success"] and result.get("error"):
             raise HTTPException(status_code=400, detail=result["error"])
 
+        # 复位会经 reset-catch（VECTOR_CATCH）清除目标上已武装的全部断点并禁用 FPB
+        # （见 pyocd BreakpointManager._pre/_post_reset_catch_handler）。复位暂停后需
+        # 重新武装应用层记录的断点，否则用户 Reset 后再 Run 将不会命中任何断点。
+        if mode in ('halt', 'break_symbol'):
+            await asyncio.to_thread(_rearm_breakpoints, uid)
+
         if mode == 'break_symbol':
             # 复位暂停后设置入口断点并继续运行，可靠停在 main
             await asyncio.to_thread(commander_backend.execute, uid, f"break 0x{symbol_addr:x}")
@@ -302,6 +308,22 @@ def _get_session_core(uid: str):
         return session.target.selected_core_or_raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Target not available: {e}")
+
+
+def _rearm_breakpoints(uid: str):
+    """复位后重新武装应用层记录的源码断点。
+
+    pyOCD 的 reset-catch 复位（VECTOR_CATCH）会清除目标上已武装的全部断点
+    并禁用 FPB（见 BreakpointManager._pre/_post_reset_catch_handler）。此函数
+    遍历应用层断点表 _BREAKPOINTS[uid]，把它们重新设置到目标 core 上。
+    """
+    bps = _BREAKPOINTS.get(uid, {})
+    if not bps:
+        return
+    core = _get_session_core(uid)
+    for address in bps:
+        core.set_breakpoint(address)
+    core.bp_manager.flush()
 
 
 @router.post("/probes/{uid}/zone/debug/breakpoint")
