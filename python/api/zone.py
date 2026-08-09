@@ -757,6 +757,46 @@ def _resume_until_halted(session, timeout: float = 8.0) -> bool:
     return False
 
 
+def _resume_to_return_ignore_others(session, return_addr: int, timeout: float = 8.0) -> bool:
+    """resume 目标，且只在 return_addr 处停下（忽略其他用户断点）。
+
+    Step Over / Step Out 的标准语义：把当前 C 语句（含其中的函数调用）视为一个
+    整体，运行期间命中的其他用户断点应被忽略，直到返回到 return_addr 才暂停
+    （参考 Keil / GDB `next` 行为）。若 HAL_Init 等被跨过函数的内部执行路径上
+    设置了用户断点，不忽略它们会导致 Step Over 错误地停在该断点而非调用点下一行。
+
+    实现：resume 前临时移除除 return_addr 外的所有已武装断点，命中 return_addr
+    暂停后再恢复。返回是否成功暂停。
+    """
+    core = session.target.selected_core_or_raise
+    return_addr = return_addr & ~1
+
+    # 收集当前所有已武装断点地址（含调用方刚设置的 LR 临时断点）
+    others = [a for a in core.bp_manager.get_breakpoints() if a & ~1 != return_addr]
+
+    # 临时移除其他断点，避免 resume 途中命中它们
+    for a in others:
+        core.remove_breakpoint(a)
+    core.bp_manager.flush()
+
+    try:
+        core.resume()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            try:
+                if session.target.is_halted():
+                    return True
+            except Exception:
+                return False
+        return False
+    finally:
+        # 恢复被临时移除的断点
+        for a in others:
+            core.set_breakpoint(a)
+        core.bp_manager.flush()
+
+
 # 源码级单步安全上限（防止调试信息异常导致死循环）
 _SOURCE_STEP_LIMIT = 10000
 # 指令级单步总时间预算（秒）。CMSIS-DAP v1 (HID) 单步极慢，
@@ -794,6 +834,21 @@ def _call_return_lr(core) -> int:
     """
     lr = core.read_core_register('lr')
     return (lr & ~1) if lr else 0
+
+
+def _call_return_address(pc: int) -> int:
+    """BL/BLX 调用指令的返回地址。
+
+    Cortex-M 的 BL / BLX 在执行时会把 LR 自动写为「当前指令地址 + 4」
+    （即下一条指令）。因此无论该指令是断点停驻还是单步到达，只要 BL 尚未
+    执行，其返回地址都恒等于 (pc & ~1) + 4。
+
+    注意：不能读 LR 寄存器来求返回地址。当目标停在断点处时 BL 尚未执行，
+    LR 仍是更早某次调用的陈旧返回值；用它设断点会导致 resume 后目标一路
+    自由运行，直到命中其他用户断点或超时强制暂停，而不是停在调用点下一行
+    ——这正是「Step Over 停在下一个断点而非下一行源码」的根因。
+    """
+    return (pc & ~1) + 4
 
 
 def _step_over_current_breakpoint(core):
@@ -859,19 +914,21 @@ def _step_source_over(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIM
                 break
             pc = _read_pc(core)
             if _is_call_instruction(core, pc):
-                lr = _call_return_lr(core)
-                if not lr:
-                    # 异常：LR 无效（尚未建立堆栈），退化为指令级单步
-                    core.step()
-                    continue
-                core.set_breakpoint(lr)
+                # 跨过整个函数调用：返回地址恒为 (pc & ~1)+4（BL/BLX 执行时硬件
+                # 自动把 LR 写为下一指令地址）。不能读 LR——停在断点处时 BL 尚未
+                # 执行，LR 是更早调用的陈旧返回地址，会导致 resume 后一路自由运行
+                # 直到命中其他断点/超时（Step Over 失效的根因）。
+                ret = _call_return_address(pc)
+                core.set_breakpoint(ret)
                 core.bp_manager.flush()
                 try:
-                    if not _resume_until_halted(session):
+                    # 忽略期间命中的其他用户断点，只在返回地址 ret 处暂停
+                    # （Keil/GDB Step Over 语义）
+                    if not _resume_to_return_ignore_others(session, ret):
                         _halt_core(core)
                         return False
                 finally:
-                    core.remove_breakpoint(lr)
+                    core.remove_breakpoint(ret)
                     core.bp_manager.flush()
                 if _line_at(uid, _read_pc(core)) != start:
                     return True
@@ -888,9 +945,10 @@ def _step_source_over(core, session, uid: str, max_steps: int = _SOURCE_STEP_LIM
 def _step_over_out(core, session, mode: str) -> bool:
     """执行 step over / step out（同步，在 to_thread 中运行）
 
-    over: 当前指令为 BL/BLX 时，在 LR 处设临时断点并 resume；
+    over: 当前指令为 BL/BLX 时，在返回地址 (pc & ~1)+4 处设临时断点并 resume；
           否则退化为单步（step）。
-    out:  在 LR 处设临时断点并 resume，执行完当前子程序后暂停。
+    out:  已进入函数内部，LR 即函数返回地址，在 LR 处设临时断点并 resume，
+          执行完当前子程序后暂停。
     """
     restore = _step_over_current_breakpoint(core)
     try:
@@ -898,7 +956,9 @@ def _step_over_out(core, session, mode: str) -> bool:
         if mode == 'over':
             pc = core.read_core_register('pc')
             if _is_call_instruction(core, pc):
-                ret = _call_return_lr(core)
+                # 与源码级 Step Over 一致：返回地址取 (pc & ~1)+4 而非 LR
+                # （停在断点处时 BL 未执行，LR 是陈旧返回值）
+                ret = _call_return_address(pc)
             else:
                 core.step()
                 return True
@@ -912,7 +972,8 @@ def _step_over_out(core, session, mode: str) -> bool:
         core.set_breakpoint(ret)
         core.bp_manager.flush()
         try:
-            return _resume_until_halted(session)
+            # 忽略期间命中的其他用户断点，只在返回地址 ret 处暂停
+            return _resume_to_return_ignore_others(session, ret)
         finally:
             core.remove_breakpoint(ret)
             core.bp_manager.flush()
