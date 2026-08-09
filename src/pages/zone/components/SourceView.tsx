@@ -14,6 +14,11 @@ function norm(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
+/** 判断两个源码路径（可能一个为 basename）是否指向同一文件 */
+function isSameSource(a: string, b: string): boolean {
+  return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
+}
+
 /**
  * 源码视图：行号 + 语法高亮 + PC 行高亮 + 断点。
  * start session 后 PC 变化会自动切换到对应源文件并把执行行滚动到窗口中央并高亮。
@@ -24,6 +29,7 @@ export function SourceView({ uid }: SourceViewProps) {
   const setActiveSourceFile = useZoneStore((s) => s.setActiveSourceFile)
   const openFiles = useZoneStore((s) => s.openFiles)
   const followSource = useZoneStore((s) => s.followSource)
+  const closedByUser = useZoneStore((s) => s.closedByUser)
   const openSourceFile = useZoneStore((s) => s.openSourceFile)
   const closeSourceFile = useZoneStore((s) => s.closeSourceFile)
   const ensureSourceFile = useZoneStore((s) => s.ensureSourceFile)
@@ -33,6 +39,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const breakpoints = useZoneStore((s) => s.breakpoints)
   const toggleBreakpoint = useZoneStore((s) => s.toggleBreakpoint)
   const refreshBreakpoints = useZoneStore((s) => s.refreshBreakpoints)
+  const cursorLine = useZoneStore((s) => s.cursorLine)
+  const setCursorLine = useZoneStore((s) => s.setCursorLine)
   // 始终持有最新 pc；文件加载 effect 内读取它但不在依赖中，避免每次 pc 变化都重拉文件
   const pcRef = useRef(pc)
   useEffect(() => {
@@ -107,6 +115,10 @@ export function SourceView({ uid }: SourceViewProps) {
       setPcLine(null)
       return
     }
+    // 切换文件后，若光标行不属于新文件则清空，避免跨文件误触发 Run to Cursor / 断点操作
+    if (cursorLine && !isSameSource(norm(cursorLine.file), activeSourceFile)) {
+      setCursorLine(null)
+    }
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -174,6 +186,7 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid, activeSourceFile, scrollToLine, scrollToTop])
 
   // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
@@ -205,12 +218,12 @@ export function SourceView({ uid }: SourceViewProps) {
           // 记录最近一次 PC 源码位置，供文件加载完成后滚动居中
           pcLocationRef.current = { file: targetFull, line: line.line ?? 1 }
           if (targetFull !== activeSourceFile) {
-            if (followSource) {
+            if (followSource && !closedByUser.includes(targetFull)) {
               // 跟随：记录待跳转行并切换文件，加载完成后由上面 effect 应用
               pendingPcRef.current = { file: targetFull, line: line.line ?? 1 }
               setActiveSourceFile(targetFull)
             } else {
-              // 用户手动选择了其他文件：跟随暂停，不强制切换，当前文件无执行位置
+              // 用户主动关闭了该文件或手动选择了其他文件：不强制切换，当前文件无执行位置
               setPcLine(null)
             }
             return
@@ -226,7 +239,7 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => {
       cancelled = true
     }
-  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, scrollToLine])
+  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, scrollToLine])
 
   // 加载当前文件的可执行行号（仅这些行可打断点）
   useEffect(() => {
@@ -326,9 +339,7 @@ export function SourceView({ uid }: SourceViewProps) {
             <span className="max-w-md truncate">{error}</span>
           </div>
         ) : lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-muted-foreground">
-           Session 未启动
-          </div>
+          <div className="flex h-full items-center justify-center" />
         ) : (
           lines.map((content, idx) => {
             const lineNo = idx + 1
@@ -343,6 +354,13 @@ export function SourceView({ uid }: SourceViewProps) {
             )
             // 仅可执行行可打断点；PC 行与已设断点行也始终允许操作
             const isExecutable = executableLines.has(lineNo) || isPcLine || hasBp
+            // 当前光标所在行（Run to Cursor / Insert-Remove Breakpoint 的定位标注）
+            const isCursorLine =
+              cursorLine != null &&
+              cursorLine.line === lineNo &&
+              (norm(cursorLine.file) === norm(activeSourceFile ?? '') ||
+                norm(cursorLine.file).endsWith('/' + norm(activeSourceFile ?? '')) ||
+                norm(activeSourceFile ?? '').endsWith('/' + norm(cursorLine.file)))
             return (
               <div
                 key={lineNo}
@@ -350,14 +368,34 @@ export function SourceView({ uid }: SourceViewProps) {
                   if (el) lineRefs.current.set(lineNo, el)
                   else lineRefs.current.delete(lineNo)
                 }}
+                onClick={() =>
+                  activeSourceFile &&
+                  setCursorLine(
+                    cursorLine && cursorLine.file === activeSourceFile && cursorLine.line === lineNo
+                      ? null
+                      : { file: activeSourceFile, line: lineNo }
+                  )
+                }
                 className={
                   isPcLine
-                    ? 'flex border-b border-primary/15 bg-primary/10'
-                    : 'flex border-b border-transparent hover:bg-muted/30'
+                    ? 'flex cursor-pointer border-b border-primary/15 bg-primary/10 select-none'
+                    : isCursorLine
+                      ? 'flex cursor-pointer border-b border-amber-300/40 bg-amber-400/10 select-none'
+                      : 'flex cursor-pointer border-b border-transparent hover:bg-muted/30 select-none'
                 }
+                title="点击定位光标行（Run to Cursor / 断点操作）"
               >
                 {/* 断点槽 + PC 标记 + 行号 */}
-                <div className="sticky left-0 flex w-14 shrink-0 select-none items-center gap-1 bg-background pr-1 text-right">
+                <div
+                  className={cn(
+                    'sticky left-0 flex w-14 shrink-0 select-none items-center gap-1 pr-1 text-right',
+                    isPcLine
+                      ? 'bg-primary/10'
+                      : isCursorLine
+                        ? 'bg-amber-400/10'
+                        : 'bg-background'
+                  )}
+                >
                   {isExecutable ? (
                     <button
                       onClick={() => uid && activeSourceFile && toggleBreakpoint(uid, activeSourceFile, lineNo)}

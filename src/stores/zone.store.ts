@@ -53,6 +53,8 @@ interface ZoneStore {
   openFiles: string[]
   /** 当前激活的源文件 tab */
   activeSourceFile: string | null
+  /** 用户主动关闭、不应被 PC 自动跟随重新打开的源文件 */
+  closedByUser: string[]
   /** 是否自动跟随 PC 执行文件（调试默认开启；用户手动切换 tab/文件后暂停，调试动作恢复） */
   followSource: boolean
   /** 是否支持反汇编 */
@@ -72,6 +74,8 @@ interface ZoneStore {
 
   // ── 断点 ───────────────────────────────────
   breakpoints: SourceBreakpoint[]
+  /** 源码视图当前光标所在行（供 Run to Cursor / Insert-Remove Breakpoint 使用） */
+  cursorLine: { file: string; line: number } | null
 
   // ── 操作 ──────────────────────────────────
   setState: (s: ZoneStore['state']) => void
@@ -93,6 +97,8 @@ interface ZoneStore {
   setMemoryAddress: (addr: string) => void
   setRefreshMode: (mode: RefreshMode) => void
   setBreakpoints: (bps: SourceBreakpoint[]) => void
+  /** 设置源码视图当前光标所在行 */
+  setCursorLine: (loc: { file: string; line: number } | null) => void
 
   /** 调试控制动作（调用后端后刷新状态） */
   halt: (uid: string) => Promise<void>
@@ -105,6 +111,10 @@ interface ZoneStore {
 
   /** 源码断点：切换某行断点并刷新列表 */
   toggleBreakpoint: (uid: string, file: string, line: number) => Promise<boolean>
+  /** 运行到光标所在行（临时断点 + 继续运行，命中后暂停） */
+  runToCursor: (uid: string, file: string, line: number) => Promise<void>
+  /** 清除当前目标全部断点 */
+  clearBreakpoints: (uid: string) => Promise<void>
   refreshBreakpoints: (uid: string) => Promise<void>
 
   /** ELF 加载（silent=true 时不弹全局通知，用于 startSession 内合并为一条通知） */
@@ -145,6 +155,7 @@ export const useZoneStore = create<ZoneStore>()(
       sourceFiles: [],
       openFiles: [],
       activeSourceFile: null,
+      closedByUser: [],
       followSource: true,
       disasmAvailable: false,
 
@@ -156,6 +167,7 @@ export const useZoneStore = create<ZoneStore>()(
       sessions: [],
 
       breakpoints: [],
+      cursorLine: null,
 
       // ── 操作 ──────────────────────────────
       setState: (state) => set({ state }),
@@ -172,10 +184,16 @@ export const useZoneStore = create<ZoneStore>()(
           openFiles: s.openFiles.includes(file) ? s.openFiles : [...s.openFiles, file],
           activeSourceFile: file,
           followSource: false,
+          // 用户主动重新打开，解除"已关闭"标记
+          closedByUser: s.closedByUser.filter((f) => f !== file),
         })),
       ensureSourceFile: (file) =>
         set((s) => ({
-          openFiles: s.openFiles.includes(file) ? s.openFiles : [...s.openFiles, file],
+          // 用户主动关闭过的文件不再被 PC 自动跟随重新打开（尊重用户关闭意图）
+          openFiles:
+            s.closedByUser.includes(file) || s.openFiles.includes(file)
+              ? s.openFiles
+              : [...s.openFiles, file],
         })),
       closeSourceFile: (file) =>
         set((s) => {
@@ -186,12 +204,18 @@ export const useZoneStore = create<ZoneStore>()(
             const next = openFiles[idx] ?? openFiles[idx - 1] ?? null
             activeSourceFile = next ?? null
           }
-          return { openFiles, activeSourceFile }
+          return {
+            openFiles,
+            activeSourceFile,
+            // 记录用户主动关闭的文件，避免 PC 定位时被重新打开
+            closedByUser: s.closedByUser.includes(file) ? s.closedByUser : [...s.closedByUser, file],
+          }
         }),
       setActiveInspectorTab: (activeInspectorTab) => set({ activeInspectorTab }),
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
       setRefreshMode: (refreshMode) => set({ refreshMode }),
       setBreakpoints: (breakpoints) => set({ breakpoints }),
+      setCursorLine: (cursorLine) => set({ cursorLine }),
 
       halt: async (uid) => {
         set({ busy: true, error: null, followSource: true })
@@ -319,6 +343,35 @@ export const useZoneStore = create<ZoneStore>()(
         }
       },
 
+      runToCursor: async (uid, file, line) => {
+        set({ busy: true, error: null, followSource: true })
+        try {
+          await zoneService.zoneRunToCursor(uid, file, line)
+          zoneLog('info', `Zone Run to Cursor ${file}:${line}`)
+          const st = await zoneService.zoneStatus(uid)
+          set({ state: st.state, pc: st.pc, busy: false })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Run to cursor failed'
+          set({ busy: false, error: msg })
+          zoneLog('error', `Zone Run to Cursor failed: ${msg}`)
+          useNotificationStore.getState().push({ type: 'error', title: 'Run to Cursor 失败', message: msg })
+        }
+      },
+
+      clearBreakpoints: async (uid) => {
+        set({ busy: true, error: null })
+        try {
+          const res = await zoneService.zoneClearBreakpoints(uid)
+          zoneLog('info', `Zone Remove ${res.cleared ?? 0} breakpoint(s)`)
+          set({ breakpoints: [], busy: false })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Clear breakpoints failed'
+          set({ busy: false, error: msg })
+          zoneLog('error', `Zone Clear breakpoints failed: ${msg}`)
+          useNotificationStore.getState().push({ type: 'error', title: '清除断点失败', message: msg })
+        }
+      },
+
       loadElf: async (uid, path, silent = false) => {
         set({ busy: true, error: null })
         try {
@@ -372,7 +425,7 @@ export const useZoneStore = create<ZoneStore>()(
           attach_halt: 'Attach & Halt',
         }
         const summary: Record<ZoneStartMode, string> = {
-          download_reset: '下载完成，运行到 main 入口',
+          download_reset: '下载完成，目标已复位并暂停',
           attach_running: '已附加到运行中的程序，会话已启动',
           attach_halt: '目标已暂停，会话已启动',
         }
@@ -384,16 +437,11 @@ export const useZoneStore = create<ZoneStore>()(
           if (!ok) return false
           // 3. 会话动作
           if (mode === 'download_reset') {
-            // 烧录（不自动运行），随后复位并停在 main 入口（"{" 处），便于直接开始逐行调试
-            // reset break_symbol：解析 main 符号 → 设断点 → continue 停留到入口
+            // 烧录（不自动运行）。复位并暂停在 Reset_Handler（参考 Keil：会话启动不自动运行到 main，
+            // 由用户手动 [Run]/[Step] 进入程序，避免在调试起点上强加 breakpoint 副作用）
             await programFlash(uid, path, true, false)
             zoneLog('info', 'Zone Download & Reset Program')
-            await get().reset(uid, 'break_symbol')
-            // 复位后校验目标是否真正暂停在入口；若未暂停（断点未命中/超时），
-            // 抛出错误走统一失败提示，避免误报"已停在 main 入口"
-            if (get().state !== 'halted') {
-              throw new Error('目标未在 main 入口暂停（断点未命中或超时）')
-            }
+            await get().reset(uid, 'halt')
           } else if (mode === 'attach_halt') {
             await get().halt(uid)
           }

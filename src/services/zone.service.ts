@@ -186,6 +186,24 @@ export async function zoneListBreakpoints(uid: string): Promise<{ success: boole
   return data
 }
 
+/** 清除全部断点 */
+export async function zoneClearBreakpoints(uid: string): Promise<{ success: boolean; cleared: number }> {
+  const client = await api()
+  const { data } = await client.delete(`/api/probes/${uid}/zone/debug/breakpoints`)
+  return data
+}
+
+/** 运行到光标所在行（临时断点 + 继续运行，命中后暂停） */
+export async function zoneRunToCursor(
+  uid: string,
+  file: string,
+  line: number
+): Promise<{ success: boolean; address: number; halted: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/debug/run-to-cursor`, { file, line })
+  return data
+}
+
 /** 查询调试状态 */
 export async function zoneStatus(uid: string): Promise<ZoneDebugStatus> {
   const client = await api()

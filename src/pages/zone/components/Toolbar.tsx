@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { Pause, Play, RotateCcw, Power, ChevronDown, Download, Crosshair, ArrowDown, CornerDownRight, CornerUpRight, Square } from 'lucide-react'
+import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, Trash2, Pause } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -56,7 +56,7 @@ function SplitButton({
   )
 }
 
-/** Zone 顶部调试控制工具栏（参考 Flash 顶部菜单栏风格） */
+/** Zone 顶部调试控制工具栏（参考 Keil MDK Debug 布局） */
 export function Toolbar({ uid, connected }: ToolbarProps) {
   const busy = useZoneStore((s) => s.busy)
   const halt = useZoneStore((s) => s.halt)
@@ -66,6 +66,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const startSession = useZoneStore((s) => s.startSession)
   const stopSession = useZoneStore((s) => s.stopSession)
   const state = useZoneStore((s) => s.state)
+  const clearBreakpoints = useZoneStore((s) => s.clearBreakpoints)
 
   const disabled = !connected || !uid || busy
 
@@ -127,50 +128,95 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
 
       <Separator orientation="vertical" className="mx-1 h-5" />
 
-      <Button variant="ghost" size="sm" onClick={() => uid && halt(uid)} disabled={disabled} className="h-8 gap-1.5" title="Halt">
-        <Pause className="size-4" />
-        Halt
+      {/* Reset：复位 CPU（复位并暂停） */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && reset(uid, 'halt')}
+        disabled={disabled}
+        className="h-8 gap-1.5"
+        title="Reset the CPU"
+      >
+        <RotateCcw className="size-4" />
+        Reset
       </Button>
-      <Button variant="ghost" size="sm" onClick={() => uid && continueRun(uid)} disabled={disabled} className="h-8 gap-1.5" title="Run">
+      {/* Run：Start code execution */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && continueRun(uid)}
+        disabled={disabled}
+        className="h-8 gap-1.5"
+        title="Start code execution"
+      >
         <Play className="size-4" />
         Run
       </Button>
-
-      <SplitButton
-        main={
-          <>
-            <RotateCcw className="size-4" />
-            Reset
-          </>
-        }
+      {/* Stop：Stop code execution */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && halt(uid)}
         disabled={disabled}
-        onClick={() => uid && reset(uid, 'break_symbol')}
+        className="h-8 gap-1.5"
+        title="Stop code execution"
       >
-        <DropdownMenuItem onClick={() => uid && reset(uid, 'break_symbol')}>
-          <Crosshair className="size-3.5 mr-1.5" />
-          Reset &amp; Break at Symbol
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => uid && reset(uid, 'halt')}>
-          <Pause className="size-3.5 mr-1.5" />
-          Reset &amp; Halt
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => uid && reset(uid, 'run')}>
-          <Play className="size-3.5 mr-1.5" />
-          Reset &amp; Run
-        </DropdownMenuItem>
-      </SplitButton>
-
-      <Button variant="ghost" size="sm" onClick={() => uid && step(uid, 'over')} disabled={disabled} className="h-8 gap-1.5" title="Step Over">
-        <CornerDownRight className="size-4" />
-        Step Over
+        <Square className="size-4" />
+        Stop
       </Button>
-      <Button variant="ghost" size="sm" onClick={() => uid && step(uid, 'into')} disabled={disabled} className="h-8 gap-1.5" title="Step Into">
+
+      <Separator orientation="vertical" className="mx-1 h-5" />
+
+      {/* Step Into：Step one line */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && step(uid, 'into')}
+        disabled={disabled}
+        className="h-8 gap-1.5"
+        title="Step one line"
+      >
         <ArrowDown className="size-4" />
         Step Into
       </Button>
-      <Button variant="ghost" size="sm" onClick={() => uid && step(uid, 'out')} disabled={disabled} className="h-8 gap-1.5" title="Step Out">
+      {/* Step Over：Step over the current line */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && step(uid, 'over')}
+        disabled={disabled}
+        className="h-8 gap-1.5"
+        title="Step over the current line"
+      >
+        <CornerDownRight className="size-4" />
+        Step Over
+      </Button>
+      {/* Step Out：Step out of the current function */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && step(uid, 'out')}
+        disabled={disabled}
+        className="h-8 gap-1.5"
+        title="Step out of the current function"
+      >
         <CornerUpRight className="size-4" />
         Step Out
+      </Button>
+
+      <Separator orientation="vertical" className="mx-1 h-5" />
+
+      {/* Kill All Breakpoints：清除当前目标全部断点 */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => uid && clearBreakpoints(uid)}
+        disabled={disabled}
+        className="h-8 gap-1.5"
+        title="Kill all breakpoints in current target"
+      >
+        <Trash2 className="size-4" />
+        Kill All Breakpoints
       </Button>
     </div>
   )

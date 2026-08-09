@@ -63,6 +63,12 @@ class BreakpointRequest(BaseModel):
     set: bool = True
 
 
+class RunToCursorRequest(BaseModel):
+    """运行到光标所在行：file + line 定位目标地址"""
+    file: str
+    line: int
+
+
 class SessionSaveRequest(BaseModel):
     name: str
     data: dict
@@ -128,6 +134,59 @@ async def zone_continue(uid: str):
     if not result["success"] and result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])
     return {"success": True}
+
+
+@router.post("/probes/{uid}/zone/debug/run-to-cursor")
+async def zone_run_to_cursor(uid: str, req: RunToCursorRequest):
+    """运行到光标所在行（Keil「Run to Cursor Line」）
+
+    在目标行地址设置临时断点并 resume，命中后暂停并移除临时断点。
+    若目标行已有永久断点则复用，不重复添加。
+    """
+    from core.monitor_backend import monitor_backend
+    if not elf_backend.is_loaded(uid):
+        raise HTTPException(status_code=400, detail="No ELF loaded")
+    address = elf_backend.get_address_for_line(uid, req.file, req.line)
+    if address is None:
+        raise HTTPException(status_code=400, detail=f"No code at {req.file}:{req.line}")
+
+    session = backend._get_session(uid)
+    if not session:
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    core = session.target.selected_core_or_raise
+
+    # 目标未暂停时先自动中断，再从暂停态发起（与 step 语义一致）
+    if not session.target.is_halted():
+        with monitor_backend.pause_during(uid):
+            result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
+        if not result["success"] and result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+
+    # 已停在目标行：无需运行
+    if (core.read_core_register('pc') & ~1) == address:
+        return {"success": True, "address": address, "halted": True}
+
+    # 移除当前 PC 的武装断点，避免 resume 后立即再次触发；结束后恢复
+    restore = _step_over_current_breakpoint(core)
+    # 目标行已有永久断点则复用；否则设置临时断点
+    is_temp = core.find_breakpoint(address) is None
+    try:
+        with monitor_backend.pause_during(uid):
+            if is_temp:
+                core.set_breakpoint(address)
+                core.bp_manager.flush()
+            halted = await asyncio.to_thread(_resume_until_halted, session)
+    finally:
+        if is_temp:
+            try:
+                with monitor_backend.pause_during(uid):
+                    core.remove_breakpoint(address)
+                    core.bp_manager.flush()
+            except Exception:
+                pass
+        if restore is not None:
+            restore()
+    return {"success": True, "address": address, "halted": halted}
 
 
 @router.post("/probes/{uid}/zone/debug/reset")
