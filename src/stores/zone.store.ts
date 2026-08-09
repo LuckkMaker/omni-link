@@ -14,13 +14,13 @@ import { programFlash } from '@/services/flash.service'
 import { useNotificationStore } from '@/stores/notification.store'
 import { useLogStore } from '@/stores/log.store'
 
-/** 推送 Zone 操作日志到全局日志区（来源 commander，便于全局筛选查看） */
+/** 推送 Zone 操作日志到全局日志区（来源 zone，便于全局按来源筛选查看） */
 function zoneLog(level: 'info' | 'warning' | 'error', message: string) {
   useLogStore.getState().addLog({
     timestamp: new Date().toISOString(),
     level,
     message,
-    source: 'commander',
+    source: 'zone',
   })
 }
 
@@ -49,8 +49,12 @@ interface ZoneStore {
   elfPath: string | null
   /** ELF 源文件列表 */
   sourceFiles: SourceFileInfo[]
-  /** 当前选中的源文件 */
+  /** 已打开的源码 tab（完整路径列表） */
+  openFiles: string[]
+  /** 当前激活的源文件 tab */
   activeSourceFile: string | null
+  /** 是否自动跟随 PC 执行文件（调试默认开启；用户手动切换 tab/文件后暂停，调试动作恢复） */
+  followSource: boolean
   /** 是否支持反汇编 */
   disasmAvailable: boolean
 
@@ -78,6 +82,13 @@ interface ZoneStore {
   setSourceFiles: (files: SourceFileInfo[]) => void
   setActiveSourceFile: (file: string | null) => void
   setDisasmAvailable: (v: boolean) => void
+  setFollowSource: (v: boolean) => void
+  /** 用户打开文件/tab：加入 openFiles 并激活，同时暂停自动跟随（用户主动选择） */
+  openSourceFile: (file: string) => void
+  /** 自动跟随：仅保证文件已打开（不改变激活项与跟随状态） */
+  ensureSourceFile: (file: string) => void
+  /** 关闭源码 tab；若关闭的是激活项则激活相邻 tab */
+  closeSourceFile: (file: string) => void
   setActiveInspectorTab: (tab: InspectorTabId) => void
   setMemoryAddress: (addr: string) => void
   setRefreshMode: (mode: RefreshMode) => void
@@ -96,8 +107,8 @@ interface ZoneStore {
   toggleBreakpoint: (uid: string, file: string, line: number) => Promise<boolean>
   refreshBreakpoints: (uid: string) => Promise<void>
 
-  /** ELF 加载 */
-  loadElf: (uid: string, path: string) => Promise<boolean>
+  /** ELF 加载（silent=true 时不弹全局通知，用于 startSession 内合并为一条通知） */
+  loadElf: (uid: string, path: string, silent?: boolean) => Promise<boolean>
 
   /** 启动调试会话（自动重连并绑定连接模式） */
   startSession: (uid: string, mode: ZoneStartMode, path: string) => Promise<boolean>
@@ -132,7 +143,9 @@ export const useZoneStore = create<ZoneStore>()(
 
       elfPath: null,
       sourceFiles: [],
+      openFiles: [],
       activeSourceFile: null,
+      followSource: true,
       disasmAvailable: false,
 
       activeInspectorTab: 'registers',
@@ -153,13 +166,35 @@ export const useZoneStore = create<ZoneStore>()(
       setSourceFiles: (sourceFiles) => set({ sourceFiles }),
       setActiveSourceFile: (activeSourceFile) => set({ activeSourceFile }),
       setDisasmAvailable: (disasmAvailable) => set({ disasmAvailable }),
+      setFollowSource: (v) => set({ followSource: v }),
+      openSourceFile: (file) =>
+        set((s) => ({
+          openFiles: s.openFiles.includes(file) ? s.openFiles : [...s.openFiles, file],
+          activeSourceFile: file,
+          followSource: false,
+        })),
+      ensureSourceFile: (file) =>
+        set((s) => ({
+          openFiles: s.openFiles.includes(file) ? s.openFiles : [...s.openFiles, file],
+        })),
+      closeSourceFile: (file) =>
+        set((s) => {
+          const openFiles = s.openFiles.filter((f) => f !== file)
+          let activeSourceFile = s.activeSourceFile
+          if (file === s.activeSourceFile) {
+            const idx = s.openFiles.indexOf(file)
+            const next = openFiles[idx] ?? openFiles[idx - 1] ?? null
+            activeSourceFile = next ?? null
+          }
+          return { openFiles, activeSourceFile }
+        }),
       setActiveInspectorTab: (activeInspectorTab) => set({ activeInspectorTab }),
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
       setRefreshMode: (refreshMode) => set({ refreshMode }),
       setBreakpoints: (breakpoints) => set({ breakpoints }),
 
       halt: async (uid) => {
-        set({ busy: true, error: null })
+        set({ busy: true, error: null, followSource: true })
         try {
           await zoneService.zoneHalt(uid)
           zoneLog('info', 'Zone Halt')
@@ -174,9 +209,11 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       step: async (uid, mode = 'into') => {
-        set({ busy: true, error: null })
+        set({ busy: true, error: null, followSource: true })
         try {
-          // 目标运行中先暂停，再单步（后端 step 要求目标 halt）
+          // 刷新真实状态，避免依据过期的 state 判断（如 download&reset 后目标是 running）
+          await get().refreshStatus(uid)
+          // 目标运行中先暂停，再单步（后端 step 亦会兜底自动 halt，此处提前处理保证 UI 状态一致）
           if (get().state === 'running') {
             await zoneService.zoneHalt(uid)
           }
@@ -193,7 +230,7 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       continue: async (uid) => {
-        set({ busy: true, error: null })
+        set({ busy: true, error: null, followSource: true })
         try {
           await zoneService.zoneContinue(uid)
           zoneLog('info', 'Zone Run (continue)')
@@ -208,7 +245,7 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       reset: async (uid, mode = 'halt') => {
-        set({ busy: true, error: null })
+        set({ busy: true, error: null, followSource: true })
         try {
           await zoneService.zoneReset(uid, mode)
           zoneLog('info', `Zone Reset [${mode}]`)
@@ -282,7 +319,7 @@ export const useZoneStore = create<ZoneStore>()(
         }
       },
 
-      loadElf: async (uid, path) => {
+      loadElf: async (uid, path, silent = false) => {
         set({ busy: true, error: null })
         try {
           const result = await zoneService.zoneLoadElf(uid, path)
@@ -298,16 +335,20 @@ export const useZoneStore = create<ZoneStore>()(
             elfPath: result.path,
             sourceFiles: files,
             activeSourceFile: activeFile,
+            openFiles: activeFile ? [activeFile] : [],
+            followSource: true,
             disasmAvailable: result.disasm_available,
             busy: false,
           })
-          useNotificationStore.getState().push({
-            type: 'success',
-            title: 'ELF 已加载',
-            message: result.path.split(/[\\/]/).pop() ?? result.path,
-            autoClose: true,
-            autoCloseDelay: 3000,
-          })
+          if (!silent) {
+            useNotificationStore.getState().push({
+              type: 'success',
+              title: 'ELF 已加载',
+              message: result.path.split(/[\\/]/).pop() ?? result.path,
+              autoClose: true,
+              autoCloseDelay: 3000,
+            })
+          }
           return true
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'ELF load failed'
@@ -322,7 +363,7 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       startSession: async (uid, mode, path) => {
-        set({ busy: true, error: null })
+        set({ busy: true, error: null, followSource: true })
         // 每个会话启动方式绑定所需连接模式
         const connectMode: ConnectMode = mode === 'download_reset' ? 'halt' : 'attach'
         const labels: Record<ZoneStartMode, string> = {
@@ -330,32 +371,41 @@ export const useZoneStore = create<ZoneStore>()(
           attach_running: 'Attach to Running',
           attach_halt: 'Attach & Halt',
         }
+        const summary: Record<ZoneStartMode, string> = {
+          download_reset: '烧录完成，已停在 main 入口',
+          attach_running: '已附加到运行中的程序，会话已启动',
+          attach_halt: '目标已暂停，会话已启动',
+        }
         try {
           // 1. 强制以绑定模式重连（自动切换连接模式，避免与全局设置冲突）
           await probeService.connectProbe(uid, { connect_mode: connectMode, force: true })
-          // 2. 加载 ELF 符号（失败时内部已推送错误通知）
-          const ok = await get().loadElf(uid, path)
+          // 2. 加载 ELF 符号（静默模式，避免与下方会话通知重复弹窗）
+          const ok = await get().loadElf(uid, path, true)
           if (!ok) return false
           // 3. 会话动作
           if (mode === 'download_reset') {
-            await programFlash(uid, path, true, true)
+            // 烧录（不自动运行），随后复位并停在 main 入口（"{" 处），便于直接开始逐行调试
+            // reset break_symbol：解析 main 符号 → 设断点 → continue 停留到入口
+            await programFlash(uid, path, true, false)
             zoneLog('info', 'Zone Download & Reset Program')
-            useNotificationStore.getState().push({
-              type: 'success',
-              title: 'Download & Reset',
-              message: '烧录并复位完成',
-              autoClose: true,
-              autoCloseDelay: 3000,
-            })
+            await get().reset(uid, 'break_symbol')
+            // 复位后校验目标是否真正暂停在入口；若未暂停（断点未命中/超时），
+            // 抛出错误走统一失败提示，避免误报"已停在 main 入口"
+            if (get().state !== 'halted') {
+              throw new Error('目标未在 main 入口暂停（断点未命中或超时）')
+            }
           } else if (mode === 'attach_halt') {
             await get().halt(uid)
           }
           // attach_running：保持目标运行，无需额外动作
+          // 同步真实运行状态（download_reset 后目标仍在运行，attach_halt 后已暂停），
+          // 避免工具栏/后续 step 的依据状态与实际不一致
+          await get().refreshStatus(uid)
           set({ busy: false })
           useNotificationStore.getState().push({
             type: 'success',
             title: labels[mode],
-            message: '会话已启动',
+            message: summary[mode],
             autoClose: true,
             autoCloseDelay: 3000,
           })

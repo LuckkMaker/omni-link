@@ -51,7 +51,7 @@ class ElfBackend:
 
         try:
             from elftools.elf.elffile import ELFFile
-            from pyocd.debug.elf.decoder import DwarfAddressDecoder
+            from pyocd.debug.elf.decoder import DwarfAddressDecoder, ElfSymbolDecoder
 
             # 关闭旧实例
             self._close(uid)
@@ -59,7 +59,9 @@ class ElfBackend:
             f = open(path, "rb")
             elf = ELFFile(f)
             decoder = DwarfAddressDecoder(elf)
-            symbol_decoder = decoder.elffile and decoder.elffile.get_section_by_name('.symtab')
+            # 注意：必须用 ElfSymbolDecoder（提供 symbol_dict / get_symbol_for_address），
+            # 不能直接拿 pyelftools 的 .symtab Section，否则 get_symbol_address/get_functions 等抛 AttributeError
+            symbol_decoder = ElfSymbolDecoder(elf)
 
             # 收集源文件列表（从 line 行程序式构建）
             source_files = self._collect_source_files(decoder)
@@ -489,6 +491,14 @@ class ElfBackend:
         elf = entry["elf"]
         code = self._read_from_segments(elf, address, length)
         if not code:
+            # 请求地址下无代码（如 PC 未知时前端默认地址与二进制装载地址不符），
+            # 回退到 ELF 入口点（清 Thumb 位），避免反汇编窗口 400
+            entry_point = elf.header["e_entry"] & ~1
+            if entry_point != address:
+                code = self._read_from_segments(elf, entry_point, length)
+                if code:
+                    address = entry_point
+        if not code:
             return {"success": False, "error": f"No code at 0x{address:08x}"}
 
         md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
@@ -513,9 +523,14 @@ class ElfBackend:
         }
 
     def _read_from_segments(self, elf, address: int, length: int) -> bytes:
-        """从 ELF program segments 读取代码（兼容无 read 方法的 ELFFile）"""
+        """从 ELF program segments 读取代码（兼容无 read 方法的 ELFFile）
+
+        按运行时虚拟地址（p_vaddr）匹配，兼容 LMA(VMA) 不同的链接方式。
+        """
         for segment in elf.iter_segments():
-            seg_addr = segment["p_paddr"]
+            if segment["p_type"] != "PT_LOAD":
+                continue
+            seg_addr = segment["p_vaddr"]
             seg_size = segment["p_filesz"]
             if address >= seg_addr and address + length <= seg_addr + seg_size:
                 data = segment.data()

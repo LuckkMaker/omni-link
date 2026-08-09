@@ -96,8 +96,15 @@ async def zone_step(uid: str, req: StepRequest = StepRequest()):
     if not session:
         raise HTTPException(status_code=400, detail="Probe not connected")
     target = session.target
+
+    # 目标未暂停时先自动中断，再单步。
+    # 参考 cdt-gdb-adapter customReset 的 pauseIfRunning 语义：单步必须从暂停态发起，
+    # 若目标仍在运行（如 download&reset 后），先 halt 使其暂停，避免直接报 "Target not halted"。
     if not target.is_halted():
-        raise HTTPException(status_code=400, detail="Target not halted")
+        with monitor_backend.pause_during(uid):
+            halt_result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
+        if not halt_result["success"] and halt_result.get("error"):
+            raise HTTPException(status_code=400, detail=halt_result["error"])
 
     if mode == 'into':
         with monitor_backend.pause_during(uid):
@@ -153,19 +160,20 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
             return {"success": True, "mode": mode, "symbol": None, "address": None}
 
     with monitor_backend.pause_during(uid):
-        if mode == 'halt':
+        if mode in ('halt', 'break_symbol'):
+            # halt / break_symbol：先复位并暂停目标，确保已知状态
             result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
             if not result["success"] and result.get("error"):
                 # 兼容部分目标无 reset halt，改走 reset
                 result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
         else:
-            # run / break_symbol：复位后继续运行
+            # run：复位后继续运行
             result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
         if not result["success"] and result.get("error"):
             raise HTTPException(status_code=400, detail=result["error"])
 
         if mode == 'break_symbol':
-            # 设置入口断点并运行，直到命中
+            # 复位暂停后设置入口断点并继续运行，可靠停在 main
             await asyncio.to_thread(commander_backend.execute, uid, f"break 0x{symbol_addr:x}")
             await asyncio.to_thread(commander_backend.execute, uid, "continue")
 

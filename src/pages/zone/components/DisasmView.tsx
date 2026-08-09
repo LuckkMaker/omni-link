@@ -139,9 +139,9 @@ export function DisasmView({ uid }: DisasmViewProps) {
                 <span className={isPc ? 'w-24 shrink-0 font-bold text-primary' : 'w-24 shrink-0 text-muted-foreground'}>
                   {ins.address.toString(16).toUpperCase().padStart(8, '0')}
                 </span>
-                <span className="w-20 shrink-0 text-muted-foreground/70">{ins.bytes}</span>
-                <span className="w-16 shrink-0">{ins.mnemonic}</span>
-                <span className="flex-1 pr-4">{ins.op_str}</span>
+                <span className="w-20 shrink-0 text-muted-foreground/70">{ins.bytes.toUpperCase()}</span>
+                <span className="w-16 shrink-0">{ins.mnemonic.toUpperCase()}</span>
+                <span className="flex-1 pr-4">{ins.op_str.toUpperCase()}</span>
               </div>
             )
           })

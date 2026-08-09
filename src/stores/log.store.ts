@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { LogEvent } from '@shared/types'
 
 /** 日志来源筛选 */
-export type LogFilter = 'all' | 'monitor' | 'flash' | 'rtt' | 'commander' | 'system'
+export type LogFilter = 'all' | 'monitor' | 'flash' | 'rtt' | 'commander' | 'zone' | 'system'
 
 /** 全局日志条目（带来源标记） */
 export interface GlobalLogEntry extends LogEvent {
@@ -29,6 +29,9 @@ function inferSource(message: string): string {
   if (msg.includes('Monitor')) return 'monitor'
   if (msg.includes('RTT')) return 'rtt'
   if (msg.includes('Commander')) return 'commander'
+  if (['Zone', 'Debug', 'Session', 'ELF', 'Breakpoint', 'Register'].some((k) => msg.includes(k))) {
+    return 'zone'
+  }
   if (['Flash', '烧录', '擦除', 'Program', 'Erase', 'Verify', 'Read Back', 'Check Blank', '固件'].some((k) => msg.includes(k))) {
     return 'flash'
   }

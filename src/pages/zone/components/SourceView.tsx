@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, AlertCircle } from 'lucide-react'
+import { Loader2, AlertCircle, X } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
 import { tokenizeLine, createHighlightState, detectLang } from '@/lib/source-highlight'
+import { cn } from '@/lib/utils'
 
 interface SourceViewProps {
   uid: string | null
@@ -21,6 +22,11 @@ function norm(p: string): string {
 export function SourceView({ uid }: SourceViewProps) {
   const activeSourceFile = useZoneStore((s) => s.activeSourceFile)
   const setActiveSourceFile = useZoneStore((s) => s.setActiveSourceFile)
+  const openFiles = useZoneStore((s) => s.openFiles)
+  const followSource = useZoneStore((s) => s.followSource)
+  const openSourceFile = useZoneStore((s) => s.openSourceFile)
+  const closeSourceFile = useZoneStore((s) => s.closeSourceFile)
+  const ensureSourceFile = useZoneStore((s) => s.ensureSourceFile)
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const pc = useZoneStore((s) => s.pc)
   const state = useZoneStore((s) => s.state)
@@ -86,12 +92,14 @@ export function SourceView({ uid }: SourceViewProps) {
         if (cancelled) return
         if (res.success) {
           setLines(res.lines ?? [])
-          // 若存在待跳转的 PC 行且属于当前文件，加载后应用
+          // 若存在待跳转的 PC 行且属于当前文件，加载后应用；否则当前文件无执行位置
           const pending = pendingPcRef.current
           if (pending && norm(pending.file) === norm(activeSourceFile)) {
             pendingPcRef.current = null
             setPcLine(pending.line)
             requestAnimationFrame(() => scrollToLine(pending.line))
+          } else {
+            setPcLine(null)
           }
         } else {
           setLines([])
@@ -134,10 +142,17 @@ export function SourceView({ uid }: SourceViewProps) {
             setPcLine(null)
             return
           }
+          // 始终保证执行文件已作为 tab 打开（不覆盖用户当前选择）
+          ensureSourceFile(targetFull)
           if (targetFull !== activeSourceFile) {
-            // 记录待跳转行并切换文件，加载完成后由上面 effect 应用
-            pendingPcRef.current = { file: targetFull, line: line.line ?? 1 }
-            setActiveSourceFile(targetFull)
+            if (followSource) {
+              // 跟随：记录待跳转行并切换文件，加载完成后由上面 effect 应用
+              pendingPcRef.current = { file: targetFull, line: line.line ?? 1 }
+              setActiveSourceFile(targetFull)
+            } else {
+              // 用户手动选择了其他文件：跟随暂停，不强制切换，当前文件无执行位置
+              setPcLine(null)
+            }
             return
           }
           pendingPcRef.current = null
@@ -151,7 +166,7 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => {
       cancelled = true
     }
-  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, state, scrollToLine])
+  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, scrollToLine])
 
   // 加载当前文件的可执行行号（仅这些行可打断点）
   useEffect(() => {
@@ -173,8 +188,69 @@ export function SourceView({ uid }: SourceViewProps) {
     }
   }, [uid, activeSourceFile])
 
+  // PC 行吸附：当 PC 解析到的行是空行/非代码行（如函数 epilogue 被 DWARF 行表映射到函数体外的空行）时，
+  // 向上吸附到最近的真实代码行（优先可执行行），避免高亮停在函数大括号之外。
+  useEffect(() => {
+    if (pcLine == null || lines.length === 0) return
+    const content = lines[pcLine - 1]
+    const isEmpty = !content || content.trim() === ''
+    if (!isEmpty) return
+    // 空行 → 从上一行向上找最近的非空行；executableLines 已就绪时要求目标行可执行
+    for (let l = pcLine - 1; l >= 1; l--) {
+      const c = lines[l - 1]
+      if (!c || c.trim() === '') continue
+      if (executableLines.size > 0 && !executableLines.has(l)) continue
+      if (l !== pcLine) {
+        setPcLine(l)
+        scrollToLine(l)
+      }
+      return
+    }
+    // 未找到可吸附的代码行 → 取消高亮（当前位置无有效源码行）
+    setPcLine(null)
+  }, [pcLine, lines, executableLines, scrollToLine])
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
+      {/* 源码 tab 栏：已打开文件列表，点击切换（用户手动切换后暂停 PC 自动跟随） */}
+      {openFiles.length > 0 && (
+        <div className="flex shrink-0 items-stretch overflow-x-auto border-b border-border bg-muted/20">
+          {openFiles.map((f) => {
+            const active = norm(f) === norm(activeSourceFile ?? '')
+            const name = f.replace(/\\/g, '/').split('/').pop() ?? f
+            return (
+              <div
+                key={f}
+                className={cn(
+                  'flex shrink-0 items-stretch border-r border-border',
+                  active ? 'bg-background' : 'hover:bg-muted/40'
+                )}
+                title={f}
+              >
+                <button
+                  onClick={() => openSourceFile(f)}
+                  className={cn(
+                    'flex h-7 items-center gap-1 whitespace-nowrap px-3 text-xs',
+                    active ? 'font-medium text-primary' : 'text-muted-foreground'
+                  )}
+                >
+                  {name}
+                </button>
+                <button
+                  onClick={() => closeSourceFile(f)}
+                  className={cn(
+                    'flex h-7 w-6 shrink-0 items-center justify-center text-muted-foreground/60 hover:bg-red-500/10 hover:text-red-500',
+                    active && 'text-primary/60'
+                  )}
+                  title="关闭"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
       <div
         ref={containerRef}
         className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed"

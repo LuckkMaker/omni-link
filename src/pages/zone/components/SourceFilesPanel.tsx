@@ -17,7 +17,7 @@ function formatSize(size: number | null | undefined): string {
 export function SourceFilesPanel({ uid }: { uid: string | null }) {
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const activeSourceFile = useZoneStore((s) => s.activeSourceFile)
-  const setActiveSourceFile = useZoneStore((s) => s.setActiveSourceFile)
+  const openSourceFile = useZoneStore((s) => s.openSourceFile)
 
   if (sourceFiles.length === 0) {
     return (
@@ -45,7 +45,7 @@ export function SourceFilesPanel({ uid }: { uid: string | null }) {
             return (
               <tr
                 key={f.path}
-                onClick={() => setActiveSourceFile(f.path)}
+                onClick={() => openSourceFile(f.path)}
                 title={f.path}
                 className={cn(
                   'cursor-pointer text-xs transition-colors',
