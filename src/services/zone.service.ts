@@ -335,7 +335,7 @@ export async function zoneFunctions(
   filter = '',
   offset = 0,
   limit = 200
-): Promise<{ success: boolean; functions: { name: string; address: number; size: number }[]; total: number }> {
+): Promise<{ success: boolean; functions: { name: string; address: number; size: number; file?: string | null; line?: number | null }[]; total: number }> {
   const client = await api()
   const { data } = await client.get(`/api/probes/${uid}/zone/functions`, {
     params: { filter, offset, limit },

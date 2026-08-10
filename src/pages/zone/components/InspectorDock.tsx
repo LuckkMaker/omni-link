@@ -220,6 +220,7 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
 
 // ── 外设面板（外设 → 寄存器 → 位域 三级折叠：Name / Value / Description） ──
 function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
+  const elfPath = useZoneStore((s) => s.elfPath)
   const [peripherals, setPeripherals] = useState<Peripheral[]>([])
   const [expandedPeriph, setExpandedPeriph] = useState<Set<string>>(new Set())
   const [expandedReg, setExpandedReg] = useState<Set<string>>(new Set())
@@ -249,7 +250,8 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
   }, [uid, connected, peripherals])
 
   const refreshPeripherals = useCallback(async () => {
-    if (!uid || !connected) return
+    // ELF 未加载时不请求后端，避免 No ELF loaded 的 400 报错
+    if (!uid || !connected || !elfPath) return
     setLoading(true)
     try {
       const res = await zoneService.zonePeripherals(uid)
@@ -262,11 +264,13 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : '读取外设失败')
+      // 优先展示后端 FastAPI 返回的 detail，便于定位真实原因
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+      setError(typeof detail === 'string' ? detail : e instanceof Error ? e.message : '读取外设失败')
     } finally {
       setLoading(false)
     }
-  }, [uid, connected])
+  }, [uid, connected, elfPath])
 
   useAutoRefresh(uid, connected, refreshValues)
 

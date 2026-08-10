@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { zoneMemoryUsage, type MemoryUsage } from '@/services/zone.service'
+import { useZoneStore } from '../store'
 import { cn } from '@/lib/utils'
 
 function fmtBytes(n: number | undefined | null): string {
@@ -36,12 +37,14 @@ function UsageBar({ label, value, max, color }: { label: string; value: number; 
  * 默认 flash 上限 2MB、ram 上限 512KB（可随实际调整），用于进度条可视化。
  */
 export function MemoryUsagePanel({ uid, connected }: { uid: string | null; connected: boolean }) {
+  const elfPath = useZoneStore((s) => s.elfPath)
   const [usage, setUsage] = useState<MemoryUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   const load = useCallback(async () => {
-    if (!uid) {
+    // ELF 未加载时不请求后端，避免 No ELF loaded 的 400 报错
+    if (!uid || !elfPath) {
       setUsage(null)
       setError(null)
       return
@@ -51,12 +54,14 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
       setUsage(await zoneMemoryUsage(uid))
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'load failed')
+      // 优先展示后端 FastAPI 返回的 detail，便于定位真实原因
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+      setError(typeof detail === 'string' ? detail : e instanceof Error ? e.message : 'load failed')
       setUsage(null)
     } finally {
       setLoading(false)
     }
-  }, [uid])
+  }, [uid, elfPath])
 
   useEffect(() => {
     void load()
@@ -87,9 +92,9 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
           <div className="flex h-full items-center justify-center text-xs text-red-500">{error}</div>
         ) : !connected ? (
           <div className="min-h-0 flex-1" />
-        ) : !uid || !usage ? (
+        ) : !uid || !elfPath || !usage ? (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-            {uid ? '未加载 ELF' : '未连接探针'}
+            {uid && elfPath ? '加载中...' : uid ? '未加载 ELF' : '未连接探针'}
           </div>
         ) : (
           <table className="w-full border-collapse text-left">

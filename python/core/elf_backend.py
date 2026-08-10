@@ -330,6 +330,11 @@ class ElfBackend:
         funcs.sort(key=lambda f: f["address"])
         total = len(funcs)
         page = funcs[offset:offset + limit]
+        # 附加源码位置 [file]:[line]（走 line_tree 解析每个函数起始地址，成本低）
+        for f in page:
+            loc = self.get_line_for_address(uid, f["address"])
+            f["file"] = loc.get("file") if loc else None
+            f["line"] = loc.get("line") if loc else None
         return {"success": True, "functions": page, "total": total}
 
     def resolve_symbol(self, uid: str, name: str) -> Optional[dict]:

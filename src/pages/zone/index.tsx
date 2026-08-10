@@ -196,7 +196,6 @@ export default function ZonePage() {
     { id: 'functions' as LeftTab, label: 'Functions', icon: FunctionSquare, content: <FunctionsPanel uid={uid} connected={isConnected} /> },
     { id: 'memory' as LeftTab, label: 'Memory Usage', icon: MemoryStick, content: <MemoryUsagePanel uid={uid} connected={isConnected} /> },
   ]
-  const expandedLeftSections = leftSections.filter((s) => expandedLeft.includes(s.id))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -210,28 +209,21 @@ export default function ZonePage() {
           className={sourceWidth > 0 ? 'flex shrink-0 flex-col overflow-hidden border-r border-border bg-card' : 'hidden'}
           style={sourceWidth > 0 ? { width: sourceWidth } : undefined}
         >
-          {/* 展开的 section：header + 内容（共享剩余高度） */}
-          {expandedLeftSections.map((s) => (
-            <div key={s.id} className="flex min-h-0 flex-1 flex-col">
-              <RailTab active onClick={() => toggleLeft(s.id)} icon={s.icon} label={s.label} title={s.label} />
-              <div className="min-h-0 flex-1 overflow-hidden border-t border-border">{s.content}</div>
-            </div>
-          ))}
-          {/* 折叠的 section 固定在底部 */}
-          <div className="mt-auto flex shrink-0 flex-col">
-            {leftSections
-              .filter((s) => !expandedLeft.includes(s.id))
-              .map((s) => (
-                <RailTab
-                  key={s.id}
-                  active={false}
-                  onClick={() => toggleLeft(s.id)}
-                  icon={s.icon}
-                  label={s.label}
-                  title={s.label}
-                />
-              ))}
-          </div>
+          {/* 左侧手风琴：所有 section 保持挂载，折叠时仅隐藏内容区（避免重挂载导致重新拉取数据） */}
+          {leftSections.map((s) => {
+            const isExpanded = expandedLeft.includes(s.id)
+            return (
+              <div
+                key={s.id}
+                className={isExpanded ? 'flex min-h-0 flex-1 flex-col' : 'flex shrink-0 flex-col'}
+              >
+                <RailTab active={isExpanded} onClick={() => toggleLeft(s.id)} icon={s.icon} label={s.label} title={s.label} />
+                <div className={isExpanded ? 'min-h-0 flex-1 overflow-hidden border-t border-border' : 'hidden'}>
+                  {s.content}
+                </div>
+              </div>
+            )
+          })}
         </div>
         <ResizeHandle
           direction="horizontal"

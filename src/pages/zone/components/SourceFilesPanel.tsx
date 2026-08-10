@@ -2,6 +2,8 @@ import { useMemo } from 'react'
 import { FolderOpen } from 'lucide-react'
 import { useZoneStore } from '../store'
 import { cn } from '@/lib/utils'
+import { gridColumns, TableHeaderCell, useColumnResize, useColumnSort, type ColumnDef } from './sortableTable'
+import type { SourceFileInfo } from '@/services/zone.service'
 
 /** 字节数 → 可读大小 */
 function formatSize(size: number | null | undefined): string {
@@ -13,18 +15,50 @@ function formatSize(size: number | null | undefined): string {
 
 /**
  * 左侧源码文件窗：File / Size / Path 三栏表格布局（紧凑多列横向展示）。
- * 点击行后主窗口显示对应源码。标题栏由外层 tab 提供，本组件仅渲染表格内容。
+ * 点击表头可排序，拖拽表头右边框可调整列宽；点击行后主窗口显示对应源码。
+ * 标题栏由外层 tab 提供，本组件仅渲染表格内容。
  */
 export function SourceFilesPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const activeSourceFile = useZoneStore((s) => s.activeSourceFile)
   const openSourceFile = useZoneStore((s) => s.openSourceFile)
 
-  // 按文件名首字母排序（忽略大小写），保证列表顺序稳定可寻
-  const sortedFiles = useMemo(
-    () => [...sourceFiles].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })),
-    [sourceFiles]
+  const columns = useMemo<ColumnDef<SourceFileInfo>[]>(
+    () => [
+      {
+        key: 'name',
+        label: 'File',
+        width: 200,
+        minWidth: 80,
+        sortValue: (f) => f.name,
+        cell: (f) => f.name,
+        cellClassName: (f) => cn('min-w-0 truncate font-medium', f.path === activeSourceFile && 'text-primary'),
+      },
+      {
+        key: 'size',
+        label: 'Size',
+        width: 90,
+        minWidth: 60,
+        // 无行号文件 size 为 null，按 0 参与排序
+        sortValue: (f) => f.size ?? 0,
+        cell: (f) => <span className="font-mono text-xs">{formatSize(f.size)}</span>,
+      },
+      {
+        key: 'path',
+        label: 'Path',
+        width: 320,
+        minWidth: 120,
+        sortValue: (f) => f.path,
+        cell: (f) => f.path,
+        cellClassName: () => 'min-w-0 truncate text-[10px]',
+      },
+    ],
+    [activeSourceFile]
   )
+
+  const { sorted, sort, toggle } = useColumnSort(sourceFiles, columns, 'name')
+  const { widths, startResize } = useColumnResize(columns)
+  const template = gridColumns(columns, widths)
 
   if (!connected) {
     return <div className="h-full min-h-0" />
@@ -42,41 +76,36 @@ export function SourceFilesPanel({ uid, connected }: { uid: string | null; conne
 
   return (
     <div className="h-full min-h-0 overflow-auto">
-      <table className="w-full border-collapse text-left">
-        <thead>
-          <tr className="border-b border-border text-[10px] uppercase tracking-wide text-muted-foreground">
-            <th className="sticky top-0 z-10 bg-card px-2 py-1 font-medium">File</th>
-            <th className="sticky top-0 z-10 bg-card px-2 py-1 text-right font-medium">Size</th>
-            <th className="sticky top-0 z-10 bg-card px-2 py-1 font-medium">Path</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sortedFiles.map((f) => {
-            const isActive = f.path === activeSourceFile
-            return (
-              <tr
-                key={f.path}
-                onClick={() => openSourceFile(f.path)}
-                title={f.path}
-                className={cn(
-                  'cursor-pointer text-xs transition-colors',
-                  isActive ? 'bg-primary/10 text-primary' : 'hover:bg-accent'
-                )}
+      {/* 表头（sticky，点击排序 / 拖拽调宽） */}
+      <div className="sticky top-0 z-10 grid min-w-max border-b border-border" style={{ gridTemplateColumns: template }}>
+        {columns.map((c) => (
+          <TableHeaderCell key={c.key} col={c as ColumnDef<unknown>} sort={sort} onSort={toggle} onResize={startResize} />
+        ))}
+      </div>
+      {sorted.map((f) => {
+        const isActive = f.path === activeSourceFile
+        return (
+          <div
+            key={f.path}
+            onClick={() => openSourceFile(f.path)}
+            title={f.path}
+            className={cn(
+              'grid min-w-max cursor-pointer border-b border-border text-xs transition-colors',
+              isActive ? 'bg-primary/10 text-primary' : 'hover:bg-accent'
+            )}
+            style={{ gridTemplateColumns: template }}
+          >
+            {columns.map((c) => (
+              <div
+                key={c.key}
+                className={cn('min-w-0 whitespace-nowrap border-r border-border px-2 py-1 last:border-r-0', c.cellClassName?.(f))}
               >
-                <td className={cn('whitespace-nowrap px-2 py-1 font-medium', isActive && 'text-primary')}>
-                  {f.name}
-                </td>
-                <td className="whitespace-nowrap px-2 py-1 text-right font-mono text-[10px] text-muted-foreground">
-                  {formatSize(f.size)}
-                </td>
-                <td className="max-w-0 truncate px-2 py-1 text-[10px] text-muted-foreground/70">
-                  {f.path}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+                {c.cell(f)}
+              </div>
+            ))}
+          </div>
+        )
+      })}
     </div>
   )
 }
