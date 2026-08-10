@@ -57,16 +57,46 @@ function lastSourceKey(rows: DisasmRow[]): string | null {
   return null
 }
 
-/** 追加下一页时去重：去掉 next 开头与 prev 末尾重复的函数/源码行 */
+/** 取列表最后一条指令所属函数名（无指令则 null） */
+function tailFunction(rows: DisasmRow[]): string | null {
+  for (let k = rows.length - 1; k >= 0; k--) {
+    const r = rows[k]
+    if (r.type === 'ins') return r.function
+  }
+  return null
+}
+
+/** 取列表第一条指令所属函数名（无指令则 null，忽略开头 func 标签） */
+function headFunction(rows: DisasmRow[]): string | null {
+  for (const r of rows) {
+    if (r.type === 'ins') return r.function
+  }
+  return null
+}
+
+/** 跳过列表开头的 func 标签行（用于窗口边界合并时移除重复标签） */
+function skipLeadingFunc(rows: DisasmRow[], start = 0): number {
+  let i = start
+  while (i < rows.length && rows[i].type === 'func') i++
+  return i
+}
+
+/** 追加下一页时去重：去掉 next 开头与 prev 末尾重复的函数标签/源码行 */
 function dedupeAppend(prev: DisasmRow[], next: DisasmRow[]): DisasmRow[] {
   if (prev.length === 0) return next
-  const lastRow = prev[prev.length - 1]
-  const lastFunc = lastRow.type === 'ins' ? lastRow.function : null
+  const prevFunc = tailFunction(prev)
+  const nextFunc = headFunction(next)
+  // 窗口边界切在函数中间：prev 尾部 + next 头部同属一个函数 →
+  // 跳过 next 开头的重复函数标签，保持函数体连续。
+  if (prevFunc && prevFunc === nextFunc) {
+    return [...prev, ...next.slice(skipLeadingFunc(next))]
+  }
   const lastSrc = lastSourceKey(prev)
   let i = 0
   while (i < next.length && next[i].type !== 'ins') {
     const r = next[i]
-    if (r.type === 'func' && r.name === lastFunc) {
+    // 跳过与 prev 末尾同函数的重复标签行
+    if (r.type === 'func' && prevFunc && r.name === prevFunc) {
       i++
       continue
     }
@@ -77,6 +107,18 @@ function dedupeAppend(prev: DisasmRow[], next: DisasmRow[]): DisasmRow[] {
     break
   }
   return [...prev, ...next.slice(i)]
+}
+
+/** 前插上一页时去重：去掉 next 开头与 prev 末尾重复的函数标签/源码行 */
+function dedupePrepend(next: DisasmRow[], prev: DisasmRow[]): DisasmRow[] {
+  if (next.length === 0) return prev
+  const nextFunc = tailFunction(next)
+  const prevFunc = headFunction(prev)
+  // 窗口边界切在函数中间：next 尾部 + prev 头部同属一个函数 → 保持函数体连续。
+  if (nextFunc && nextFunc === prevFunc) {
+    return [...next, ...prev.slice(skipLeadingFunc(prev))]
+  }
+  return [...next, ...prev]
 }
 
 /** 取列表最后一条指令的结束地址（无指令返回 null） */
@@ -156,7 +198,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
         setRows((prev) => {
           if (direction === 'replace') return newRows
           if (direction === 'append') return dedupeAppend(prev, newRows)
-          return [...newRows, ...prev]
+          return dedupePrepend(newRows, prev)
         })
         // 边界判断：返回不足一窗口说明已到代码边界
         if (direction === 'replace') {
@@ -350,11 +392,10 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
                 return (
                   <div
                     key={`f-${idx}`}
-                    className="flex items-center gap-2 border-y border-border bg-muted/40 px-1 py-0.5 text-[11px]"
+                    className="flex items-center border-y border-border bg-muted/40 pl-1 pr-2 py-0.5 text-[11px]"
                   >
-                    <span className="flex w-10 shrink-0" />
                     <span className="truncate font-semibold text-primary">{row.name}</span>
-                    <span className="ml-auto shrink-0 font-mono text-[10px] font-normal text-muted-foreground">
+                    <span className="ml-1 shrink-0 font-mono text-[10px] font-normal text-muted-foreground">
                       0x{row.address.toString(16).toUpperCase().padStart(8, '0')}
                     </span>
                   </div>
@@ -366,11 +407,8 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
                     key={`s-${idx}`}
                     className="flex border-b border-transparent px-1 py-0.5 text-[11px] leading-relaxed"
                   >
-                    <span className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground/40">
-                      {row.line}
-                    </span>
                     <span
-                      className="min-w-0 truncate italic text-muted-foreground/80"
+                      className="min-w-0 flex-1 truncate italic text-muted-foreground/80"
                       title={`${row.file}:${row.line}`}
                     >
                       {row.text || ' '}

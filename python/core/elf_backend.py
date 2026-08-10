@@ -605,9 +605,11 @@ class ElfBackend:
         md.detail = True
         decoder = entry["decoder"]
         instructions = []
-        # 交错行：函数标签 → 源码行 → 指令行，与 SEGGER Ozone 反汇编视图一致
+        # 交错行：函数标签 → 源码行 → 指令行
+        # 参考 Keil MDK 反汇编：函数以 name + 起始地址 作为标签行。
         rows = []
         last_func = None
+        last_func_addr = None
         last_src = None  # (file, line)
         for i in md.disasm(code, address):
             ins = {
@@ -619,9 +621,14 @@ class ElfBackend:
             }
             # 解析指令所属函数与源码行（供函数标签 / 源码行交错显示）
             func = None
+            func_addr = i.address
             try:
                 fi = decoder.get_function_for_address(i.address)
                 func = fi.name if fi is not None else None
+                # FunctionInfo 为 namedtuple(name, subprogram, low_pc, high_pc)，无 address 字段，
+                # 函数标签地址应取函数真实起始地址 low_pc（清 Thumb 位），否则窗口偏移时标签地址错乱。
+                if fi is not None:
+                    func_addr = fi.low_pc & ~1
             except Exception:
                 func = None
             src = None
@@ -633,8 +640,10 @@ class ElfBackend:
                 src = None
 
             if func != last_func:
-                rows.append({"type": "func", "name": func or "", "address": i.address})
+                # 打开新函数：标签行
+                rows.append({"type": "func", "name": func or "", "address": func_addr})
                 last_func = func
+                last_func_addr = func_addr
             if src is not None and src != last_src:
                 rows.append({
                     "type": "source",
