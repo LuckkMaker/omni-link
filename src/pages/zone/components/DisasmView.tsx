@@ -12,6 +12,8 @@ interface DisasmViewProps {
 // 每次请求的反汇编窗口大小（字节 / 最大指令条数）
 const WINDOW_LEN = 64
 const WINDOW_MAX = 32
+// 初始加载时向目标地址之前预加载的窗口数，避免一向上滚动就触发 prepend 加载
+const PRELOAD_WINDOWS = 4
 
 // 分支 / 跳转指令：点击操作数中的目标地址可导航到该地址的反汇编
 const BRANCH_MNEMONICS = new Set(['b', 'bl', 'bx', 'blx', 'cbz', 'cbnz', 'tbb', 'tbh'])
@@ -75,6 +77,19 @@ function dedupeAppend(prev: DisasmRow[], next: DisasmRow[]): DisasmRow[] {
     break
   }
   return [...prev, ...next.slice(i)]
+}
+
+/** 取列表最后一条指令的结束地址（无指令返回 null） */
+function loadedEnd(rows: DisasmRow[]): number | null {
+  let end: number | null = null
+  for (const r of rows) if (r.type === 'ins') end = r.address + r.size
+  return end
+}
+
+/** 判断是否已到代码末尾（最后一条指令后没有更多反汇编） */
+function maybeEnd(rows: DisasmRow[]): boolean {
+  const end = loadedEnd(rows)
+  return end === null
 }
 
 /**
@@ -172,6 +187,58 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
     [uid]
   )
 
+  // 初始加载：从目标地址往前预加载 PRELOAD_WINDOWS 个窗口，再逐步往后补齐，
+  // 使刚加载 ELF 后向上滚动有内容缓冲，避免一滚就触发 prepend 加载。
+  const loadInitial = useCallback(
+    async (targetAddr: number) => {
+      if (!uid || loadingRef.current) return
+      loadingRef.current = true
+      setLoading(true)
+      setError(null)
+      try {
+        // 1. 向前预加载若干窗口（从 targetAddr - PRELOAD_WINDOWS*WINDOW_LEN 起）
+        const frontStart = Math.max(0, targetAddr - PRELOAD_WINDOWS * WINDOW_LEN)
+        let acc: DisasmRow[] = []
+        let cur = frontStart
+        let frontCount = 0
+        while (cur >= 0 && cur < targetAddr) {
+          const res = await zoneService.zoneDisasm(uid, cur, WINDOW_LEN, WINDOW_MAX)
+          if (!res.success) break
+          const batch = res.rows ?? []
+          const count = batch.filter((r) => r.type === 'ins').length
+          acc = dedupeAppend(acc, batch)
+          frontCount += count
+          // 向前推进到窗口末尾，进入下一窗口
+          let next = cur
+          for (const r of batch) if (r.type === 'ins') next = Math.max(next, r.address + r.size)
+          if (next <= cur) break
+          cur = next
+          // 已预加载足够窗口或到达代码边界则停止
+          if (frontCount >= WINDOW_MAX * PRELOAD_WINDOWS) break
+        }
+        // 2. 从已加载末尾继续向后补齐，直到覆盖 targetAddr
+        let guard = 0
+        while (acc.length === 0 || (loadedEnd(acc) !== null && loadedEnd(acc)! < targetAddr)) {
+          if (guard++ > 8) break
+          const start = acc.length === 0 ? frontStart : loadedEnd(acc)!
+          const res = await zoneService.zoneDisasm(uid, start, WINDOW_LEN, WINDOW_MAX)
+          if (!res.success) break
+          acc = dedupeAppend(acc, res.rows ?? [])
+        }
+        setBaseAddress(frontStart)
+        setRows(acc)
+        setCanPrev(frontCount >= WINDOW_MAX * PRELOAD_WINDOWS)
+        setCanNext(!maybeEnd(acc))
+      } catch (e) {
+        setError(e instanceof Error ? e.message : '反汇编失败')
+      } finally {
+        loadingRef.current = false
+        setLoading(false)
+      }
+    },
+    [uid]
+  )
+
   // 初始：无 ELF 时显示提示；有 ELF 时从 PC 或默认地址反汇编
   useEffect(() => {
     if (!elfPath) {
@@ -187,12 +254,12 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
           ? pc >= loadedRange.start && pc < loadedRange.end
           : false
       if (!inRange) {
-        void loadWindow(pc, 'replace')
+        void loadInitial(pc)
         return
       }
     }
     if (baseAddress === null) {
-      void loadWindow(startAddr, 'replace')
+      void loadInitial(startAddr)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [elfPath, pc, state])
