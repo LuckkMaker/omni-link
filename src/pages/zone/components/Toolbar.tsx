@@ -76,14 +76,11 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   // 会话进行中 = 目标非断连态（running/halted/unknown）→ 图标红色；未启动（disconnected）→ 绿色
   const sessionActive = state !== 'disconnected'
 
-  // 启动调试会话：未加载 ELF 时先弹窗选择文件，再按所选方式自动重连并执行动作
+  // 每次启动调试会话都强制弹窗选择 ELF 文件（不做自动记忆/回退），再按所选方式自动重连并执行动作
   const handleStart = useCallback(async (mode: ZoneStartMode) => {
     if (!uid) return
-    let path = useZoneStore.getState().elfPath
-    if (!path) {
-      path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
-      if (!path) return
-    }
+    const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
+    if (!path) return
     await startSession(uid, mode, path)
   }, [uid, startSession])
 
