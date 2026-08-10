@@ -581,3 +581,8 @@ export const useZoneStore = create<ZoneStore>()(
     }
   )
 )
+
+// 浏览器模式调试钩子：暴露 store 到 window，便于无 Electron 主进程时基于 API 驱动自动化测试
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __zoneStore: typeof useZoneStore }).__zoneStore = useZoneStore
+}

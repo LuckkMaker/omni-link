@@ -569,7 +569,8 @@ class ElfBackend:
             max_instructions: 最大指令条数（默认 32）
 
         Returns:
-            {success, address, instructions: [{address, bytes, mnemonic, op_str}], pc_marker}
+            {success, address, instructions: [{address, bytes, mnemonic, op_str}],
+             rows: [{type: func|source|ins, ...}], count}
         """
         entry = self._get(uid)
         if not entry:
@@ -581,6 +582,10 @@ class ElfBackend:
             import capstone
         except ImportError:
             return {"success": False, "error": "Capstone not installed"}
+
+        # 清除 Thumb 位：符号表/PC 可能含 bit0（Thumb 指示位），
+        # 若直接用奇数地址读取，段内偏移错位 1 字节，反汇编会得到乱码指令。
+        address = address & ~1
 
         # 从 ELF program segments 读取代码（按 load address）
         elf = entry["elf"]
@@ -598,24 +603,76 @@ class ElfBackend:
 
         md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
         md.detail = True
+        decoder = entry["decoder"]
         instructions = []
+        # 交错行：函数标签 → 源码行 → 指令行，与 SEGGER Ozone 反汇编视图一致
+        rows = []
+        last_func = None
+        last_src = None  # (file, line)
         for i in md.disasm(code, address):
-            hex_bytes = ''.join('%02x' % b for b in i.bytes)
-            instructions.append({
+            ins = {
                 "address": i.address,
                 "size": i.size,
-                "bytes": hex_bytes,
+                "bytes": ''.join('%02x' % b for b in i.bytes),
                 "mnemonic": i.mnemonic,
                 "op_str": i.op_str,
-            })
+            }
+            # 解析指令所属函数与源码行（供函数标签 / 源码行交错显示）
+            func = None
+            try:
+                fi = decoder.get_function_for_address(i.address)
+                func = fi.name if fi is not None else None
+            except Exception:
+                func = None
+            src = None
+            try:
+                li = decoder.get_line_for_address(i.address)
+                if li is not None and getattr(li, 'line', 0):
+                    src = (self._line_full_path(li), li.line)
+            except Exception:
+                src = None
+
+            if func != last_func:
+                rows.append({"type": "func", "name": func or "", "address": i.address})
+                last_func = func
+            if src is not None and src != last_src:
+                rows.append({
+                    "type": "source",
+                    "file": src[0],
+                    "line": src[1],
+                    "text": self._source_line_text(entry, src[0], src[1]),
+                })
+                last_src = src
+            ins["function"] = func
+            rows.append({"type": "ins", **ins})
+            instructions.append(ins)
             if len(instructions) >= max_instructions:
                 break
         return {
             "success": True,
             "address": address,
             "instructions": instructions,
+            "rows": rows,
             "count": len(instructions),
         }
+
+    def _source_line_text(self, entry: dict, file: str, line: int) -> str:
+        """读取源码文件中指定行的内容（按 entry 缓存，避免每次反汇编都重读文件）。
+
+        仅用于反汇编视图的源码行交错显示；文件读取失败或行号越界时返回空串。
+        """
+        cache = entry.setdefault("_src_cache", {})
+        lines = cache.get(file)
+        if lines is None:
+            try:
+                with open(file, 'r', encoding='utf-8', errors='replace') as f:
+                    lines = f.read().split('\n')
+            except Exception:
+                lines = []
+            cache[file] = lines
+        if 1 <= line <= len(lines):
+            return lines[line - 1].rstrip()
+        return ""
 
     def _read_from_segments(self, elf, address: int, length: int) -> bytes:
         """从 ELF program segments 读取代码（兼容无 read 方法的 ELFFile）

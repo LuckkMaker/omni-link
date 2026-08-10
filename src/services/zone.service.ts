@@ -41,13 +41,22 @@ export interface DisasmInstruction {
   bytes: string
   mnemonic: string
   op_str: string
+  /** 所属函数名（无调试信息时为 null） */
+  function?: string | null
 }
+
+/** 反汇编交错行：函数标签 / 源码行 / 指令行（与 SEGGER Ozone 反汇编视图一致） */
+export type DisasmRow =
+  | { type: 'func'; name: string; address: number }
+  | { type: 'source'; file: string; line: number; text: string }
+  | { type: 'ins'; address: number; size: number; bytes: string; mnemonic: string; op_str: string; function: string | null }
 
 /** 反汇编结果 */
 export interface DisasmResult {
   success: boolean
   address: number
   instructions: DisasmInstruction[]
+  rows?: DisasmRow[]
   count: number
 }
 
