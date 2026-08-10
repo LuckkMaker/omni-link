@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo, useLayoutEffect } from 'react'
 import { Loader2, AlertCircle } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
@@ -157,6 +157,10 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
   // 并发加载守卫 + 前插滚动锚定
   const loadingRef = useRef(false)
   const anchorHeightRef = useRef(0)
+  // 加载纪元：每次 loadInitial 递增，过期（已被更新的加载取代）的结果直接丢弃。
+  // 避免"旧加载尚未完成时再次 Reset/Run 触发新加载"被 loadingRef 守卫跳过，
+  // 或因旧加载晚到覆盖新加载，导致反汇编停在旧 PC 区域、PC 行缺失而不滚动。
+  const loadEpochRef = useRef(0)
 
   // 当前已加载指令的地址范围（用于分页从边界继续加载）
   const loadedRange = useMemo(() => {
@@ -174,6 +178,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
   const loadWindow = useCallback(
     async (addr: number, direction: 'replace' | 'append' | 'prepend' = 'replace') => {
       if (!uid || loadingRef.current) return
+      const epoch = loadEpochRef.current
       loadingRef.current = true
       if (direction === 'replace') setLoading(true)
       else {
@@ -185,6 +190,8 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
       if (direction === 'prepend') anchorHeightRef.current = containerRef.current?.scrollHeight ?? 0
       try {
         const res = await zoneService.zoneDisasm(uid, addr, WINDOW_LEN, WINDOW_MAX)
+        // 期间发生了新的 loadInitial（epoch 变化），本次增量结果已过期，丢弃
+        if (epoch !== loadEpochRef.current) return
         if (!res.success) {
           // 窗口两端已到代码边界或无代码：停止该方向继续加载
           if (direction === 'append') setCanNext(false)
@@ -210,19 +217,23 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
           setCanPrev(nextCount >= WINDOW_MAX)
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : '反汇编失败')
+        if (epoch === loadEpochRef.current) setError(e instanceof Error ? e.message : '反汇编失败')
       } finally {
-        loadingRef.current = false
-        setLoading(false)
-        setLoadingMore(false)
-        // 前插后恢复滚动位置，保持可视内容稳定
-        if (direction === 'prepend' && anchorHeightRef.current) {
-          const before = anchorHeightRef.current
+        if (epoch === loadEpochRef.current) {
+          loadingRef.current = false
+          setLoading(false)
+          setLoadingMore(false)
+          // 前插后恢复滚动位置，保持可视内容稳定
+          if (direction === 'prepend' && anchorHeightRef.current) {
+            const before = anchorHeightRef.current
+            anchorHeightRef.current = 0
+            requestAnimationFrame(() => {
+              const el = containerRef.current
+              if (el) el.scrollTop += el.scrollHeight - before
+            })
+          }
+        } else {
           anchorHeightRef.current = 0
-          requestAnimationFrame(() => {
-            const el = containerRef.current
-            if (el) el.scrollTop += el.scrollHeight - before
-          })
         }
       }
     },
@@ -233,7 +244,10 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
   // 使刚加载 ELF 后向上滚动有内容缓冲，避免一滚就触发 prepend 加载。
   const loadInitial = useCallback(
     async (targetAddr: number) => {
-      if (!uid || loadingRef.current) return
+      if (!uid) return
+      // 每次初始加载都递增纪元：末尾应用结果前校验，若期间又触发了更新的加载则丢弃本次，
+      // 避免被 loadingRef 守卫跳过新加载，也避免旧加载晚到覆盖新加载（旧 PC 区域）。
+      const epoch = ++loadEpochRef.current
       loadingRef.current = true
       setLoading(true)
       setError(null)
@@ -258,24 +272,33 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
           // 已预加载足够窗口或到达代码边界则停止
           if (frontCount >= WINDOW_MAX * PRELOAD_WINDOWS) break
         }
-        // 2. 从已加载末尾继续向后补齐，直到覆盖 targetAddr
+        // 2. 从已加载末尾继续向后补齐，直到覆盖 targetAddr。
+        //    注意用 `loadedEnd <= targetAddr`（而不是 `<`）：第 1 阶段预加载可能
+        //    因 frontCount 上限提前断在 targetAddr-1 条指令处，此时 loadedEnd 恰等于
+        //    targetAddr，若用 `<` 会误判已覆盖，导致 PC 指令行缺失、滚动定位失效。
         let guard = 0
-        while (acc.length === 0 || (loadedEnd(acc) !== null && loadedEnd(acc)! < targetAddr)) {
+        while (acc.length === 0 || (loadedEnd(acc) !== null && loadedEnd(acc)! <= targetAddr)) {
           if (guard++ > 8) break
           const start = acc.length === 0 ? frontStart : loadedEnd(acc)!
           const res = await zoneService.zoneDisasm(uid, start, WINDOW_LEN, WINDOW_MAX)
           if (!res.success) break
           acc = dedupeAppend(acc, res.rows ?? [])
         }
+        // 加载期间发生了更新的加载，丢弃本次结果
+        if (epoch !== loadEpochRef.current) return
         setBaseAddress(frontStart)
         setRows(acc)
         setCanPrev(frontCount >= WINDOW_MAX * PRELOAD_WINDOWS)
         setCanNext(!maybeEnd(acc))
       } catch (e) {
-        setError(e instanceof Error ? e.message : '反汇编失败')
+        if (epoch === loadEpochRef.current) {
+          setError(e instanceof Error ? e.message : '反汇编失败')
+        }
       } finally {
-        loadingRef.current = false
-        setLoading(false)
+        if (epoch === loadEpochRef.current) {
+          loadingRef.current = false
+          setLoading(false)
+        }
       }
     },
     [uid]
@@ -322,21 +345,27 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
     }
   }, [loadWindow, canPrev, canNext, loadedRange])
 
-  // PC 指令行滚动到容器中央（双重 rAF，布局稳定后滚动）
-  useEffect(() => {
+  // PC 指令行滚动到容器中央
+  // 用 useLayoutEffect（DOM 提交后、绘制前同步执行）而非 useEffect+双重 rAF：
+  // 此时 lineRefs 已由 ref 回调填充，容器已布局，可直接按几何计算滚动目标，
+  // 避免"Reset 后停在 Reset_Handler 却不滚动"（旧实现因渲染时序拿到 undefined）。
+  // 若首次布局尚未就绪（如面板刚切换/隐藏态），下一帧重试一次。
+  useLayoutEffect(() => {
     if (pc === null || pc === undefined) return
-    const container = containerRef.current
-    const el = lineRefs.current.get(pc)
-    if (!container || !el) return
-    const cRect = container.getBoundingClientRect()
-    const eRect = el.getBoundingClientRect()
-    const lineH = eRect.height || 16
-    const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
-      })
-    })
+    const doScroll = () => {
+      const container = containerRef.current
+      const el = lineRefs.current.get(pc)
+      if (!container || !el) return false
+      const cRect = container.getBoundingClientRect()
+      const eRect = el.getBoundingClientRect()
+      const lineH = eRect.height || 16
+      const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
+      container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
+      return true
+    }
+    if (!doScroll()) {
+      requestAnimationFrame(doScroll)
+    }
   }, [rows, pc])
 
   return (
