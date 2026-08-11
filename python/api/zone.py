@@ -535,6 +535,17 @@ async def zone_stack(uid: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Unwind failed: {e}")
 
+    # 为每帧附加 DWARF 局部变量 / 形参（函数签名、返回值类型、变量值）
+    for f in frames:
+        faddr = f.get("function_address") or f.get("address")
+        if not faddr:
+            continue
+        loc = await asyncio.to_thread(elf_backend.frame_locals, uid, faddr, regs, read_mem)
+        if loc:
+            f["signature"] = loc["signature"]
+            f["ret"] = loc["ret"]
+            f["locals"] = loc["variables"]
+
     sp = regs.get("sp") or 0
     pc = regs.get("pc") or 0
     lr = regs.get("lr") or 0

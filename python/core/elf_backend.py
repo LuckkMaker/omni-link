@@ -64,6 +64,16 @@ class ElfBackend:
             # 不能直接拿 pyelftools 的 .symtab Section，否则 get_symbol_address/get_functions 等抛 AttributeError
             symbol_decoder = ElfSymbolDecoder(elf)
 
+            # DWARF 局部变量 / 形参解析（无调试信息时为 None）
+            dwarf_locals = None
+            try:
+                if elf.has_dwarf_info():
+                    from core.dwarf_locals import DwarfLocals
+                    dwarf_locals = DwarfLocals(elf.get_dwarf_info())
+            except Exception:
+                logger.exception("DwarfLocals build failed")
+                dwarf_locals = None
+
             # 收集源文件列表（从 line 行程序式构建）
             source_files = self._collect_source_files(decoder)
 
@@ -72,6 +82,7 @@ class ElfBackend:
                 "elf": elf,
                 "decoder": decoder,
                 "symbol_decoder": symbol_decoder,
+                "dwarf_locals": dwarf_locals,
                 "path": path,
                 "mtime": os.path.getmtime(path),
             }
@@ -501,18 +512,19 @@ class ElfBackend:
         frames: list[dict] = []
         seen: set[int] = set()
 
-        def push(addr: int, sp_val=None):
+        def push(addr: int, sp_val=None, ftype: str = "call"):
             addr &= ~1
             if addr in seen or addr == 0 or addr == 0xffffffff:
                 return
             seen.add(addr)
             r = self.resolve_address(uid, addr) or {"address": addr}
+            r["type"] = ftype
             if sp_val is not None:
                 r["sp"] = sp_val
             frames.append(r)
 
         # 帧0：当前 PC
-        push(pc, sp)
+        push(pc, sp, "top")
 
         # 异常上下文：LR 为 EXC_RETURN (0xFFFFFFFx)，异常只用 MSP
         exc_return = (lr & 0xffffff00) == 0xffffff00
@@ -521,7 +533,7 @@ class ElfBackend:
             # 硬件异常栈帧：R0..R3,R12,LR,PC,xPSR（PC 在 +24，被中断上下文 SP 在 +32 / +36(浮点)）
             exc_pc = rd32(base + 24)
             if exc_pc and self.is_function_address(uid, exc_pc & ~1):
-                push(exc_pc)
+                push(exc_pc, None, "except")
             fp_frame = bool(lr & 0x10)
             active_sp = (base + (36 if fp_frame else 32)) & ~0x3
         else:
@@ -531,7 +543,7 @@ class ElfBackend:
                 and lr_clear != 0xffffffff
                 and self.is_function_address(uid, lr_clear)
             ):
-                push(lr_clear)
+                push(lr_clear, None, "return")
             # 当前使用 PSP（线程态）时用 PSP，否则用 MSP
             active_sp = (psp if (control & 0x2 and psp) else (msp if msp else sp)) & ~0x3
 
@@ -542,7 +554,7 @@ class ElfBackend:
             while fp and guard < 64:
                 old_lr = rd32(fp + 4)
                 if old_lr and self.is_function_address(uid, old_lr & ~1):
-                    push(old_lr & ~1)
+                    push(old_lr & ~1, None, "call")
                 old_fp = rd32(fp)
                 if old_fp and (old_fp & ~0x3) != fp and (old_fp & ~0x3) > fp:
                     fp = old_fp & ~0x3
@@ -561,13 +573,55 @@ class ElfBackend:
                 continue
             if not self.is_function_address(uid, val):
                 continue
-            push(val)
+            push(val, None, "call")
             if len(frames) >= 40:
                 break
         return frames
 
+    def frame_locals(self, uid: str, address: int, regs: dict,
+                     read_mem: Callable) -> Optional[dict]:
+        """读取某函数（地址）的 DWARF 局部变量 / 形参及其当前值。
+
+        Args:
+            uid: 探针 ID
+            address: 帧内地址（函数入口或函数内任意 PC）
+            regs: 当前核心寄存器（r0..r12, sp, lr, pc, ...）
+            read_mem: callable(addr, length) -> bytes
+
+        Returns:
+            {signature, ret, variables}，其中 variables 为
+            [{name, type, value, is_param, available, address?}]；
+            无 DWARF / 无变量时返回 None。
+        """
+        entry = self._get(uid)
+        if not entry:
+            return None
+        dl = entry.get("dwarf_locals")
+        if dl is None:
+            return None
+        # 定位函数入口地址（location 求值按入口 PC 定位，更稳定）
+        faddr = address
+        fn = self._find_func(uid, address)
+        if fn:
+            faddr = fn[3]
+        try:
+            signature, ret, variables = dl.get_func_locals(
+                faddr, regs, read_mem, pc=address
+            )
+        except Exception:
+            logger.exception("frame_locals failed")
+            return None
+        # 无变量但有签名（如无参 void 函数）：仍返回签名，前端 Type 列可显示
+        if not variables and not signature:
+            return None
+        return {
+            "signature": signature or "",
+            # 无显式返回类型（DW_AT_type 缺失，通常为 void）时补 void；有签名但无类型按 void 处理
+            "ret": ret or ("void" if signature else ""),
+            "variables": variables,
+        }
+
     def get_callees(self, uid: str, address: int) -> dict:
-        """调用图：解析指定函数地址的直接 callees（反汇编 BL/BLX 指令的目标）"""
         entry = self._get(uid)
         if not entry:
             return {"success": False, "error": "No ELF loaded"}

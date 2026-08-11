@@ -658,7 +658,6 @@ export function SourceView({ uid }: SourceViewProps) {
                       ? 'flex cursor-pointer border-b border-amber-300/40 bg-amber-400/10 select-none'
                       : 'flex cursor-pointer border-b border-transparent hover:bg-muted/30 select-none'
                 }
-                title="点击定位光标行（Run to Cursor / 断点操作）"
               >
                 {/* 断点槽 + PC 标记 + 行号 */}
                 <div

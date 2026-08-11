@@ -361,6 +361,22 @@ export async function zoneMemoryUsage(uid: string): Promise<MemoryUsage> {
 
 // ── 调用栈 / 调用图 ──────────────────────────
 
+/** 调用栈帧局部变量（标量或可展开的结构体/数组节点） */
+export interface CallStackLocal {
+  name: string
+  type: string
+  value: number | null
+  is_param: boolean
+  available: boolean
+  address?: number
+  /** 变量位宽（字节数 × 8），用于按位宽补齐显示 */
+  bit_size?: number
+  /** 节点类别：scalar 标量 / struct 结构体 / array 数组 / pointer 指针。结构体/数组可展开查看成员 */
+  kind?: 'scalar' | 'struct' | 'array' | 'pointer'
+  /** 结构体成员 / 数组元素（kind 为 struct/array 时非空） */
+  children?: CallStackLocal[]
+}
+
 /** 调用栈帧 */
 export interface CallStackFrame {
   address: number
@@ -371,6 +387,14 @@ export interface CallStackFrame {
   function_size?: number
   file?: string
   line?: number
+  /** 帧来源：top 当前 / except 异常 / return 返回 / call 调用 */
+  type?: 'top' | 'except' | 'return' | 'call'
+  /** 函数签名（DWARF，如 "void HAL_NVIC_SetPriorityGrouping(uint32_t)"） */
+  signature?: string
+  /** 函数返回值类型 */
+  ret?: string
+  /** 函数局部变量 / 形参（无变量时为空） */
+  locals?: CallStackLocal[]
 }
 
 /** 调用栈回溯结果 */
