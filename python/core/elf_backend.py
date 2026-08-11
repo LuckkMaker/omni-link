@@ -510,14 +510,19 @@ class ElfBackend:
         r11 = (regs.get("r11") or 0) & ~0x3
 
         frames: list[dict] = []
+        # 去重按函数入口地址（同一函数内多条指令地址只保留首个帧），避免同名函数重复出现
         seen: set[int] = set()
 
         def push(addr: int, sp_val=None, ftype: str = "call"):
             addr &= ~1
-            if addr in seen or addr == 0 or addr == 0xffffffff:
+            if addr == 0 or addr == 0xffffffff:
                 return
-            seen.add(addr)
             r = self.resolve_address(uid, addr) or {"address": addr}
+            # 以函数入口地址作为去重键：同一函数内 PC/LR/调用点地址视为同一函数
+            fentry = r.get("function_address") or addr
+            if fentry in seen:
+                return
+            seen.add(fentry)
             r["type"] = ftype
             if sp_val is not None:
                 r["sp"] = sp_val

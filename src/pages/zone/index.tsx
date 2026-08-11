@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, Eye } from 'lucide-react'
+import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, Eye, ListTree } from 'lucide-react'
 import { Toolbar } from './components/Toolbar'
 import { SourceFilesPanel } from './components/SourceFilesPanel'
 import { FunctionsPanel } from './components/FunctionsPanel'
@@ -8,6 +8,7 @@ import { SourceView } from './components/SourceView'
 import { InspectorDock, MemoryPanel } from './components/InspectorDock'
 import { TerminalDock } from './components/TerminalDock'
 import { WatchPanel } from './components/WatchPanel'
+import { CallStackPanel } from './components/CallStackPanel'
 import { ResizeHandle } from '@/components/LogConsole'
 import { useProbeStore } from '@/stores/probe.store'
 import { useZoneStore } from './store'
@@ -30,7 +31,8 @@ function ratioOf(max: number): number {
 }
 
 type LeftTab = 'source' | 'functions' | 'memory'
-type BottomTab = 'console' | 'watch' | 'memory'
+// 底部右栏 tab（左栏固定 Console）
+type BottomTab = 'callstack' | 'memory' | 'watch'
 
 /** 左侧纵向 tab 按钮（垂直列表：图标 + 完整标签横向排列） */
 function RailTab({
@@ -109,11 +111,13 @@ export default function ZonePage() {
   const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT_WIDTH)
   // 底部 dock 高度（0 = 隐藏）
   const [dockHeight, setDockHeight] = useState(TERMINAL_DEFAULT_HEIGHT)
+  // 底部左栏（Console）宽度比例（0~1，右栏占 1 - ratio），默认各 50%
+  const [bottomLeftRatio, setBottomLeftRatio] = useState(0.5)
 
   // 左侧手风琴：可同时展开多个 section，折叠的固定在底部（Source Files 默认展开）
   const [expandedLeft, setExpandedLeft] = useState<LeftTab[]>(['source'])
-  // 底部 tab
-  const [bottomTab, setBottomTab] = useState<BottomTab>('console')
+  // 底部右栏 tab（默认 Call Stack）
+  const [bottomTab, setBottomTab] = useState<BottomTab>('callstack')
 
   const toggleLeft = useCallback((id: LeftTab) => {
     setExpandedLeft((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -190,6 +194,11 @@ export default function ZonePage() {
     )
   }, [])
 
+  // 底部左右分隔拖拽：分隔条在左栏右侧，向右拖动→左栏变宽（delta 为横向增量）
+  const handleBottomSplitResize = useCallback((delta: number) => {
+    setBottomLeftRatio((r) => Math.max(0.2, Math.min(0.8, r + delta / (window.innerWidth ?? 1280))))
+  }, [])
+
   // 左侧手风琴 section 配置：可多选展开，共享显示空间，折叠项固定在底部
   const leftSections = [
     { id: 'source' as LeftTab, label: 'Source Files', icon: FileCode2, content: <SourceFilesPanel uid={uid} connected={isConnected} /> },
@@ -262,20 +271,40 @@ export default function ZonePage() {
         expanded={dockHeight > 0}
       />
 
-      {/* 底部 dock：Console / Call Stack / Call Graph / Watch */}
+      {/* 底部 dock：左右分栏，左栏 Console 固定，右栏 Call Stack/Memory/Watch tab 区 */}
       <div
         className={dockHeight > 0 ? 'flex shrink-0 flex-col border-t border-border bg-card' : 'hidden'}
         style={dockHeight > 0 ? { height: dockHeight } : undefined}
       >
-        <div className="flex shrink-0 items-center border-b border-border">
-          <BottomTab active={bottomTab === 'console'} onClick={() => setBottomTab('console')} icon={SquareTerminal} label="Console" />
-          <BottomTab active={bottomTab === 'watch'} onClick={() => setBottomTab('watch')} icon={Eye} label="Watch" />
-          <BottomTab active={bottomTab === 'memory'} onClick={() => setBottomTab('memory')} icon={MemoryStick} label="Memory" />
-        </div>
-        <div className="min-h-0 flex-1 overflow-hidden">
-          {bottomTab === 'console' && <TerminalDock />}
-          {bottomTab === 'watch' && <WatchPanel uid={uid} connected={isConnected} />}
-          {bottomTab === 'memory' && <MemoryPanel uid={uid} connected={isConnected} />}
+        <div className="flex min-h-0 flex-1">
+          {/* 左栏：Console 固定（无 tab 栏） */}
+          <div className="flex min-w-0 flex-col overflow-hidden" style={{ width: `${bottomLeftRatio * 100}%` }}>
+            <div className="flex shrink-0 items-center border-b border-border">
+              <BottomTab active icon={SquareTerminal} label="Console" />
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <TerminalDock />
+            </div>
+          </div>
+          {/* 左右分隔条 */}
+          <ResizeHandle
+            direction="horizontal"
+            onResize={handleBottomSplitResize}
+            expanded={bottomLeftRatio > 0}
+          />
+          {/* 右栏：Call Stack / Memory / Watch tab 区（flex-1 占剩余，分隔条宽度自动吸收） */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <div className="flex shrink-0 items-center border-b border-border">
+              <BottomTab active={bottomTab === 'callstack'} onClick={() => setBottomTab('callstack')} icon={ListTree} label="Call Stack" />
+              <BottomTab active={bottomTab === 'watch'} onClick={() => setBottomTab('watch')} icon={Eye} label="Watch" />
+              <BottomTab active={bottomTab === 'memory'} onClick={() => setBottomTab('memory')} icon={MemoryStick} label="Memory" />
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              {bottomTab === 'callstack' && <CallStackPanel uid={uid} connected={isConnected} />}
+              {bottomTab === 'watch' && <WatchPanel uid={uid} connected={isConnected} />}
+              {bottomTab === 'memory' && <MemoryPanel uid={uid} connected={isConnected} />}
+            </div>
+          </div>
         </div>
       </div>
     </div>

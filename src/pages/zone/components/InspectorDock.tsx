@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Loader2, AlertCircle, Cpu, Blocks, Binary, ListTree, Share2, ChevronRight, ChevronDown } from 'lucide-react'
+import { Loader2, AlertCircle, Cpu, Blocks, Binary, Share2, ChevronRight, ChevronDown } from 'lucide-react'
 import { useZoneStore, type InspectorTabId } from '../store'
 import * as zoneService from '@/services/zone.service'
 import type { Peripheral, PeripheralRegister, PeripheralField, CoreRegister } from '@/services/zone.service'
 import { cn } from '@/lib/utils'
 import { DisasmView } from './DisasmView'
-import { CallStackPanel } from './CallStackPanel'
 import { CallGraphPanel } from './CallGraphPanel'
 
 interface InspectorDockProps {
@@ -54,7 +53,6 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
 
   const sections = [
     { id: 'disasm' as InspectorTabId, label: 'Disassembly', icon: Binary, content: <DisasmView uid={uid} connected={connected} /> },
-    { id: 'callstack' as InspectorTabId, label: 'Call Stack', icon: ListTree, content: <CallStackPanel uid={uid} connected={connected} /> },
     { id: 'callgraph' as InspectorTabId, label: 'Call Graph', icon: Share2, content: <CallGraphPanel uid={uid} connected={connected} /> },
     { id: 'registers' as InspectorTabId, label: 'Registers', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
     { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },

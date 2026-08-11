@@ -504,9 +504,44 @@ class DwarfLocals:
                 raw = val
             base["value"] = raw
             base["available"] = True
+            # 指针：若指向 struct/array 且指针值有效，解引用展开目标成员/元素
+            if kind == "pointer":
+                self._attach_pointer_children(base, var.type_die, raw, regs)
         except Exception:
             pass
         return base
+
+    def _attach_pointer_children(self, node, die, ptr, regs, depth=0):
+        """指针解引用：穿透 typedef/const/volatile 确认是指针，取指向的类型；
+        若 pointee 为 struct/array 且指针值有效，在目标地址展开成员/元素挂到 node.children。
+        空指针/无效指针/函数指针/指向标量时不展开。递归受 depth 保护。"""
+        if not ptr or depth > 12:
+            return
+        d = die
+        ddepth = 0
+        while d.tag in (_TAG_CONST, _TAG_VOLATILE, _TAG_RESTRICT, _TAG_TYPEDEF):
+            if "DW_AT_type" not in d.attributes or ddepth > 12:
+                return
+            d = d.get_DIE_from_attribute("DW_AT_type")
+            ddepth += 1
+        if d.tag != _TAG_POINTER:
+            return
+        if "DW_AT_type" not in d.attributes:
+            return
+        pointee = d.get_DIE_from_attribute("DW_AT_type")
+        ptag = pointee.tag
+        pdepth = 0
+        while ptag in (_TAG_CONST, _TAG_VOLATILE, _TAG_RESTRICT, _TAG_TYPEDEF):
+            if "DW_AT_type" not in pointee.attributes or pdepth > 12:
+                break
+            pointee = pointee.get_DIE_from_attribute("DW_AT_type")
+            ptag = pointee.tag
+            pdepth += 1
+        if ptag not in (_TAG_STRUCT, _TAG_ARRAY):
+            return
+        sub = self._build_value_node(pointee, ptr, regs, node.get("name", ""), depth + 1)
+        if sub and sub["children"]:
+            node["children"] = sub["children"]
 
     def _type_kind(self, die, depth=0):
         """穿透 typedef/const/volatile/restrict，返回类型类别：
@@ -591,9 +626,11 @@ class DwarfLocals:
                     children.append(sub)
             node["children"] = children
         elif tag == _TAG_POINTER:
-            # 指针：value 显示指针值（指向的地址）
+            # 指针：value 显示指针值（指向的地址）；若指向 struct/array 则解引用展开
             node["kind"] = "pointer"
-            node["value"] = self._read_word(addr, 4, regs)
+            ptr = self._read_word(addr, 4, regs)
+            node["value"] = ptr
+            self._attach_pointer_children(node, die, ptr, regs, depth + 1)
         else:
             node["value"] = self._read_word(addr, size or 4, regs)
         return node
