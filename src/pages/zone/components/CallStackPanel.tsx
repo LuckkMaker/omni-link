@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, AlertCircle, ChevronRight, ChevronDown } from 'lucide-react'
 import { zoneStack, type CallStackFrame, type CallStackLocal } from '@/services/zone.service'
 import { useZoneStore } from '../store'
+import { cn } from '@/lib/utils'
 
 interface CallStackPanelProps {
   uid: string | null
@@ -47,13 +48,15 @@ interface VarNodeProps {
   depth: number
   expanded: Set<string>
   onToggle: (path: string) => void
+  changed: Set<string>
 }
 
 /** 递归渲染局部变量节点（结构体/数组可折叠展开成员/元素） */
-function VarNode({ node, path, depth, expanded, onToggle }: VarNodeProps) {
+function VarNode({ node, path, depth, expanded, onToggle, changed }: VarNodeProps) {
   const hasChildren = node.children && node.children.length > 0
   const open = expanded.has(path)
   const indent = Math.min(depth, 8) * 12 + 12
+  const isChanged = changed.has(path)
   return (
     <>
       <div className={`${GRID} border-t border-border/30 bg-muted/20 text-xs`}>
@@ -75,7 +78,10 @@ function VarNode({ node, path, depth, expanded, onToggle }: VarNodeProps) {
           {node.name}
         </span>
         <span
-          className="min-w-0 truncate border-l border-border/30 px-2 py-1 text-left font-mono text-muted-foreground"
+          className={cn(
+            'min-w-0 truncate border-l border-border/30 px-2 py-1 text-left font-mono',
+            isChanged ? 'bg-yellow-400/30 text-foreground' : 'text-muted-foreground'
+          )}
           title={node.address != null ? `地址: ${fmtAddr(node.address)}` : undefined}
         >
           {valueText(node)}
@@ -96,6 +102,7 @@ function VarNode({ node, path, depth, expanded, onToggle }: VarNodeProps) {
               depth={depth + 1}
               expanded={expanded}
               onToggle={onToggle}
+              changed={changed}
             />
           ))
         : null}
@@ -107,6 +114,18 @@ function VarNode({ node, path, depth, expanded, onToggle }: VarNodeProps) {
  * Call Stack tab：调用栈回溯（4 列：Function / Location·Value / Type / Source）。
  * 需目标暂停；在 halt/step（PC 变化）时自动刷新。结构体/数组变量可折叠展开。
  */
+/** 递归收集所有变量节点的值文本（path -> 值文本），用于对比前后变化 */
+function collectValueTexts(locals: CallStackLocal[] | undefined, prefix: string, out: Map<string, string>) {
+  if (!locals) return
+  locals.forEach((v, vi) => {
+    const path = `${prefix}-${vi}`
+    out.set(path, valueText(v))
+    if (v.children && v.children.length > 0) {
+      collectValueTexts(v.children, path, out)
+    }
+  })
+}
+
 export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
@@ -116,6 +135,10 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   const [error, setError] = useState<string | null>(null)
   // 已展开的变量节点路径集合
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  // 值发生变化（与上次刷新对比）的变量节点路径集合
+  const [changed, setChanged] = useState<Set<string>>(() => new Set())
+  // 上一次各变量节点的值文本快照（path -> 值文本）
+  const prevTextsRef = useRef<Map<string, string>>(new Map())
 
   const toggleNode = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -131,8 +154,21 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
     setLoading(true)
     try {
       const res = await zoneStack(uid)
-      setFrames(res.frames ?? [])
+      const newFrames = res.frames ?? []
+      setFrames(newFrames)
       setError(null)
+      // 对比本次与上次的值文本，标记变化节点
+      const curr = new Map<string, string>()
+      newFrames.forEach((f, i) => {
+        collectValueTexts(f.locals, `f${i}`, curr)
+      })
+      const prev = prevTextsRef.current
+      const changedPaths = new Set<string>()
+      for (const [path, text] of curr) {
+        if (prev.has(path) && prev.get(path) !== text) changedPaths.add(path)
+      }
+      setChanged(changedPaths)
+      prevTextsRef.current = curr
     } catch (e) {
       setFrames([])
       setError(e instanceof Error ? e.message : '读取调用栈失败')
@@ -210,7 +246,7 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
                     className="min-w-0 truncate border-l border-border/50 px-2 py-1 text-left font-mono text-muted-foreground"
                     title={`SP: ${f.sp != null ? fmtAddr(f.sp) : '—'}`}
                   >
-                    {fmtAddr(f.address)}
+                    {fmtAddr(f.function_address ?? f.address)}
                   </span>
                   <span
                     className="min-w-0 truncate border-l border-border/50 px-2 py-1 text-left text-muted-foreground"
@@ -235,10 +271,11 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
                       <VarNode
                         key={`${f.address}-v-${vi}`}
                         node={v}
-                        path={`${f.address}-${vi}`}
+                        path={`f${i}-${vi}`}
                         depth={0}
                         expanded={expanded}
                         onToggle={toggleNode}
+                        changed={changed}
                       />
                     ))
                   : null}
