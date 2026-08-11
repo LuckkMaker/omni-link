@@ -42,15 +42,19 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   // halt/step 时自动刷新（PC 变化或状态进入 halted）
   const lastState = useRef(state)
   const lastPc = useRef(pc)
+  const didInit = useRef(false)
   useEffect(() => {
     if (!uid) {
       setFrames([])
       return
     }
     if (state === 'halted') {
+      // 首次挂载时若目标已 halt（如会话启动后才展开此面板），强制刷新一次，避免空帧
       const stateChanged = lastState.current !== 'halted'
       const pcChanged = lastPc.current !== pc
-      if (stateChanged || pcChanged) void refresh()
+      const firstMount = !didInit.current
+      didInit.current = true
+      if (stateChanged || pcChanged || firstMount) void refresh()
     } else {
       setFrames([])
     }

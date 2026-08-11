@@ -12,9 +12,10 @@
 """
 
 import os
+import bisect
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -420,14 +421,29 @@ class ElfBackend:
             entry["_function_ranges"] = ranges
         return ranges
 
+    def _find_func(self, uid: str, address: int) -> Optional[tuple]:
+        """二分查找覆盖 address 的函数区间 (start, end, name, faddr, fsize)，无则 None"""
+        entry = self._get(uid)
+        if not entry:
+            return None
+        ranges = self._function_ranges(uid)
+        if not ranges:
+            return None
+        starts = entry.get("_function_starts")
+        if starts is None:
+            starts = [r[0] for r in ranges]
+            entry["_function_starts"] = starts
+        idx = bisect.bisect_right(starts, address) - 1
+        if idx < 0:
+            return None
+        start, end, name, faddr, fsize = ranges[idx]
+        if start <= address < end:
+            return (start, end, name, faddr, fsize)
+        return None
+
     def is_function_address(self, uid: str, address: int) -> bool:
         """判断地址是否落在某个已知函数内（用于栈回溯的返回地址过滤）"""
-        for start, end, *_ in self._function_ranges(uid):
-            if start <= address < end:
-                return True
-            if address < start:
-                break
-        return False
+        return self._find_func(uid, address) is not None
 
     def resolve_address(self, uid: str, address: int) -> Optional[dict]:
         """解析地址 → {address, symbol, function, function_address, function_size, file, line}"""
@@ -435,14 +451,12 @@ class ElfBackend:
         if not entry:
             return None
         result = {"address": address}
-        for start, end, name, faddr, fsize in self._function_ranges(uid):
-            if start <= address < end:
-                result["function"] = name
-                result["function_address"] = faddr
-                result["function_size"] = fsize
-                break
-            if address < start:
-                break
+        fn = self._find_func(uid, address)
+        if fn:
+            _, _, name, faddr, fsize = fn
+            result["function"] = name
+            result["function_address"] = faddr
+            result["function_size"] = fsize
         sd = entry.get("symbol_decoder")
         if sd:
             sym = sd.get_symbol_for_address(address)
@@ -453,6 +467,104 @@ class ElfBackend:
             result["file"] = self._line_full_path(line_info)
             result["line"] = line_info.line
         return result
+
+    def unwind(self, uid: str, regs: dict, read_mem: Callable) -> list[dict]:
+        """重建 ARM Cortex-M 调用栈（返回有序帧列表）。
+
+        regs: {r0..r15, sp, lr, pc, xpsr, msp, psp, control}
+        read_mem: callable(addr, length) -> bytes，用于读取目标 RAM。
+
+        策略（由可信到兜底）：
+        1. 帧0 = 当前 PC；
+        2. 异常上下文（LR 为 EXC_RETURN）：从硬件异常栈帧恢复被中断的 PC；
+        3. 普通上下文：LR 作为当前函数返回地址候选；
+        4. 帧指针链回溯（R11 指向已保存帧 [fp]=旧fp, [fp+4]=旧lr）；
+        5. 栈扫描兜底：SP 向上扫描落在函数区间内的值作为返回地址。
+        结果去重、按深度排序，最多 40 帧。
+        """
+        def rd32(addr: int):
+            try:
+                b = read_mem(addr, 4)
+                return int.from_bytes(b, "little") if len(b) == 4 else None
+            except Exception:
+                return None
+
+        pc = (regs.get("pc") or regs.get("r15") or 0) & ~1
+        sp = (regs.get("sp") or regs.get("r13") or 0) & ~0x3
+        lr = regs.get("lr") or regs.get("r14") or 0
+        lr_clear = lr & ~1
+        msp = (regs.get("msp") or 0) & ~0x3
+        psp = (regs.get("psp") or 0) & ~0x3
+        control = regs.get("control") or 0
+        r11 = (regs.get("r11") or 0) & ~0x3
+
+        frames: list[dict] = []
+        seen: set[int] = set()
+
+        def push(addr: int, sp_val=None):
+            addr &= ~1
+            if addr in seen or addr == 0 or addr == 0xffffffff:
+                return
+            seen.add(addr)
+            r = self.resolve_address(uid, addr) or {"address": addr}
+            if sp_val is not None:
+                r["sp"] = sp_val
+            frames.append(r)
+
+        # 帧0：当前 PC
+        push(pc, sp)
+
+        # 异常上下文：LR 为 EXC_RETURN (0xFFFFFFFx)，异常只用 MSP
+        exc_return = (lr & 0xffffff00) == 0xffffff00
+        if exc_return:
+            base = msp if msp else sp
+            # 硬件异常栈帧：R0..R3,R12,LR,PC,xPSR（PC 在 +24，被中断上下文 SP 在 +32 / +36(浮点)）
+            exc_pc = rd32(base + 24)
+            if exc_pc and self.is_function_address(uid, exc_pc & ~1):
+                push(exc_pc)
+            fp_frame = bool(lr & 0x10)
+            active_sp = (base + (36 if fp_frame else 32)) & ~0x3
+        else:
+            # 普通上下文：LR 为当前函数返回地址候选
+            if (
+                lr_clear
+                and lr_clear != 0xffffffff
+                and self.is_function_address(uid, lr_clear)
+            ):
+                push(lr_clear)
+            # 当前使用 PSP（线程态）时用 PSP，否则用 MSP
+            active_sp = (psp if (control & 0x2 and psp) else (msp if msp else sp)) & ~0x3
+
+        # 帧指针链回溯（R11 指向已保存帧）：[fp]=旧fp，[fp+4]=旧lr
+        if r11 and r11 >= 0x20000000:
+            fp = r11
+            guard = 0
+            while fp and guard < 64:
+                old_lr = rd32(fp + 4)
+                if old_lr and self.is_function_address(uid, old_lr & ~1):
+                    push(old_lr & ~1)
+                old_fp = rd32(fp)
+                if old_fp and (old_fp & ~0x3) != fp and (old_fp & ~0x3) > fp:
+                    fp = old_fp & ~0x3
+                else:
+                    break
+                guard += 1
+
+        # 栈扫描兜底：active_sp 向上扫描，落在函数区间内的值作为返回地址
+        try:
+            chunk = read_mem(active_sp, 1024)
+        except Exception:
+            chunk = b""
+        for i in range(0, len(chunk) - 3, 4):
+            val = int.from_bytes(chunk[i:i + 4], "little") & ~1
+            if val == 0 or val == 0xfffffffe or val == 0xffffffff:
+                continue
+            if not self.is_function_address(uid, val):
+                continue
+            push(val)
+            if len(frames) >= 40:
+                break
+        return frames
 
     def get_callees(self, uid: str, address: int) -> dict:
         """调用图：解析指定函数地址的直接 callees（反汇编 BL/BLX 指令的目标）"""
