@@ -38,6 +38,16 @@ class ProbeSession:
     error: Optional[str] = None
 
 
+# 会话关闭回调：供其他模块（如 zone）注册以清理其按 uid 维护的会话态（如断点表）。
+# 在 pyOCD session 真正关闭后同步触发，线程由调用方保证（_close_session 在后台线程执行）。
+_session_closed_handlers: list = []
+
+
+def register_session_closed(handler):
+    """注册会话关闭回调 handler(uid)"""
+    _session_closed_handlers.append(handler)
+
+
 class PyOCDBackend(BackendInterface):
     """pyOCD 后端实现"""
 
@@ -164,10 +174,14 @@ class PyOCDBackend(BackendInterface):
                 # 强制重连时关闭旧会话：恢复目标运行（resume_on_disconnect=True）。
                 # 若保持 halted 断开，芯片会停在暂停/低功耗状态，后续重连常需手动复位才能恢复。
                 old_session.options.set('resume_on_disconnect', True)
+                # 清除旧会话在目标上的硬件断点（FPB），避免残留影响重连后的调试
+                self._clear_hw_breakpoints(old_session)
                 old_session.close()
                 event_manager.log("info", f"Closed stale session for {probe_uid[:16]} before reconnect")
             except Exception:
                 pass
+            finally:
+                self._notify_session_closed(probe_uid)
 
         event_manager.log("info", f"Connecting to probe {probe_uid[:16]}...")
 
@@ -363,20 +377,51 @@ class PyOCDBackend(BackendInterface):
             # 放入后台线程执行以避免阻塞前端。
             import threading
             session = session_info.session
-            t = threading.Thread(target=self._close_session, args=(session,), daemon=True)
+            t = threading.Thread(target=self._close_session, args=(probe_uid, session), daemon=True)
             t.start()
 
         return True
 
-    def _close_session(self, session):
+    def _clear_hw_breakpoints(self, session):
+        """清除目标 core 上的全部硬件断点（FPB）
+
+        在关闭会话前显式调用，避免 stop session 后芯片残留断点。
+        逐个 core 容错处理，单个失败不影响其余清理。
+        """
+        target = getattr(session, 'target', None)
+        if target is None:
+            return
+        try:
+            cores = getattr(target, 'cores', None) or [target.selected_core]
+        except Exception:
+            cores = []
+        for core in cores:
+            try:
+                core.bp_manager.remove_all_breakpoints()
+            except Exception:
+                pass  # 单个 core 清理失败忽略，继续处理其余
+
+    def _notify_session_closed(self, uid):
+        """同步触发已注册的会话关闭回调（用于清理各模块按 uid 维护的会话态）"""
+        for handler in _session_closed_handlers:
+            try:
+                handler(uid)
+            except Exception:
+                pass  # 单个回调失败不影响其余
+
+    def _close_session(self, uid, session):
         """后台关闭 pyOCD session，避免 blocking 前端"""
         try:
             # 断开时恢复目标运行（resume_on_disconnect=True），让芯片退出会话后 free-run，
             # 避免芯片停在 halt/低功耗导致下次连接需手动复位。resume() 在本后台线程执行，不阻塞前端。
             session.options.set('resume_on_disconnect', True)
+            # 清除目标上所有硬件断点（FPB），避免 stop session 后芯片残留断点
+            self._clear_hw_breakpoints(session)
             session.close()
         except Exception:
             pass  # 后台清理，忽略超时等异常
+        finally:
+            self._notify_session_closed(uid)
 
     def get_state(self, probe_uid: str) -> ProbeState:
         """获取探针连接状态"""

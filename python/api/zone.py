@@ -19,7 +19,7 @@ from typing import Optional
 from core.commander_backend import commander_backend
 from core.elf_backend import elf_backend
 from core.peripheral_backend import peripheral_backend
-from core.pyocd_backend import backend
+from core.pyocd_backend import backend, register_session_closed
 
 router = APIRouter()
 
@@ -300,6 +300,19 @@ async def zone_status(uid: str):
 # ── 源码行断点 ──────────────────────────────
 # uid -> {address: {address, file, line}}
 _BREAKPOINTS: dict[str, dict[int, dict]] = {}
+
+
+def _clear_zone_breakpoints(uid: str):
+    """会话关闭回调：清空该 uid 的应用层断点表
+
+    由 pyocd_backend 在 session 关闭后触发，确保 stop session / 强制重连后
+    不再残留断点记录，避免下次同一 uid 启动会话时经 _rearm_breakpoints 重新武装旧断点。
+    """
+    _BREAKPOINTS.pop(uid, None)
+
+
+# 注册到后端会话关闭回调（模块导入时执行一次）
+register_session_closed(_clear_zone_breakpoints)
 
 
 def _get_session_core(uid: str):
