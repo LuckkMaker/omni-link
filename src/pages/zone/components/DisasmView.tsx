@@ -396,7 +396,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
         ) : loading ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
-            反汇编中...
+            加载中...
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center gap-2 text-red-500">
@@ -456,17 +456,17 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
                   }}
                   className={
                     isPc
-                      ? 'flex border-b border-primary/20 bg-primary/10'
+                      ? 'flex border-b border-green-500/20 bg-green-500/15'
                       : 'flex border-b border-transparent hover:bg-muted/30'
                   }
                 >
                   {/* 断点槽/PC 标记列（与源码窗口一致） */}
-                  <div className="sticky left-0 flex w-10 shrink-0 select-none items-center justify-center bg-background">
-                    <span className={isPc ? 'font-bold leading-none text-primary' : 'text-transparent'}>
+                  <div className={`sticky left-0 flex w-10 shrink-0 select-none items-center justify-center ${isPc ? 'bg-green-500/15' : 'bg-background'}`}>
+                    <span className={isPc ? 'font-bold leading-none text-green-500' : 'text-transparent'}>
                       ▶
                     </span>
                   </div>
-                  <span className={isPc ? 'w-24 shrink-0 font-bold text-primary' : 'w-24 shrink-0 text-muted-foreground'}>
+                  <span className={isPc ? 'w-24 shrink-0 font-bold text-green-500' : 'w-24 shrink-0 text-muted-foreground'}>
                     {row.address.toString(16).toUpperCase().padStart(8, '0')}
                   </span>
                   <span className="w-20 shrink-0 text-muted-foreground/70">{row.bytes.toUpperCase()}</span>

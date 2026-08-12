@@ -654,7 +654,7 @@ export function SourceView({ uid }: SourceViewProps) {
                 }}
                 className={
                   isPcLine
-                    ? 'flex cursor-pointer border-b border-primary/15 bg-primary/10 select-none'
+                    ? 'flex cursor-pointer border-b border-green-500/20 bg-green-500/15 select-none'
                     : isCursorLine
                       ? 'flex cursor-pointer border-b border-amber-300/40 bg-amber-400/10 select-none'
                       : 'flex cursor-pointer border-b border-transparent hover:bg-muted/30 select-none'
@@ -665,7 +665,7 @@ export function SourceView({ uid }: SourceViewProps) {
                   className={cn(
                     'sticky left-0 flex w-14 shrink-0 select-none items-center gap-1 pr-1 text-right',
                     isPcLine
-                      ? 'bg-primary/10'
+                      ? 'bg-green-500/15'
                       : isCursorLine
                         ? 'bg-amber-400/10'
                         : 'bg-background'
@@ -685,12 +685,12 @@ export function SourceView({ uid }: SourceViewProps) {
                         // 位置大小与普通状态一致，仅运行指示附加半透明
                         <span className="relative block size-3">
                           <span className="absolute inset-0 flex items-center justify-center text-red-500">●</span>
-                          <span className="absolute inset-0 flex items-center justify-center font-bold leading-none text-primary opacity-50">▶</span>
+                          <span className="absolute inset-0 flex items-center justify-center font-bold leading-none text-green-500 opacity-50">▶</span>
                         </span>
                       ) : hasBp ? (
                         <span className="text-red-500">●</span>
                       ) : isPcLine ? (
-                        <span className="font-bold leading-none text-primary">▶</span>
+                        <span className="font-bold leading-none text-green-500">▶</span>
                       ) : (
                         <span className="text-gray-300">●</span>
                       )}
@@ -698,7 +698,7 @@ export function SourceView({ uid }: SourceViewProps) {
                   ) : (
                     <span className="flex w-3 shrink-0" />
                   )}
-                  <span className={isPcLine ? 'font-bold text-primary' : 'text-muted-foreground'}>
+                  <span className={isPcLine ? 'font-bold text-green-500' : 'text-muted-foreground'}>
                     {lineNo}
                   </span>
                 </div>

@@ -20,3 +20,4 @@
 ## 优化 Zone 页面功能
 1. 源码窗增加检索功能，为后续选择变量添加到监控列表做准备。
 2. 每次start session时，源码窗会依次打开stm32f4xx_hal.c，core_cm4.h，startup_stm32f407xx.s文件，最后停留在startup_stm32f407xx.s文件。
+3. 支持ctrl + 鼠标左键点击源码窗的函数名或变量名，跳转到定义处。
