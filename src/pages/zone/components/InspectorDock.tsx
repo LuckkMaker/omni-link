@@ -58,27 +58,40 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
     { id: 'registers' as InspectorTabId, label: 'Registers', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
     { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
   ]
-  const expandedSections = sections.filter((s) => expanded.includes(s.id))
-  const collapsedSections = sections.filter((s) => !expanded.includes(s.id))
+  const expandedSections = new Set(expanded)
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card">
-      {/* 展开的 section：header + 内容（共享剩余高度） */}
-      {expandedSections.map((s) => (
-        <div key={s.id} className="flex min-h-0 flex-1 flex-col">
-          <RailTab active onClick={() => toggle(s.id)} icon={s.icon} label={s.label} title={s.label} />
-          <div className="min-h-0 flex-1 overflow-hidden border-t border-border">{s.content}</div>
-        </div>
-      ))}
-      {/* 折叠的 section 固定在底部；content 保持挂载（会话启动后预取数据），仅 CSS 隐藏不占空间 */}
-      <div className="mt-auto flex shrink-0 flex-col">
-        {collapsedSections.map((s) => (
-          <div key={s.id} className="flex flex-col">
-            <RailTab active={false} onClick={() => toggle(s.id)} icon={s.icon} label={s.label} title={s.label} />
-            <div className="hidden">{s.content}</div>
+      {/* 每个 section 只挂载一次：折叠/展开仅通过 CSS(order + hidden) 切换显示，
+          避免在两个容器间搬移导致 React 重建组件实例、丢失面板状态（如外设展开态/寄存器值） */}
+      {sections.map((s) => {
+        const isExpanded = expandedSections.has(s.id)
+        return (
+          <div
+            key={s.id}
+            className={cn(
+              'flex flex-col',
+              isExpanded ? 'min-h-0 flex-1 order-0' : 'shrink-0 order-1'
+            )}
+          >
+            <RailTab
+              active={isExpanded}
+              onClick={() => toggle(s.id)}
+              icon={s.icon}
+              label={s.label}
+              title={s.label}
+            />
+            <div
+              className={cn(
+                'min-h-0 overflow-hidden border-t border-border',
+                isExpanded ? 'flex-1' : 'hidden'
+              )}
+            >
+              {s.content}
+            </div>
           </div>
-        ))}
-      </div>
+        )
+      })}
     </div>
   )
 }

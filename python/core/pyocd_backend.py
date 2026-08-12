@@ -161,7 +161,9 @@ class PyOCDBackend(BackendInterface):
         # 也要清理可能残留的旧 session 对象。
         if old_session is not None:
             try:
-                old_session.options.set('resume_on_disconnect', False)
+                # 强制重连时关闭旧会话：恢复目标运行（resume_on_disconnect=True）。
+                # 若保持 halted 断开，芯片会停在暂停/低功耗状态，后续重连常需手动复位才能恢复。
+                old_session.options.set('resume_on_disconnect', True)
                 old_session.close()
                 event_manager.log("info", f"Closed stale session for {probe_uid[:16]} before reconnect")
             except Exception:
@@ -369,8 +371,9 @@ class PyOCDBackend(BackendInterface):
     def _close_session(self, session):
         """后台关闭 pyOCD session，避免 blocking 前端"""
         try:
-            # 设置 resume_on_disconnect=False 避免 target.resume() 耗时操作
-            session.options.set('resume_on_disconnect', False)
+            # 断开时恢复目标运行（resume_on_disconnect=True），让芯片退出会话后 free-run，
+            # 避免芯片停在 halt/低功耗导致下次连接需手动复位。resume() 在本后台线程执行，不阻塞前端。
+            session.options.set('resume_on_disconnect', True)
             session.close()
         except Exception:
             pass  # 后台清理，忽略超时等异常
