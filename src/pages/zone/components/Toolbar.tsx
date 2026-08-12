@@ -168,14 +168,16 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         <RotateCcw className="size-4" />
         Reset
       </Button>
-      {/* Run：Start code execution */}
+      {/* Run：Start code execution。目标非暂停态（running/unknown）时禁用——
+          运行中再按 Run 是冗余 no-op，禁用可避免"点得动但不执行"的误导，
+          同时阻断连点产生的重复 continue 请求堆积到 SWD 链路。 */}
       <Button
         variant="ghost"
         size="sm"
         onClick={() => uid && continueRun(uid)}
-        disabled={disabled}
+        disabled={disabled || state !== 'halted'}
         className="h-8 gap-1.5"
-        title="Start code execution"
+        title={state !== 'halted' ? '目标未暂停，无法启动执行' : 'Start code execution'}
       >
         <Play className="size-4" />
         Run

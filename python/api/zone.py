@@ -130,8 +130,15 @@ async def zone_step(uid: str, req: StepRequest = StepRequest()):
 
 @router.post("/probes/{uid}/zone/debug/continue")
 async def zone_continue(uid: str):
-    """继续运行"""
+    """继续运行
+
+    目标已在运行（running）时，continue 是幂等冗余操作，直接返回 success，
+    避免前端连点/状态延迟导致的重复 continue 额外触碰 SWD 链路造成堆积。
+    """
     from core.monitor_backend import monitor_backend
+    session = backend._get_session(uid)
+    if session is not None and not session.target.is_halted():
+        return {"success": True}
     with monitor_backend.pause_during(uid):
         result = await asyncio.to_thread(commander_backend.execute, uid, "continue")
     if not result["success"] and result.get("error"):

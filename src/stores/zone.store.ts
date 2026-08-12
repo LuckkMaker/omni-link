@@ -91,6 +91,10 @@ interface ZoneStore {
 
   // ── 刷新策略 ──────────────────────────────
   refreshMode: RefreshMode
+  /** 刷新纪元：每次目标 halt 事件 / 调试动作完成时递增，驱动检查器面板在
+   *  快速循环（每次停在同一断点同 PC）时仍能刷新——on_stop 仅靠 state/pc 差值
+   *  判断会漏触发 */
+  refreshTick: number
 
   // ── 会话 ───────────────────────────────────
   sessions: ZoneSession[]
@@ -214,6 +218,7 @@ export const useZoneStore = create<ZoneStore>()(
       activeMemoryWindow: 'mem-1',
 
       refreshMode: 'on_stop',
+      refreshTick: 0,
 
       sessions: [],
 
@@ -359,7 +364,7 @@ export const useZoneStore = create<ZoneStore>()(
           await zoneService.zoneStep(uid, mode)
           zoneLog('info', `Zone Step [${mode}]`)
           const st = await zoneService.zoneStatus(uid)
-          set({ state: st.state, pc: st.pc, busy: false })
+          set({ state: st.state, pc: st.pc, busy: false, refreshTick: get().refreshTick + 1 })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Step failed'
           set({ busy: false, error: msg })
@@ -369,12 +374,18 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       continue: async (uid) => {
+        // 目标已在运行：Run 按钮此时已禁用（state!=='halted'），此处兜底拦截
+        // 状态刷新延迟造成的一瞬连点，避免重复 continue 堆积 SWD 流量。
+        // 注意不是静默吞掉常规点击——按钮禁用已在 UI 层给出明确 affordance。
+        if (get().state === 'running') return
         set({ busy: true, error: null, followSource: true })
         try {
           await zoneService.zoneContinue(uid)
           zoneLog('info', 'Zone Run (continue)')
           const st = await zoneService.zoneStatus(uid)
-          set({ state: st.state, pc: st.pc, busy: false })
+          // 每次 Run 都递增刷新纪元，驱动 Memory/外设面板刷新，
+          // 覆盖「每次停在同一断点同 PC」导致 on_stop 差值判断漏刷新的场景
+          set({ state: st.state, pc: st.pc, busy: false, refreshTick: get().refreshTick + 1 })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Continue failed'
           set({ busy: false, error: msg })
@@ -389,7 +400,7 @@ export const useZoneStore = create<ZoneStore>()(
           await zoneService.zoneReset(uid, mode)
           zoneLog('info', `Zone Reset [${mode}]`)
           const st = await zoneService.zoneStatus(uid)
-          set({ state: st.state, pc: st.pc, busy: false })
+          set({ state: st.state, pc: st.pc, busy: false, refreshTick: get().refreshTick + 1 })
         } catch (err) {
           const detail = extractApiErrorDetail(err)
           const fallback = err instanceof Error ? err.message : 'Reset failed'
@@ -406,7 +417,16 @@ export const useZoneStore = create<ZoneStore>()(
           // 仅会话 active 时落地 status/pc：连接中/未启动/停止等过渡期可能会有发起于旧会话的
           // 过期轮询并发返回，若无条件写入会用旧数据覆盖「已停止/未启动」的正确空态，
           // 导致面板显示陈旧内容、运行指示跳转到错误位置。
-          if (get().sessionStatus === 'active') set({ state: st.state, pc: st.pc })
+          if (get().sessionStatus === 'active') {
+            const prev = get().state
+            const patch: Partial<ZoneStore> = { state: st.state, pc: st.pc }
+            // 检测「非暂停 → 暂停」的 halt 跳变：递增刷新纪元，驱动检查器面板在断点命中时
+            // 刷新（覆盖目标自行运行命中断点、非按钮触发的场景）
+            if (st.state === 'halted' && prev !== 'halted') {
+              patch.refreshTick = get().refreshTick + 1
+            }
+            set(patch)
+          }
         } catch {
           // 忽略（连接断开时）
         }
@@ -489,7 +509,7 @@ export const useZoneStore = create<ZoneStore>()(
           await zoneService.zoneRunToCursor(uid, file, line)
           zoneLog('info', `Zone Run to Cursor ${file}:${line}`)
           const st = await zoneService.zoneStatus(uid)
-          set({ state: st.state, pc: st.pc, busy: false })
+          set({ state: st.state, pc: st.pc, busy: false, refreshTick: get().refreshTick + 1 })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Run to cursor failed'
           set({ busy: false, error: msg })

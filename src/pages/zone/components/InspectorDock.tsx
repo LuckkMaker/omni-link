@@ -101,24 +101,29 @@ function useAutoRefresh(uid: string | null, connected: boolean, ready: boolean, 
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
   const refreshMode = useZoneStore((s) => s.refreshMode)
+  const refreshTick = useZoneStore((s) => s.refreshTick)
   const lastState = useRef(state)
   const lastPc = useRef(pc)
+  const lastTick = useRef(refreshTick)
 
   useEffect(() => {
     // 会话未就绪（未连接 / 未加载 ELF / 未启动调试会话）时不自动轮询
     if (!uid || !connected || !ready) return
 
-    // On Stop：halt 时刷新；step 时状态保持 halted 但 PC 变化，据此再次刷新
+    // On Stop：halt/刷新纪元变化时刷新。refreshTick 每次 halt 事件/调试动作都递增，
+    // 覆盖「循环停在同一断点同 PC」时 state/pc 差值不变导致漏刷新的场景
     if (refreshMode === 'on_stop') {
       if (state === 'halted') {
         const stateChanged = lastState.current !== 'halted'
         const pcChanged = lastPc.current !== pc
-        if (stateChanged || pcChanged) {
+        const tickChanged = lastTick.current !== refreshTick
+        if (stateChanged || pcChanged || tickChanged) {
           refresh()
         }
       }
       lastState.current = state
       lastPc.current = pc
+      lastTick.current = refreshTick
       return
     }
 
@@ -132,7 +137,7 @@ function useAutoRefresh(uid: string | null, connected: boolean, ready: boolean, 
     }
     // off：不自动刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, ready, state, pc, refreshMode, refresh])
+  }, [uid, connected, ready, state, pc, refreshMode, refreshTick, refresh])
 }
 
 /** 十六进制格式化（32 位） */
@@ -162,6 +167,8 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
   const [changed, setChanged] = useState<Set<string>>(() => new Set())
   // 上次各寄存器值文本快照（name -> hex 文本）
   const prevTextsRef = useRef<Map<string, string>>(new Map())
+  // 刷新序号：latest-wins，丢弃过期响应（快速连点 Run 时乱序返回）
+  const refreshSeqRef = useRef(0)
 
   const refresh = useCallback(async () => {
     if (!ready || !uid) {
@@ -169,9 +176,11 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
       setError(null)
       return
     }
+    const seq = ++refreshSeqRef.current
     setLoading(true)
     try {
       const res = await zoneService.zoneCoreRegisters(uid)
+      if (seq !== refreshSeqRef.current) return
       if (res.success) {
         setRegisters(res.registers)
         setError(null)
@@ -187,9 +196,10 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
         prevTextsRef.current = curr
       }
     } catch (e) {
+      if (seq !== refreshSeqRef.current) return
       setError(e instanceof Error ? e.message : '读取失败')
     } finally {
-      setLoading(false)
+      if (seq === refreshSeqRef.current) setLoading(false)
     }
   }, [ready, uid])
 
@@ -258,6 +268,8 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
   const [changedFields, setChangedFields] = useState<Set<string>>(() => new Set())
   // 上次各字段值快照（address:fieldName -> field value）
   const prevFieldsRef = useRef<Map<string, number>>(new Map())
+  // 刷新序号：latest-wins，丢弃过期响应（快速连点 Run 时乱序返回）
+  const refreshSeqRef = useRef(0)
 
   // 始终引用最新展开状态，供 refreshValues 按需读取（避免 useCallback 闭包过期）
   const expandedPeriphRef = useRef(expandedPeriph)
@@ -274,8 +286,11 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
     }
     const addrs = allRegs.map((r) => r.address)
     if (addrs.length === 0) return
+    const seq = ++refreshSeqRef.current
     try {
       const res = await zoneService.zoneReadRegisters(uid, addrs)
+      // 已发起更新的刷新（res 过期）：丢弃本次结果，避免旧数据覆盖新数据
+      if (seq !== refreshSeqRef.current) return
       if (res.success) {
         const map = new Map<number, number>()
         for (const v of res.values) map.set(v.address, v.value)
@@ -528,6 +543,9 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
   // 上次读取的字节快照与基地址（地址变化时重置，避免整窗误标红）
   const prevBytesRef = useRef<Uint8Array | null>(null)
   const prevBaseRef = useRef<number | null>(null)
+  // 刷新序号：latest-wins——快速连点 Run 时多次异步读内存乱序返回，
+  // 只有最后一次的响应才允许落地，丢弃过期响应避免旧数据覆盖新数据
+  const refreshSeqRef = useRef(0)
 
   // 切换窗口时同步输入框
   useEffect(() => {
@@ -541,11 +559,14 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
       setError(null)
       return
     }
+    const seq = ++refreshSeqRef.current
     setLoading(true)
     try {
       const addr = parseInt(active.address, 16)
       if (isNaN(addr)) throw new Error('无效地址')
       const res = await zoneService.zoneReadMemory(uid, addr & ~0xf, 256)
+      // 已发起更新的刷新（res 过期）：丢弃本次结果，避免旧数据覆盖新数据
+      if (seq !== refreshSeqRef.current) return
       if (res.success) {
         // 浏览器环境无 Buffer，手动解析十六进制字符串为字节数组
         const hex = res.data_hex
@@ -579,9 +600,10 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
         setError(null)
       }
     } catch (e) {
+      if (seq !== refreshSeqRef.current) return
       setError(e instanceof Error ? e.message : '读取内存失败')
     } finally {
-      setLoading(false)
+      if (seq === refreshSeqRef.current) setLoading(false)
     }
   }, [ready, uid, active.address])
 
