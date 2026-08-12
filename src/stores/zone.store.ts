@@ -89,6 +89,8 @@ interface ZoneStore {
   sessions: ZoneSession[]
   /** Zone 调试会话生命周期：idle 未启动 / connecting 启动中 / active 已启动（与目标连接状态正交） */
   sessionStatus: 'idle' | 'connecting' | 'active'
+  /** 会话版本号：每次 start/stop/断开时递增，用于拦截跨会话的僵尸异步回调（如被 stop 中断的 startSession 仍置 active） */
+  sessionNonce: number
 
   // ── 断点 ───────────────────────────────────
   breakpoints: SourceBreakpoint[]
@@ -185,6 +187,7 @@ export const useZoneStore = create<ZoneStore>()(
       // ── 初始状态 ──────────────────────────
       state: 'disconnected',
       sessionStatus: 'idle',
+      sessionNonce: 0,
       pc: null,
       currentFunction: null,
       busy: false,
@@ -391,18 +394,40 @@ export const useZoneStore = create<ZoneStore>()(
       refreshStatus: async (uid) => {
         try {
           const st = await zoneService.zoneStatus(uid)
-          set({ state: st.state, pc: st.pc })
+          // 仅会话 active 时落地 status/pc：连接中/未启动/停止等过渡期可能会有发起于旧会话的
+          // 过期轮询并发返回，若无条件写入会用旧数据覆盖「已停止/未启动」的正确空态，
+          // 导致面板显示陈旧内容、运行指示跳转到错误位置。
+          if (get().sessionStatus === 'active') set({ state: st.state, pc: st.pc })
         } catch {
           // 忽略（连接断开时）
         }
       },
 
       stopSession: async (uid) => {
-        set({ busy: true, error: null })
+        // 递增会话版本号：使任何进行中的 startSession 回调失效，防止「点 stop 后，旧 start 仍在
+        // 烧录/复位，随后又回头把 sessionStatus 置回 active」的僵尸启动覆盖 stop 状态。
+        const nonce = get().sessionNonce + 1
+        set({ busy: true, error: null, sessionNonce: nonce })
         try {
           await probeService.disconnectProbe(uid)
-          // 停止会话后清除全部断点，避免残留影响下次会话
-          set({ state: 'disconnected', sessionStatus: 'idle', pc: null, busy: false, breakpoints: [] })
+          // 停止会话：全量重置会话态。ELF 派生数据（elfPath/sourceFiles/openFiles/activeSourceFile）
+          // 与 PC 跟随状态（closedByUser/followSource/pc/currentFunction）必须一并清空——
+          // 否则下次 start 时 elfLoaded 不翻转、fetch 面板不重拉，且被用户关闭过的文件会一直
+          // 阻塞运行指示自动跟随，导致「面板加载不到内容 / 运行指示跳转不到对应文件」。
+          set({
+            state: 'disconnected',
+            sessionStatus: 'idle',
+            pc: null,
+            currentFunction: null,
+            busy: false,
+            breakpoints: [],
+            elfPath: null,
+            sourceFiles: [],
+            openFiles: [],
+            activeSourceFile: null,
+            closedByUser: [],
+            followSource: true,
+          })
           zoneLog('info', 'Zone Stop debug session')
           useNotificationStore.getState().push({
             type: 'success',
@@ -522,7 +547,11 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       startSession: async (uid, mode, path) => {
-        set({ busy: true, error: null, followSource: true, sessionStatus: 'connecting' })
+        // 每次启动前递增会话版本号：标识本次会话。后续所有落地状态都校验该版本号，
+        // 若期间被 stopSession/断开 bump 过（版本号已变），则本次启动的烧录/复位/刷新回调
+        // 一律作废，避免旧会话在 stop 之后回头把 sessionStatus 置回 active。
+        const nonce = get().sessionNonce + 1
+        set({ busy: true, error: null, followSource: true, sessionStatus: 'connecting', sessionNonce: nonce })
         // 每个会话启动方式绑定所需连接模式
         const connectMode: ConnectMode = mode === 'download_reset' ? 'halt' : 'attach'
         const labels: Record<ZoneStartMode, string> = {
@@ -535,28 +564,53 @@ export const useZoneStore = create<ZoneStore>()(
           attach_running: '已附加到运行中的程序，会话已启动',
           attach_halt: '目标已暂停，会话已启动',
         }
+        // 「启动中」全局通知：加载期间保持显示（autoClose:false），完成后 update 为 success/error 再自动隐藏
+        const notifId = useNotificationStore.getState().push({
+          type: 'progress',
+          title: '正在加载会话...',
+          message: '正在连接设备...',
+          autoClose: false,
+        })
         try {
           // 1. 强制以绑定模式重连（自动切换连接模式，避免与全局设置冲突）
           await probeService.connectProbe(uid, { connect_mode: connectMode, force: true })
+          useNotificationStore.getState().update(notifId, { message: '正在加载 ELF 符号...' })
           // 2. 加载 ELF 符号（静默模式，避免与下方会话通知重复弹窗）
           const ok = await get().loadElf(uid, path, true)
-          if (!ok) return false
+          if (!ok) {
+            // loadElf 失败：恢复 idle（其内部已写 busy:false/error），避免停留在 connecting
+            if (get().sessionNonce === nonce) set({ sessionStatus: 'idle' })
+            useNotificationStore.getState().dismiss(notifId)
+            return false
+          }
           // 3. 会话动作
           if (mode === 'download_reset') {
             // 烧录（不自动运行）。复位并暂停在 Reset_Handler（参考 Keil：会话启动不自动运行到 main，
             // 由用户手动 [Run]/[Step] 进入程序，避免在调试起点上强加 breakpoint 副作用）
+            useNotificationStore.getState().update(notifId, { message: '正在下载固件并复位目标...' })
             await programFlash(uid, path, true, false)
             zoneLog('info', 'Zone Download & Reset Program')
             await get().reset(uid, 'halt')
           } else if (mode === 'attach_halt') {
+            useNotificationStore.getState().update(notifId, { message: '正在暂停目标...' })
             await get().halt(uid)
+          } else {
+            useNotificationStore.getState().update(notifId, { message: '正在附加到运行中的程序...' })
           }
           // attach_running：保持目标运行，无需额外动作
-          // 同步真实运行状态（download_reset 后目标仍在运行，attach_halt 后已暂停），
-          // 避免工具栏/后续 step 的依据状态与实际不一致
+          // 若在此过程中会话已被 stop（版本号已变），丢弃本次结果，避免僵尸启动覆盖 stop 状态
+          if (get().sessionNonce !== nonce) {
+            // 启动被中途停止：撤销这条「启动中」通知（stopSession 已有自己的停会话通知）
+            useNotificationStore.getState().dismiss(notifId)
+            return false
+          }
+          // 先置 active 再刷新状态：refreshStatus 仅在 active 时落地 state/pc，
+          // 保证首页首次展示的即是本次会话的真实运行状态
+          set({ sessionStatus: 'active' })
           await get().refreshStatus(uid)
-          set({ busy: false, sessionStatus: 'active' })
-          useNotificationStore.getState().push({
+          set({ busy: false })
+          // 启动完成：同一条通知转为成功态并自动关闭（慢慢隐藏）
+          useNotificationStore.getState().update(notifId, {
             type: 'success',
             title: labels[mode],
             message: summary[mode],
@@ -566,11 +620,14 @@ export const useZoneStore = create<ZoneStore>()(
           return true
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Start session failed'
-          set({ busy: false, error: msg, sessionStatus: 'idle' })
-          useNotificationStore.getState().push({
+          // 仅当仍由本次启动负责状态（未被 stop 覆盖）时才写回 idle/error
+          if (get().sessionNonce === nonce) set({ busy: false, error: msg, sessionStatus: 'idle' })
+          useNotificationStore.getState().update(notifId, {
             type: 'error',
             title: '会话启动失败',
             message: msg,
+            autoClose: true,
+            autoCloseDelay: 5000,
           })
           return false
         }

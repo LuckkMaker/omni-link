@@ -836,10 +836,6 @@ class PyOCDBackend(BackendInterface):
 
             event_manager.log("info", f"Programming {file_size} bytes from {os.path.basename(file_path)}...")
 
-            # 烧录前先复位并暂停目标（与 pyocd flash CLI 的 pre_reset 行为一致）
-            # 原因：目标可能正在运行用户代码，Flash 控制器状态未知，直接编程会失败
-            session.target.reset_and_halt()
-
             # 确定文件格式和基地址
             ext = os.path.splitext(file_path)[1].lower()
             kwargs = {}
@@ -856,6 +852,10 @@ class PyOCDBackend(BackendInterface):
             # 计算实际数据大小（HEX/ELF 文件大小 ≠ 数据大小）
             data_segments = self._extract_file_data(session, file_path, ext)
             actual_data_size = sum(len(d) for _, d in data_segments) if data_segments else file_size
+
+            # 烧录前先复位并暂停目标（与 pyocd flash CLI 的 pre_reset 行为一致）
+            # 原因：目标可能正在运行用户代码，Flash 控制器状态未知，直接编程会失败
+            session.target.reset_and_halt()
 
             # 第一阶段：擦除（chip erase 可能耗时较长，在前端展示 Erasing... 状态）
             event_manager.emit("flash.progress", {

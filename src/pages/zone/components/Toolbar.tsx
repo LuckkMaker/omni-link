@@ -108,7 +108,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
             {sessionActive ? 'Stop Session' : 'Start Session'}
           </>
         }
-        disabled={!uid || busy}
+        disabled={!uid || busy || sessionConnecting}
         onClick={handleStartMain}
       >
         <DropdownMenuItem onClick={() => handleStart('download_reset')}>

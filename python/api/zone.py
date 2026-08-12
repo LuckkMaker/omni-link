@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
 from fastapi import APIRouter, HTTPException
@@ -21,6 +22,8 @@ from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 # ── 请求模型 ──────────────────────────────

@@ -132,8 +132,9 @@ export default function ZonePage() {
       void refreshStatus(uid)
     } else {
       setState('disconnected')
-      // 断开/重连后清除调试会话状态与断点，避免 UI 残留
-      useZoneStore.setState({ sessionStatus: 'idle' })
+      // 断开/重连后清除调试会话状态与断点，避免 UI 残留；并递增版本号，
+      // 使发起于旧会话的僵尸异步回调（如仍在烧录/刷新的 startSession）失效
+      useZoneStore.setState((s) => ({ sessionStatus: 'idle', sessionNonce: s.sessionNonce + 1 }))
       useZoneStore.getState().breakpoints.length > 0 && setBreakpoints([])
     }
   }, [isConnected, uid, refreshStatus, setState, setBreakpoints])
@@ -164,13 +165,15 @@ export default function ZonePage() {
   // 周期轮询目标运行状态：在 on_stop 刷新模式下，Run 后目标若命中断点而暂停，
   // 状态不会自动同步到 store —— 必须主动轮询才能把 run→halt 的转变反映到 state/pc，
   // 否则断点命中后界面仍停留在"运行中"，表现为"没停在断点处"。
+  // 仅会话 active 时轮询：连接/启动/停止过渡期不查询，避免旧会话的过期状态经轮询写入。
+  const sessionStatus = useZoneStore((s) => s.sessionStatus)
   useEffect(() => {
-    if (!isConnected || !uid) return
+    if (!isConnected || !uid || sessionStatus !== 'active') return
     const timer = setInterval(() => {
       void refreshStatus(uid)
     }, 1000)
     return () => clearInterval(timer)
-  }, [isConnected, uid, refreshStatus])
+  }, [isConnected, uid, refreshStatus, sessionStatus])
 
   // 左侧面板宽度拖拽（面板在分隔条左侧：向右拖动→变宽）
   const handleSourceResize = useCallback((delta: number) => {

@@ -623,6 +623,7 @@ class DebugPort(DelegateHavingMixIn):
                     # connection was not lost and we can just return.
                     value = self.read_reg(DP_CTRL_STAT)
                     if (value & (CSYSPWRUPREQ | CDBGPWRUPREQ)) == (CSYSPWRUPREQ | CDBGPWRUPREQ):
+                        LOG.info("post_reset_recovery: recovered on attempt %d", attempt)
                         return
                 except exceptions.TransferError:
                     # Ignore errors caused by flushing.

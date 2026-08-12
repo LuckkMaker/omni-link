@@ -51,6 +51,27 @@ class ElfBackend:
         if not os.path.isfile(path):
             return {"success": False, "error": f"File not found: {path}"}
 
+        # 若同一探针已加载相同路径且磁盘文件未变，直接复用现有 entry，跳过重复解析。
+        # 重复 start session 时（固件未重新编译）避免每次重建 DWARF 解码器/符号表的耗时。
+        existing = self._get(uid)
+        if existing and existing.get("path") == path:
+            try:
+                if existing.get("mtime") == os.path.getmtime(path):
+                    function_count = (
+                        len(existing["decoder"].function_tree)
+                        if hasattr(existing["decoder"], 'function_tree')
+                        else 0
+                    )
+                    return {
+                        "success": True,
+                        "path": path,
+                        "source_files": self._collect_source_files(existing["decoder"]),
+                        "function_count": function_count,
+                        "disasm_available": self._capstone_available(),
+                    }
+            except OSError:
+                pass
+
         try:
             from elftools.elf.elffile import ELFFile
             from pyocd.debug.elf.decoder import DwarfAddressDecoder, ElfSymbolDecoder
