@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, Trash2, Pause } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -9,6 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { ConnectionConfigDialog } from '@/components/ConnectionConfigDialog'
 import { useZoneStore, type ZoneStartMode } from '../store'
 import { cn } from '@/lib/utils'
 
@@ -76,28 +77,47 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   // 但 zone 会话尚未启动（未加载 ELF），此时仍应显示 Start Session。
   const sessionActive = sessionStatus === 'active'
   const sessionConnecting = sessionStatus === 'connecting'
-  // 会话启动中禁止再次操作（避免重复触发 start/stop）
-  const sessionDisabled = !uid || busy || sessionConnecting
   // Step Out 仅在目标暂停且当前行落在函数内时可用（非函数行无法出栈）
   const stepOutDisabled = disabled || state !== 'halted' || !currentFunction
 
+  // 仿真器未选择或设备未连接时，弹出「连接配置」弹窗（start 模式，含 ELF 选择区）
+  const [configOpen, setConfigOpen] = useState(false)
+  const [pendingMode, setPendingMode] = useState<ZoneStartMode | null>(null)
+
   // 每次启动调试会话都强制弹窗选择 ELF 文件（不做自动记忆/回退），再按所选方式自动重连并执行动作
-  const handleStart = useCallback(async (mode: ZoneStartMode) => {
-    if (!uid) return
-    const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
-    if (!path) return
-    await startSession(uid, mode, path)
-  }, [uid, startSession])
+  const handleStart = useCallback(
+    (mode: ZoneStartMode) => {
+      // 仿真器未选择 / 设备未连接：先弹出连接配置弹窗（用户在此选择仿真器/目标 + ELF，再统一启动）
+      if (!uid || !connected) {
+        setPendingMode(mode)
+        setConfigOpen(true)
+        return
+      }
+      void (async () => {
+        const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
+        if (!path) return
+        await startSession(uid, mode, path)
+      })()
+    },
+    [uid, connected, startSession]
+  )
+
+  // 连接配置弹窗确认后：携带用户选择的 ELF 路径启动会话（连接由 startSession 内部统一处理，避免双重连接）
+  const handleStartSessionFromDialog = useCallback(
+    (elfPath: string) => {
+      if (!uid || !pendingMode) return
+      const mode = pendingMode
+      setPendingMode(null)
+      void startSession(uid, mode, elfPath)
+    },
+    [uid, pendingMode, startSession]
+  )
 
   // Start Session 主按钮：会话未启动 → 默认 Download & Reset Program；已启动 → Stop debug session
   const handleStartMain = useCallback(() => {
-    if (!uid) return
-    if (sessionActive) void stopSession(uid)
+    if (sessionActive && uid) void stopSession(uid)
     else void handleStart('download_reset')
   }, [uid, sessionActive, stopSession, handleStart])
-
-  // 会话启动中显示「启动中...」，禁用按钮
-  const mainText = sessionConnecting ? '启动中...' : sessionActive ? 'Stop Session' : 'Start Session'
 
   return (
     <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-2">
@@ -108,7 +128,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
             {sessionActive ? 'Stop Session' : 'Start Session'}
           </>
         }
-        disabled={!uid || busy || sessionConnecting}
+        disabled={busy || sessionConnecting}
         onClick={handleStartMain}
       >
         <DropdownMenuItem onClick={() => handleStart('download_reset')}>
@@ -230,6 +250,14 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         <Trash2 className="size-4" />
         Kill All Breakpoints
       </Button>
+
+      {/* 连接配置弹窗（start 模式，含 ELF 选择区）——仅仿真器未选择/设备未连接时由 Start Session 触发 */}
+      <ConnectionConfigDialog
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        mode="start"
+        onStartSession={handleStartSessionFromDialog}
+      />
     </div>
   )
 }
