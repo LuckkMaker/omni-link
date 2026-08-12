@@ -152,25 +152,16 @@ function formatHexAddr(addr: number): string {
   return `0x${hex.slice(0, 4)}_${hex.slice(4)}`
 }
 
-/** 按字组装十六进制（参考 Flash HexViewer 的 readLeU16/readLeU32 + wordToHex） */
-function wordHex(bytes: number[], width: 1 | 2 | 4, bigEndian: boolean): string {
-  let val = 0
-  if (bigEndian) {
-    for (let i = 0; i < width; i++) val = (val << 8) | (bytes[i] & 0xff)
-  } else {
-    for (let i = width - 1; i >= 0; i--) val = (val << 8) | (bytes[i] & 0xff)
-  }
-  return (val >>> 0).toString(16).toUpperCase().padStart(width * 2, '0')
-}
-
-
-
 // ── 寄存器面板（CPU Core：Name / Value / Description） ──────────
 function RegistersPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const { ready } = useSessionReady(uid, connected)
   const [registers, setRegisters] = useState<CoreRegister[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 值变化（与上次刷新对比）的寄存器名集合（黑字 + 背景高亮，与 Call Stack / Peripherals 一致）
+  const [changed, setChanged] = useState<Set<string>>(() => new Set())
+  // 上次各寄存器值文本快照（name -> hex 文本）
+  const prevTextsRef = useRef<Map<string, string>>(new Map())
 
   const refresh = useCallback(async () => {
     if (!ready || !uid) {
@@ -184,6 +175,16 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
       if (res.success) {
         setRegisters(res.registers)
         setError(null)
+        // 对比本次与上次的值文本，标记值发生变化的寄存器
+        const curr = new Map<string, string>()
+        res.registers.forEach((r) => curr.set(r.name, r.value !== undefined ? fmtHex(r.value) : ''))
+        const prev = prevTextsRef.current
+        const changedPaths = new Set<string>()
+        curr.forEach((text, name) => {
+          if (prev.has(name) && prev.get(name) !== text) changedPaths.add(name)
+        })
+        setChanged(changedPaths)
+        prevTextsRef.current = curr
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取失败')
@@ -220,7 +221,14 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
           {registers.map((r) => (
             <div key={r.name} className="grid grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-xs hover:bg-muted/30">
               <span className="min-w-0 truncate px-2 py-1 font-mono">{r.name}</span>
-              <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-primary">{fmtHex(r.value)}</span>
+              <span
+                className={cn(
+                  'min-w-0 truncate border-l border-border px-2 py-1 font-mono',
+                  changed.has(r.name) ? 'bg-yellow-400/30 text-foreground' : 'text-primary'
+                )}
+              >
+                {fmtHex(r.value)}
+              </span>
               <span className="min-w-0 truncate border-l border-border px-2 py-1 text-muted-foreground" title={r.description}>{r.description}</span>
             </div>
           ))}
@@ -242,6 +250,14 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
   const [regValues, setRegValues] = useState<Map<number, number>>(new Map())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 值变化（与上次刷新对比）的寄存器地址集合（黑字 + 背景高亮）
+  const [changedAddrs, setChangedAddrs] = useState<Set<number>>(() => new Set())
+  // 上次各地址值快照（address -> value）
+  const prevRegValuesRef = useRef<Map<number, number>>(new Map())
+  // 位域值变化（与上次对比）的字段 key 集合（address:fieldName，仅变化的位域高亮）
+  const [changedFields, setChangedFields] = useState<Set<string>>(() => new Set())
+  // 上次各字段值快照（address:fieldName -> field value）
+  const prevFieldsRef = useRef<Map<string, number>>(new Map())
 
   // 始终引用最新展开状态，供 refreshValues 按需读取（避免 useCallback 闭包过期）
   const expandedPeriphRef = useRef(expandedPeriph)
@@ -263,7 +279,29 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
       if (res.success) {
         const map = new Map<number, number>()
         for (const v of res.values) map.set(v.address, v.value)
+        // 对比本次与上次的值，标记值发生变化的寄存器地址
+        const prev = prevRegValuesRef.current
+        const changedSet = new Set<number>()
+        map.forEach((val, addr) => {
+          if (prev.has(addr) && prev.get(addr) !== val) changedSet.add(addr)
+        })
+        setChangedAddrs(changedSet)
+        prevRegValuesRef.current = map
         setRegValues(map)
+        // 按位域对比，仅标记值发生变化的位域（而非整个寄存器）
+        const prevFields = prevFieldsRef.current
+        const changedF = new Set<string>()
+        for (const reg of allRegs) {
+          const regVal = map.get(reg.address)
+          if (regVal === undefined) continue
+          for (const f of reg.fields ?? []) {
+            const fv = decodeFieldValue(regVal, f)
+            const fkey = `${reg.address}:${f.name}`
+            if (prevFields.has(fkey) && prevFields.get(fkey) !== fv) changedF.add(fkey)
+            prevFields.set(fkey, fv)
+          }
+        }
+        setChangedFields(changedF)
       }
     } catch {
       // 忽略
@@ -286,10 +324,6 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
       if (res.success) {
         setPeripherals(res.peripherals)
         setError(null)
-        // 默认展开第一个外设
-        if (res.peripherals.length > 0) {
-          setExpandedPeriph((prev) => (prev.size > 0 ? prev : new Set([res.peripherals[0].name])))
-        }
       }
     } catch (e) {
       // 优先展示后端 FastAPI 返回的 detail，便于定位真实原因
@@ -371,13 +405,19 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
                           onToggle={() => toggleReg(regKey)}
                           reg={reg}
                           value={regValues.get(reg.address)}
+                          changed={changedAddrs.has(reg.address)}
                         />
                         {regOpen &&
                           (reg.fields ?? []).map((f) => {
                             const regVal = regValues.get(reg.address)
                             const fv = regVal !== undefined ? decodeFieldValue(regVal, f) : undefined
                             return (
-                              <FieldRow key={`${regKey}:${f.name}`} field={f} value={fv} />
+                              <FieldRow
+                                  key={`${regKey}:${f.name}`}
+                                  field={f}
+                                  value={fv}
+                                  changed={changedFields.has(`${reg.address}:${f.name}`)}
+                                />
                             )
                           })}
                       </div>
@@ -407,8 +447,8 @@ function PeriphRow({ open, onToggle, name, value, description }: {
   )
 }
 
-function RegisterRow({ open, onToggle, reg, value }: {
-  open: boolean; onToggle: () => void; reg: PeripheralRegister; value: number | undefined
+function RegisterRow({ open, onToggle, reg, value, changed }: {
+  open: boolean; onToggle: () => void; reg: PeripheralRegister; value: number | undefined; changed?: boolean
 }) {
   const hasFields = (reg.fields ?? []).length > 0
   return (
@@ -421,7 +461,7 @@ function RegisterRow({ open, onToggle, reg, value }: {
         {hasFields ? <ChevronDownGlyph open={open} /> : <span className="size-3.5 shrink-0" />}
         <span className="truncate font-mono text-foreground">{reg.name}</span>
       </span>
-      <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-primary">
+      <span className={cn('min-w-0 truncate border-l border-border px-2 py-1 font-mono', changed ? 'bg-yellow-400/30 text-foreground' : 'text-primary')}>
         {value !== undefined ? fmtHex(value) : '—'}
       </span>
       <span className="min-w-0 truncate border-l border-border px-2 py-1 text-[10px] text-muted-foreground" title={reg.description}>
@@ -431,7 +471,7 @@ function RegisterRow({ open, onToggle, reg, value }: {
   )
 }
 
-function FieldRow({ field, value }: { field: PeripheralField; value: number | undefined }) {
+function FieldRow({ field, value, changed }: { field: PeripheralField; value: number | undefined; changed?: boolean }) {
   const bitDesc = field.bit_width === 1
     ? `bit ${field.bit_offset}`
     : `bits [${field.bit_offset + field.bit_width - 1}:${field.bit_offset}]`
@@ -447,7 +487,7 @@ function FieldRow({ field, value }: { field: PeripheralField; value: number | un
       <span className="min-w-0 truncate py-0.5 pl-12 pr-2 font-mono text-muted-foreground" title={bitDesc}>
         {field.name}
       </span>
-      <span className="min-w-0 truncate border-l border-border px-2 py-0.5 font-mono text-primary" title={bitDesc}>
+      <span className={cn('min-w-0 truncate border-l border-border px-2 py-0.5 font-mono', changed ? 'bg-yellow-400/30 text-foreground' : 'text-primary')} title={bitDesc}>
         {valueText}
       </span>
       <span className="min-w-0 truncate border-l border-border px-2 py-0.5 text-[10px] text-muted-foreground/70" title={field.description}>
@@ -483,6 +523,11 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
   const [rows, setRows] = useState<{ address: number; bytes: number[]; ascii: string }[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 值变化（与上次刷新对比）的字节偏移集合（窗口内 0-255，黑字 + 背景高亮）
+  const [changedBytes, setChangedBytes] = useState<Set<number>>(() => new Set())
+  // 上次读取的字节快照与基地址（地址变化时重置，避免整窗误标红）
+  const prevBytesRef = useRef<Uint8Array | null>(null)
+  const prevBaseRef = useRef<number | null>(null)
 
   // 切换窗口时同步输入框
   useEffect(() => {
@@ -508,6 +553,18 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
         for (let i = 0; i < bytes.length; i++) {
           bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
         }
+        // 对比本次与上次（同基地址）的字节，标记变化位置（高亮）
+        const base = res.address
+        const changedSet = new Set<number>()
+        const prevBytes = prevBytesRef.current
+        if (prevBaseRef.current === base && prevBytes) {
+          for (let i = 0; i < bytes.length; i++) {
+            if (prevBytes[i] !== bytes[i]) changedSet.add(i)
+          }
+        }
+        setChangedBytes(changedSet)
+        prevBaseRef.current = base
+        prevBytesRef.current = bytes
         const bpr = 16 // 每行固定 16 字节，组粒度由 groupSize 控制
         const newRows: { address: number; bytes: number[]; ascii: string }[] = []
         for (let i = 0; i < bytes.length; i += bpr) {
@@ -684,31 +741,33 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
         ) : error ? (
           <Empty text={error} isError />
         ) : (
-          rows.map((row) => {
-            // 按 byteWidth 切成等宽字（16 字节一行 → 1B:16 字 / 2B:8 字 / 4B:4 字），固定十六进制
-            const words: string[] = []
-            for (let i = 0; i < row.bytes.length; i += byteWidth) {
-              words.push(wordHex(row.bytes.slice(i, i + byteWidth), byteWidth, bigEndian))
-            }
+          rows.map((row, ri) => {
             return (
               <div key={row.address} className="flex gap-3 px-2 py-0.5 hover:bg-muted/30">
                 <span className="shrink-0 text-muted-foreground">{formatHexAddr(row.address)}</span>
+                {/* 按 byteWidth 分组，组内每个字节独立 span，值与上次对比变化的字节高亮 */}
                 <span className="shrink-0 flex items-center">
-                  {words.map((w, wi) => {
-                    // 8 字节中线处加更宽间距（与 Flash HexViewer 一致）
-                    const isMidpoint = wi === 8 / byteWidth
+                  {row.bytes.map((b, bi) => {
+                    const offset = ri * 16 + bi
+                    const isWordStart = bi % byteWidth === 0
+                    const is8Midpoint = bi === 8
                     return (
-                      <span key={wi} className="flex items-center">
-                        {wi > 0 && <span className={isMidpoint ? 'w-[1.5ch]' : 'w-[0.5ch]'} />}
-                        <span>{w}</span>
+                      <span key={bi} className="flex items-center">
+                        {isWordStart && bi > 0 && <span className={is8Midpoint ? 'w-[1.5ch]' : 'w-[0.5ch]'} />}
+                        <span className={changedBytes.has(offset) ? 'rounded bg-yellow-400/30 font-bold text-foreground' : ''}>
+                          {b.toString(16).padStart(2, '0').toUpperCase()}
+                        </span>
                       </span>
                     )
                   })}
                 </span>
                 <span className="text-muted-foreground flex items-center">
-                  {row.ascii.split('').map((ch, i) => (
-                    <span key={i} className="w-[1ch] text-center">{ch}</span>
-                  ))}
+                  {row.ascii.split('').map((ch, i) => {
+                    const offset = ri * 16 + i
+                    return (
+                      <span key={i} className={cn('w-[1ch] text-center', changedBytes.has(offset) && 'bg-yellow-400/30 font-bold text-foreground')}>{ch}</span>
+                    )
+                  })}
                 </span>
               </div>
             )
