@@ -12,6 +12,9 @@
 
 export type HighlightLang = 'c' | 'asm'
 
+// 词表导出：供 Monaco Monarch 汇编 tokenizer 复用（避免两处词表漂移）
+export { ASM_MNEMONICS, ASM_REGISTERS }
+
 /** 跨行分词阶段状态 */
 export interface HighlightState {
   /** 是否处于块注释 /* ... *​/ 中 */

@@ -77,6 +77,12 @@ class SessionSaveRequest(BaseModel):
     data: dict
 
 
+class SourceSaveRequest(BaseModel):
+    """源码写回：file + 完整内容"""
+    file: str
+    content: str
+
+
 # ── 调试控制 ──────────────────────────────
 
 @router.post("/probes/{uid}/zone/debug/halt")
@@ -449,9 +455,8 @@ async def zone_source_search(uid: str, query: str, limit: int = 200):
     return result
 
 
-@router.get("/probes/{uid}/zone/source/content")
-async def zone_source_content(uid: str, file: str):
-    """读取源文件内容（按行返回）"""
+def _resolve_source_path(uid: str, file: str) -> str | None:
+    """将源码文件标识（可能为 basename）解析为磁盘绝对路径；无法解析或不存在时返回 None"""
     file_path = file
     if not os.path.isabs(file_path):
         comp_dir = None
@@ -467,13 +472,36 @@ async def zone_source_content(uid: str, file: str):
         if comp_dir:
             file_path = os.path.join(comp_dir, file)
     if not os.path.isfile(file_path):
-        return {"success": False, "error": f"File not found: {file_path}"}
+        return None
+    return os.path.normpath(file_path)
+
+
+@router.get("/probes/{uid}/zone/source/content")
+async def zone_source_content(uid: str, file: str):
+    """读取源文件内容（按行返回）"""
+    file_path = _resolve_source_path(uid, file)
+    if file_path is None:
+        return {"success": False, "error": f"File not found: {file}"}
     try:
         with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.read().split('\n')
         return {"success": True, "file": file_path.replace('\\', '/'), "lines": lines}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.post("/probes/{uid}/zone/source/content")
+async def zone_source_save(uid: str, req: SourceSaveRequest):
+    """写回源文件内容（编辑保存）"""
+    file_path = _resolve_source_path(uid, req.file)
+    if file_path is None:
+        raise HTTPException(status_code=400, detail=f"File not found: {req.file}")
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(req.content)
+        return {"success": True, "file": file_path.replace('\\', '/')}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/probes/{uid}/zone/debug/breakpoints")

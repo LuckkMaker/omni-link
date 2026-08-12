@@ -267,6 +267,17 @@ export async function zoneSourceContent(
   return data
 }
 
+/** 写回源文件内容（编辑保存） */
+export async function zoneSourceSave(
+  uid: string,
+  file: string,
+  content: string
+): Promise<{ success: boolean; file?: string; error?: string }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/source/content`, { file, content })
+  return data
+}
+
 /** 获取文件中可执行（可打断点）的行号 */
 export async function zoneExecutableLines(
   uid: string,

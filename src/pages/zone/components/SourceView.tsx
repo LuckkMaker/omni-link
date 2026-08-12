@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import Editor from '@monaco-editor/react'
+import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
-import { tokenizeLine, createHighlightState, detectLang } from '@/lib/source-highlight'
+import { monaco, monacoLangFor, applyOmniTheme } from '@/lib/monaco-setup'
+import { buildSourceDecorations } from '@/lib/source-decorations'
 import { cn } from '@/lib/utils'
+import '@/lib/monaco-theme.css'
 
 interface SourceViewProps {
   uid: string | null
@@ -20,7 +23,7 @@ function isSameSource(a: string, b: string): boolean {
 }
 
 /**
- * 源码视图：行号 + 语法高亮 + PC 行高亮 + 断点。
+ * 源码视图：Monaco 只读编辑器 + 语法高亮 + PC 行高亮 + 断点槽。
  * start session 后 PC 变化会自动切换到对应源文件并把执行行滚动到窗口中央并高亮。
  * 行号左侧为断点槽：灰色圆点表示可设置断点，点击后变红为已激活断点。
  */
@@ -47,38 +50,87 @@ export function SourceView({ uid }: SourceViewProps) {
   const navGoto = useZoneStore((s) => s.navGoto)
   const clearGoto = useZoneStore((s) => s.clearGoto)
   const gotoSource = useZoneStore((s) => s.gotoSource)
-  // 始终持有最新 pc；文件加载 effect 内读取它但不在依赖中，避免每次 pc 变化都重拉文件
-  const pcRef = useRef(pc)
-  useEffect(() => {
-    pcRef.current = pc
-  }, [pc])
 
-  const [lines, setLines] = useState<string[]>([])
+  // ── 渲染 / 交互状态 ──────────────────────────────
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pcLine, setPcLine] = useState<number | null>(null)
-  // 可执行（可打断点）的行号集合；仅在这些行显示断点标记
   const [executableLines, setExecutableLines] = useState<Set<number>>(new Set())
-  const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map())
-  const containerRef = useRef<HTMLDivElement>(null)
-  // 切换源文件后待跳转的 PC 行（文件加载完成后应用）
+  // 编辑模式：editing 开关 + 各文件脏标记（未保存的修改）
+  const [editing, setEditing] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  // 异步回调内读取最新值，避免闭包过期
+  const editingRef = useRef(false)
+  const dirtyRef = useRef(false)
+  const dirtyMapRef = useRef<Map<string, boolean>>(new Map())
+
+  // Monaco 实例与模型缓存
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
+  const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map())
+  const viewStatesRef = useRef<Map<string, monaco.editor.ICodeEditorViewState | null>>(new Map())
+  const decorationIdsRef = useRef<string[]>([])
+  // 切换源文件后待跳转的 PC 行（文件模型加载完成后应用）
   const pendingPcRef = useRef<{ file: string; line: number } | null>(null)
-  // 最近一次解析到的 PC 源码位置；供文件加载完成后滚动居中（覆盖自动跟随之外的场景）
+  // 最近一次解析到的 PC 源码位置；供模型加载完成后滚动居中
   const pcLocationRef = useRef<{ file: string; line: number } | null>(null)
-  // 每个已打开文件记住的滚动位置（完整路径 -> scrollTop），切换 tab 回来时恢复
-  const scrollPositionsRef = useRef<Map<string, number>>(new Map())
-  // 当前正在显示的文件（用于切换时记录旧文件的滚动位置）
+  // 当前正在显示的文件（用于切换时保存旧文件的视口状态）
   const currentFileRef = useRef<string | null>(null)
-  // 最新 followSource 值（用户手动切换 vs PC 自动跟随判断）
+
+  // 始终持有最新值（在异步回调内读取，避免闭包过期）
+  const pcRef = useRef(pc)
   const followSourceRef = useRef(followSource)
+  const activeFileRef = useRef<string | null>(activeSourceFile)
+  const stateRef = useRef(state)
+  const pcLineRef = useRef<number | null>(pcLine)
+  const cursorLineRef = useRef(cursorLine)
+  const breakpointsRef = useRef(breakpoints)
+  const executableLinesRef = useRef(executableLines)
+  useEffect(() => {
+    pcRef.current = pc
+  }, [pc])
   useEffect(() => {
     followSourceRef.current = followSource
   }, [followSource])
-  // 文件 tab 右键菜单（触发位置 + 目标文件）
+  useEffect(() => {
+    activeFileRef.current = activeSourceFile
+  }, [activeSourceFile])
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
+  useEffect(() => {
+    pcLineRef.current = pcLine
+  }, [pcLine])
+  useEffect(() => {
+    cursorLineRef.current = cursorLine
+  }, [cursorLine])
+  useEffect(() => {
+    breakpointsRef.current = breakpoints
+  }, [breakpoints])
+  useEffect(() => {
+    executableLinesRef.current = executableLines
+  }, [executableLines])
+  useEffect(() => {
+    editingRef.current = editing
+  }, [editing])
+  useEffect(() => {
+    dirtyRef.current = dirty
+  }, [dirty])
+
+  // ── 文件 tab 与右键菜单状态 ─────────────────────────
   const [tabMenu, setTabMenu] = useState<{ file: string; x: number; y: number } | null>(null)
-  // tab 栏横向滚动（滚轮 + 左右按钮切换）
   const tabScrollRef = useRef<HTMLDivElement>(null)
   const [tabOverflow, setTabOverflow] = useState({ left: false, right: false })
+  // 代码区右键菜单（触发位置 + 光标处标识符）
+  const [codeMenu, setCodeMenu] = useState<{ x: number; y: number; word: string } | null>(null)
+  // 转到引用结果面板
+  const [refsPanel, setRefsPanel] = useState<{
+    x: number
+    y: number
+    query: string
+    hits: { file: string; line: number; text: string }[]
+    loading: boolean
+  } | null>(null)
 
   const updateTabOverflow = useCallback(() => {
     const el = tabScrollRef.current
@@ -111,60 +163,72 @@ export function SourceView({ uid }: SourceViewProps) {
   const scrollTabs = useCallback((dir: -1 | 1) => {
     tabScrollRef.current?.scrollBy({ left: dir * 220, behavior: 'smooth' })
   }, [])
-  // 代码区右键菜单（触发位置 + 光标处标识符）
-  const [codeMenu, setCodeMenu] = useState<{ x: number; y: number; word: string } | null>(null)
-  // 转到引用结果面板（触发位置 + 查询词 + 命中列表）
-  const [refsPanel, setRefsPanel] = useState<{
-    x: number
-    y: number
-    query: string
-    hits: { file: string; line: number; text: string }[]
-    loading: boolean
-  } | null>(null)
 
-  // 取点击位置处的标识符（转到定义/引用使用）。Electron 基于 Chromium，支持 caretRangeFromPoint。
-  const wordAtPoint = useCallback((clientX: number, clientY: number): string => {
-    const range = document.caretRangeFromPoint?.(clientX, clientY)
-    if (!range || range.startContainer.nodeType !== Node.TEXT_NODE) return ''
-    const text = range.startContainer.textContent ?? ''
-    let start = range.startOffset
-    while (start > 0 && /[A-Za-z0-9_]/.test(text[start - 1])) start--
-    let end = range.startOffset
-    while (end < text.length && /[A-Za-z0-9_]/.test(text[end])) end++
-    const word = text.slice(start, end)
-    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(word) ? word : ''
-  }, [])
+  // 把符号文件路径映射到 sourceFiles 中的已知路径（不同目录同名文件按完整路径匹配，否则退化为 basename）
+  const matchSourceFile = useCallback(
+    (file: string): string | null => {
+      const n = norm(file)
+      return (
+        sourceFiles.find((f) => {
+          const fp = norm(f.path)
+          return fp === n || fp.endsWith('/' + n) || n.endsWith('/' + fp)
+        })?.path ?? null
+      )
+    },
+    [sourceFiles]
+  )
+
+  // 关闭右键菜单/引用面板：点击外部 / 按 ESC / 窗口失焦
+  useEffect(() => {
+    if (!tabMenu && !codeMenu && !refsPanel) return
+    const close = () => {
+      setTabMenu(null)
+      setCodeMenu(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setTabMenu(null)
+        setCodeMenu(null)
+        setRefsPanel(null)
+      }
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [tabMenu, codeMenu, refsPanel])
 
   // 复制当前选区文本（无选区时复制光标处单词）
   const copySelection = useCallback(() => {
-    const sel = window.getSelection()
-    const text = sel && sel.toString().length > 0 ? sel.toString() : codeMenu?.word ?? ''
+    const editor = editorRef.current
+    let text = ''
+    if (editor) {
+      const sel = editor.getSelection()
+      if (sel && !sel.isEmpty()) {
+        text = editor.getModel()?.getValueInRange(sel) ?? ''
+      }
+    }
+    if (!text) text = codeMenu?.word ?? ''
     if (text) void navigator.clipboard?.writeText(text).catch(() => {})
     setCodeMenu(null)
   }, [codeMenu])
 
   // 全选当前文件全部代码
   const selectAll = useCallback(() => {
-    const node = containerRef.current
-    if (!node) return
-    const range = document.createRange()
-    range.selectNodeContents(node)
-    const sel = window.getSelection()
-    sel?.removeAllRanges()
-    sel?.addRange(range)
+    const editor = editorRef.current
+    if (editor) {
+      const model = editor.getModel()
+      if (model) {
+        editor.setSelection(new monaco.Range(1, 1, model.getLineCount(), Number.MAX_SAFE_INTEGER))
+      }
+      editor.focus()
+    }
     setCodeMenu(null)
   }, [])
-
-  // 把符号文件路径映射到 sourceFiles 中的已知路径（不同目录同名文件按完整路径匹配，否则退化为 basename）
-  const matchSourceFile = useCallback((file: string): string | null => {
-    const n = norm(file)
-    return (
-      sourceFiles.find((f) => {
-        const fp = norm(f.path)
-        return fp === n || fp.endsWith('/' + n) || n.endsWith('/' + fp)
-      })?.path ?? null
-    )
-  }, [sourceFiles])
 
   // 转到定义：后端符号表解析 → 打开文件并滚动到对应行
   const goToDefinition = useCallback(async () => {
@@ -195,102 +259,172 @@ export function SourceView({ uid }: SourceViewProps) {
     }
   }, [uid, codeMenu])
 
-  // 关闭右键菜单/引用面板：点击外部 / 按 ESC / 窗口失焦
-  useEffect(() => {
-    if (!tabMenu && !codeMenu && !refsPanel) return
-    const close = () => {
-      setTabMenu(null)
-      setCodeMenu(null)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setTabMenu(null)
-        setCodeMenu(null)
-        setRefsPanel(null)
-      }
-    }
-    window.addEventListener('mousedown', close)
-    window.addEventListener('blur', close)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('mousedown', close)
-      window.removeEventListener('blur', close)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [tabMenu, codeMenu, refsPanel])
-
-  const lang = detectLang(activeSourceFile)
-
-  // 整文件一次分词（块注释状态跨行保持），按文件内容 memo
-  const rows = useMemo(() => {
-    if (lines.length === 0) return []
-    const st = createHighlightState()
-    return lines.map((l) => tokenizeLine(l, st, lang))
-  }, [lines, lang])
-
   // 连接后刷新断点列表
   useEffect(() => {
     if (uid && elfPath) void refreshBreakpoints(uid)
   }, [uid, elfPath, refreshBreakpoints])
 
-  // 将指定行滚动到容器中央（相比 scrollIntoView 更稳定，不受 sticky 与祖先滚动影响）
-  // 使用双重 requestAnimationFrame：首帧布局稳定后，第二帧再滚动，确保行元素已渲染定位。
-  // 关键：元素（lineRefs）的获取也必须在 rAF 内完成——若在同步阶段读取，React 尚未渲染
-  // 新内容，会拿到 undefined 导致不滚动（这是"停在 main 却不滚动"的根因）。
-  // onlyIfOutOfView=true 时，仅当该行中心不在可视区内才滚动居中，避免打断用户阅读。
-  const scrollToLine = useCallback((lineNo: number, onlyIfOutOfView = true) => {
-    const container = containerRef.current
-    if (!container) return
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const el = lineRefs.current.get(lineNo)
-        if (!container || !el) return
-        const cRect = container.getBoundingClientRect()
-        const eRect = el.getBoundingClientRect()
-        const lineH = eRect.height || 16
-        const center = eRect.top + lineH / 2
-        if (onlyIfOutOfView && center >= cRect.top && center <= cRect.bottom) return
-        const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
-        container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
-      })
+  // 统一应用装饰：从最新 ref 状态计算 PC/光标/断点装饰并交付 editor
+  const applyDecorations = useCallback(() => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    if (!editor || !model) return
+    const dels = buildSourceDecorations({
+      activeFile: activeFileRef.current,
+      pcLine: pcLineRef.current,
+      cursorLine: cursorLineRef.current,
+      breakpoints: breakpointsRef.current,
+      executableLines: executableLinesRef.current,
+      lineCount: model.getLineCount(),
     })
+    decorationIdsRef.current = editor.deltaDecorations(decorationIdsRef.current, dels)
   }, [])
 
-  // 回到容器顶部（切换到的文件不含当前 PC 时的默认定位，避免停留在上一文件的滚动偏移）
-  const scrollToTop = useCallback(() => {
-    const container = containerRef.current
-    if (!container) return
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        containerRef.current?.scrollTo({ top: 0, behavior: 'auto' })
-      })
+  // 响应式触发装饰更新
+  useEffect(() => {
+    applyDecorations()
+  }, [pcLine, cursorLine, breakpoints, executableLines, activeSourceFile, applyDecorations])
+
+  // 保存当前文件（编辑模式）：写回磁盘并清除脏标记
+  const saveCurrentFile = useCallback(async () => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    const file = activeFileRef.current
+    if (!editor || !model || !file || !uid) return
+    setSaving(true)
+    try {
+      const content = model.getValue()
+      const res = await zoneService.zoneSourceSave(uid, file, content)
+      if (res.success) {
+        const key = norm(file)
+        dirtyMapRef.current.set(key, false)
+        setDirty(false)
+        useZoneStore.getState().setError?.(null)
+      } else {
+        useZoneStore.getState().setError?.(`保存失败: ${res.error ?? '未知错误'}`)
+      }
+    } catch (e) {
+      useZoneStore.getState().setError?.(
+        `保存失败: ${e instanceof Error ? e.message : '网络错误'}`
+      )
+    } finally {
+      setSaving(false)
+    }
+  }, [uid])
+
+  // 切换编辑模式：进入时清空 Run-to-Cursor 光标，退出时若未保存则提示
+  const toggleEditing = useCallback(() => {
+    setEditing((cur) => {
+      const next = !cur
+      if (next) {
+        setCursorLine(null)
+      }
+      return next
     })
+  }, [setCursorLine])
+
+  // 撤销当前文件最近一次编辑
+  const undoCurrentFile = useCallback(() => {
+    editorRef.current?.trigger('source-editor', 'undo', null)
   }, [])
 
-  // 恢复到指定滚动位置（用户手动切换回已打开文件时使用）
-  const restoreScrollPosition = useCallback((top: number) => {
-    const container = containerRef.current
-    if (!container) return
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        containerRef.current?.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
-      })
-    })
-  }, [])
+  // Ctrl/Cmd + S 保存
+  useEffect(() => {
+    if (!editing) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        void saveCurrentFile()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editing, saveCurrentFile])
 
-  // 文件切换时记录旧文件的滚动位置（需在内容更新前记录，故在 activeSourceFile 变化的副作用里读取当前容器）
+  // 切换文件时：把旧文件脏标记写入 map，恢复新文件脏标记
+  useEffect(() => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    const prev = currentFileRef.current
+    if (prev) dirtyMapRef.current.set(prev, dirtyRef.current)
+    currentFileRef.current = activeSourceFile ?? null
+    if (activeSourceFile) {
+      const dirtyNow = dirtyMapRef.current.get(norm(activeSourceFile)) ?? false
+      setDirty(dirtyNow)
+    }
+  }, [activeSourceFile])
+
+  // Monaco 挂载：绑定断点槽点击 / 光标定位 / 右键菜单
+  const handleMount = useCallback(
+    (editor: monaco.editor.IStandaloneCodeEditor) => {
+      editorRef.current = editor
+      // 挂载时按应用主题色刷新 Monaco 主题（CSS 变量此时已就绪）
+      applyOmniTheme()
+      editor.onMouseDown((e) => {
+        const pos = e.target.position
+        if (!pos) return
+        const file = activeFileRef.current
+        if (!file) return
+        const line = pos.lineNumber
+        // 断点槽（glyph margin）点击 → 切换断点（仅可执行行 / PC 行 / 已设断点行）
+        if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+          const hasBp = breakpointsRef.current.some(
+            (b) => b.line === line && isSameSource(norm(b.file), file)
+          )
+          const isExecutable =
+            executableLinesRef.current.has(line) || line === pcLineRef.current || hasBp
+          if (isExecutable && stateRef.current !== 'disconnected') {
+            void toggleBreakpoint(uid ?? '', file, line)
+          }
+          return
+        }
+        // 代码区点击 → 定位光标行（拖动选文本时不切换）
+        if (editingRef.current) return // 编辑模式下点击不触发 Run-to-Cursor 光标
+        const sel = editor.getSelection()
+        if (sel && !sel.isEmpty()) return
+        const cur = cursorLineRef.current
+        setCursorLine(cur && cur.file === file && cur.line === line ? null : { file, line })
+      })
+      // 编辑内容变更 → 标记脏（仅编辑模式；readOnly 状态不会触发）
+      editor.onDidChangeModelContent(() => {
+        if (!editingRef.current) return
+        const file = activeFileRef.current
+        if (!file) return
+        dirtyMapRef.current.set(norm(file), true)
+        setDirty(true)
+      })
+      editor.onContextMenu((e) => {
+        const pos = e.target.position
+        const model = editor.getModel()
+        let word = ''
+        if (pos && model) {
+          const w = model.getWordAtPosition(pos)
+          word = w ? w.word : ''
+        }
+        setCodeMenu({ x: e.event.browserEvent.clientX, y: e.event.browserEvent.clientY, word })
+      })
+      applyDecorations()
+    },
+    [uid, toggleBreakpoint, setCursorLine, applyDecorations]
+  )
+
+  // 文件切换时：保存旧文件的视口状态（在内容加载前执行）
   useEffect(() => {
     const prev = currentFileRef.current
-    if (prev && prev !== activeSourceFile && containerRef.current) {
-      scrollPositionsRef.current.set(prev, containerRef.current.scrollTop)
+    const editor = editorRef.current
+    if (prev && prev !== activeSourceFile && editor) {
+      const m = editor.getModel()
+      if (m) viewStatesRef.current.set(prev, editor.saveViewState())
     }
     currentFileRef.current = activeSourceFile ?? null
   }, [activeSourceFile])
 
-  // 加载选中的源文件
+  // 加载选中的源文件（创建/复用 model 并 setModel）
   useEffect(() => {
     if (!uid || !activeSourceFile) {
-      setLines([])
+      setError(null)
+      setLoading(false)
+      if (editorRef.current) editorRef.current.setModel(null)
       setPcLine(null)
       return
     }
@@ -306,77 +440,79 @@ export function SourceView({ uid }: SourceViewProps) {
       .then((res) => {
         if (cancelled) return
         if (res.success) {
-          setLines(res.lines ?? [])
-          // 「转到定义/引用」导航目标优先：打开文件后滚动到目标行并清除
-          const nav = navGoto
-          if (nav && norm(nav.file) === norm(activeSourceFile)) {
-            clearGoto()
-            setPcLine(null)
-            setCursorLine({ file: activeSourceFile, line: nav.line })
-            scrollToLine(nav.line, false)
-            return
+          const key = norm(activeSourceFile)
+          let model = modelsRef.current.get(key)
+          if (!model) {
+            model = monaco.editor.createModel(
+              res.lines?.join('\n') ?? '',
+              monacoLangFor(activeSourceFile),
+              monaco.Uri.parse('file:///' + key)
+            )
+            modelsRef.current.set(key, model)
           }
-          // 用户手动切换回已打开并滚动过的文件：恢复记住的滚动位置（优先于 PC 定位滚动）；
-          // 自动跟随（单步/运行）切换时 followSource 为 true，不在此分支，仍滚动到 PC 行
-          if (followSourceRef.current === false) {
-            const saved = scrollPositionsRef.current.get(activeSourceFile)
-            if (saved !== undefined) {
-              // 仍标记 PC 行高亮（若 PC 在此文件），但不滚动到 PC
-              const pcLoc = pcLocationRef.current
-              if (pcLoc && norm(pcLoc.file) === norm(activeSourceFile)) {
-                setPcLine(pcLoc.line)
+          const editor = editorRef.current
+          if (editor) {
+            editor.setModel(model)
+            const vs = viewStatesRef.current.get(key)
+            // 「转到定义/引用」导航目标优先：打开文件后滚动到目标行并清除
+            const nav = navGoto
+            if (nav && norm(nav.file) === key) {
+              clearGoto()
+              setPcLine(null)
+              setCursorLine({ file: activeSourceFile, line: nav.line })
+              editor.revealLineInCenter(nav.line)
+            } else if (followSourceRef.current === false && vs) {
+              // 用户手动切换回已打开并滚动过的文件：恢复视口（优先于 PC 定位滚动）
+              editor.restoreViewState(vs)
+              const pLoc = pcLocationRef.current
+              setPcLine(pLoc && norm(pLoc.file) === key ? pLoc.line : null)
+            } else {
+              // 优先应用待跳转 PC 行（自动跟随切换文件时由 PC 定位 effect 设置）
+              const pending = pendingPcRef.current
+              if (pending && norm(pending.file) === key) {
+                pendingPcRef.current = null
+                setPcLine(pending.line)
+                editor.revealLineInCenter(pending.line)
               } else {
-                setPcLine(null)
+                // 用户手动切换到含 PC 的文件：pending 未命中，改用最近一次解析到的 PC 位置居中
+                const pLoc = pcLocationRef.current
+                if (pLoc && norm(pLoc.file) === key) {
+                  setPcLine(pLoc.line)
+                  editor.revealLineInCenter(pLoc.line)
+                } else {
+                  // 兜底：实时查询当前 PC 在该文件对应的行（覆盖 pcLocationRef 尚未就绪的时序）
+                  const curPc = pcRef.current
+                  if (curPc != null && curPc !== undefined) {
+                    zoneService
+                      .zoneSourceLine(uid, curPc)
+                      .then((line) => {
+                        if (cancelled) return
+                        if (
+                          line &&
+                          line.file &&
+                          (norm(line.file) === key || norm(line.file).endsWith('/' + key))
+                        ) {
+                          setPcLine(line.line ?? null)
+                          editor.revealLineInCenter(line.line ?? 1)
+                        } else {
+                          setPcLine(null)
+                          editor.setScrollTop(0)
+                        }
+                      })
+                      .catch(() => {
+                        setPcLine(null)
+                        editor.setScrollTop(0)
+                      })
+                  } else {
+                    setPcLine(null)
+                    editor.setScrollTop(0)
+                  }
+                }
               }
-              restoreScrollPosition(saved)
-              return
             }
           }
-          // 优先应用待跳转 PC 行（自动跟随切换文件时由 PC 定位 effect 设置）
-          const pending = pendingPcRef.current
-          if (pending && norm(pending.file) === norm(activeSourceFile)) {
-            pendingPcRef.current = null
-            setPcLine(pending.line)
-            scrollToLine(pending.line)
-            return
-          }
-          // 用户手动切换到含 PC 的文件：pending 未命中，改用最近一次解析到的 PC 位置居中
-          const pcLoc = pcLocationRef.current
-          if (pcLoc && norm(pcLoc.file) === norm(activeSourceFile)) {
-            setPcLine(pcLoc.line)
-            scrollToLine(pcLoc.line)
-            return
-          }
-          // 兜底：实时查询当前 PC 在该文件对应的行（覆盖 pcLocationRef 尚未就绪的时序）
-          const curPc = pcRef.current
-          if (curPc != null && curPc !== undefined) {
-            zoneService
-              .zoneSourceLine(uid, curPc)
-              .then((line) => {
-                if (cancelled) return
-                if (
-                  line &&
-                  line.file &&
-                  (norm(line.file) === norm(activeSourceFile) ||
-                    norm(line.file).endsWith('/' + norm(activeSourceFile)))
-                ) {
-                  setPcLine(line.line ?? null)
-                  scrollToLine(line.line ?? -1)
-                } else {
-                  setPcLine(null)
-                  scrollToTop()
-                }
-              })
-              .catch(() => {
-                setPcLine(null)
-                scrollToTop()
-              })
-          } else {
-            setPcLine(null)
-            scrollToTop()
-          }
+          applyDecorations()
         } else {
-          setLines([])
           setError(res.error ?? '源码读取失败')
         }
       })
@@ -391,7 +527,7 @@ export function SourceView({ uid }: SourceViewProps) {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, activeSourceFile, scrollToLine, scrollToTop])
+  }, [uid, activeSourceFile, cursorLine, navGoto, setCursorLine, clearGoto, applyDecorations])
 
   // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
   useEffect(() => {
@@ -419,7 +555,7 @@ export function SourceView({ uid }: SourceViewProps) {
           }
           // 始终保证执行文件已作为 tab 打开（不覆盖用户当前选择）
           ensureSourceFile(targetFull)
-          // 记录最近一次 PC 源码位置，供文件加载完成后滚动居中
+          // 记录最近一次 PC 源码位置，供模型加载完成后滚动居中
           pcLocationRef.current = { file: targetFull, line: line.line ?? 1 }
           if (targetFull !== activeSourceFile) {
             if (followSource && !closedByUser.includes(targetFull)) {
@@ -436,7 +572,7 @@ export function SourceView({ uid }: SourceViewProps) {
           setPcLine(line.line ?? null)
           // 仅自动跟随（单步/运行）时滚动到 PC 行；用户手动切换回文件时保持其记住的滚动位置
           if (followSourceRef.current) {
-            scrollToLine(line.line ?? -1)
+            editorRef.current?.revealLineInCenter(line.line ?? -1)
           }
         } else {
           setPcLine(null)
@@ -446,7 +582,8 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => {
       cancelled = true
     }
-  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, scrollToLine, elfPath])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, elfPath])
 
   // 加载当前文件的可执行行号（仅这些行可打断点）
   useEffect(() => {
@@ -468,34 +605,46 @@ export function SourceView({ uid }: SourceViewProps) {
     }
   }, [uid, activeSourceFile])
 
-  // PC 行吸附：当 PC 解析到的行是空行/非代码行（如函数 epilogue 被 DWARF 行表映射到函数体外的空行）时，
-  // 向上吸附到最近的真实代码行（优先可执行行），避免高亮停在函数大括号之外。
+  // PC 行吸附：当 PC 解析到的行是空行/非代码行时，向上吸附到最近的真实代码行，避免高亮停在函数大括号之外
   useEffect(() => {
-    if (pcLine == null || lines.length === 0) return
-    const content = lines[pcLine - 1]
+    if (pcLine == null) return
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    if (!editor || !model) return
+    const content = model.getLineContent(pcLine)
     const isEmpty = !content || content.trim() === ''
     if (!isEmpty) return
-    // 空行 → 从上一行向上找最近的非空行；executableLines 已就绪时要求目标行可执行
     for (let l = pcLine - 1; l >= 1; l--) {
-      const c = lines[l - 1]
+      const c = model.getLineContent(l)
       if (!c || c.trim() === '') continue
       if (executableLines.size > 0 && !executableLines.has(l)) continue
       if (l !== pcLine) {
         setPcLine(l)
-        scrollToLine(l)
+        editor.revealLineInCenter(l)
       }
       return
     }
-    // 未找到可吸附的代码行 → 取消高亮（当前位置无有效源码行）
     setPcLine(null)
-  }, [pcLine, lines, executableLines, scrollToLine])
+  }, [pcLine, executableLines])
+
+  // 会话停止（openFiles 清空）时释放所有 model 缓存
+  useEffect(() => {
+    if (openFiles.length === 0) {
+      modelsRef.current.forEach((m) => m.dispose())
+      modelsRef.current.clear()
+      viewStatesRef.current.clear()
+      decorationIdsRef.current = []
+      dirtyMapRef.current.clear()
+      setDirty(false)
+      setEditing(false)
+    }
+  }, [openFiles])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       {/* 源码 tab 栏（参考 RTT Viewer 风格）：点击切换，tab 过多时滚轮横向滚动 + 左右按钮切换 */}
       {openFiles.length > 0 && (
         <div className="flex shrink-0 items-stretch border-b border-border bg-muted/10">
-          {/* 左切换按钮 */}
           <button
             onClick={() => scrollTabs(-1)}
             disabled={!tabOverflow.left}
@@ -543,7 +692,6 @@ export function SourceView({ uid }: SourceViewProps) {
               )
             })}
           </div>
-          {/* 右切换按钮 */}
           <button
             onClick={() => scrollTabs(1)}
             disabled={!tabOverflow.right}
@@ -552,9 +700,58 @@ export function SourceView({ uid }: SourceViewProps) {
           >
             <ChevronRight className="size-3.5" />
           </button>
+          {/* 编辑工具栏：编辑模式开关 + 保存 / 撤销 */}
+          <div className="ml-1 flex shrink-0 items-center gap-1 border-l border-border pl-1.5">
+            {editing ? (
+              <>
+                <button
+                  onClick={() => void saveCurrentFile()}
+                  disabled={!dirty || saving || !activeSourceFile}
+                  className={cn(
+                    'flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors disabled:pointer-events-none disabled:opacity-40',
+                    dirty
+                      ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                      : 'text-muted-foreground'
+                  )}
+                  title="保存当前文件 (Ctrl+S)"
+                >
+                  {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+                  {dirty && <span className="size-1.5 rounded-full bg-red-500" />}
+                  保存
+                </button>
+                <button
+                  onClick={undoCurrentFile}
+                  disabled={!activeSourceFile}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                  title="撤销"
+                >
+                  <Undo2 className="size-3" />
+                  撤销
+                </button>
+                <button
+                  onClick={toggleEditing}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs text-primary transition-colors hover:bg-accent"
+                  title="退出编辑模式"
+                >
+                  <Pencil className="size-3" />
+                  完成
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={toggleEditing}
+                disabled={!activeSourceFile}
+                className="flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                title="进入编辑模式，可修改源码"
+              >
+                <Pencil className="size-3" />
+                编辑
+              </button>
+            )}
+          </div>
         </div>
       )}
-      {/* 文件 tab 右键菜单：关闭 / 关闭其他 */}
+      {/* 文件 tab 右键菜单：关闭 / 关闭其他 / 关闭所有 */}
       {tabMenu && (
         <div
           className="fixed z-50 min-w-[9rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
@@ -592,133 +789,49 @@ export function SourceView({ uid }: SourceViewProps) {
           </button>
         </div>
       )}
-      <div
-        ref={containerRef}
-        className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed"
-        onContextMenu={(e) => {
-          e.preventDefault()
-          const word = wordAtPoint(e.clientX, e.clientY)
-          setCodeMenu({ x: e.clientX, y: e.clientY, word })
-        }}
-      >
-        {loading ? (
-          <div className="flex h-full items-center justify-center text-muted-foreground">
+      {/* Monaco 代码区：Editor 常驻，loading/error 用覆盖层叠加，避免卸载导致实例 dispose 后异步回调崩溃 */}
+      <div className="relative min-h-0 flex-1 overflow-hidden">
+        <Editor
+          theme="omni-dark"
+          language="plaintext"
+          onMount={handleMount}
+          options={{
+            readOnly: !editing,
+            automaticLayout: true,
+            glyphMargin: true,
+            folding: true,
+            minimap: { enabled: false },
+            fontSize: 12,
+            lineHeight: 20,
+            fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
+            scrollBeyondLastLine: false,
+            renderLineHighlight: 'none',
+            contextmenu: false,
+            quickSuggestions: false,
+            wordBasedSuggestions: 'off',
+            suggestOnTriggerCharacters: false,
+            parameterHints: { enabled: false },
+            snippetSuggestions: 'none',
+            selectionHighlight: false,
+            occurrencesHighlight: 'off',
+            links: false,
+            renderWhitespace: 'none',
+            smoothScrolling: true,
+            padding: { top: 4, bottom: 4 },
+            scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+          }}
+        />
+        {loading && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
             加载中...
           </div>
-        ) : error ? (
-          <div className="flex h-full items-center justify-center gap-2 text-red-500">
+        )}
+        {error && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 text-red-500">
             <AlertCircle className="size-4" />
             <span className="max-w-md truncate">{error}</span>
           </div>
-        ) : lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center" />
-        ) : (
-          lines.map((content, idx) => {
-            const lineNo = idx + 1
-            const isPcLine = lineNo === pcLine
-            const tokens = rows[idx] ?? []
-            const hasBp = breakpoints.some(
-              (b) =>
-                b.line === lineNo &&
-                (norm(b.file) === norm(activeSourceFile ?? '') ||
-                  norm(b.file).endsWith('/' + norm(activeSourceFile ?? '')) ||
-                  norm(activeSourceFile ?? '').endsWith('/' + norm(b.file)))
-            )
-            // 仅可执行行可打断点；PC 行与已设断点行也始终允许操作
-            const isExecutable = executableLines.has(lineNo) || isPcLine || hasBp
-            // 当前光标所在行（Run to Cursor / Insert-Remove Breakpoint 的定位标注）
-            const isCursorLine =
-              cursorLine != null &&
-              cursorLine.line === lineNo &&
-              (norm(cursorLine.file) === norm(activeSourceFile ?? '') ||
-                norm(cursorLine.file).endsWith('/' + norm(activeSourceFile ?? '')) ||
-                norm(activeSourceFile ?? '').endsWith('/' + norm(cursorLine.file)))
-            return (
-              <div
-                key={lineNo}
-                ref={(el) => {
-                  if (el) lineRefs.current.set(lineNo, el)
-                  else lineRefs.current.delete(lineNo)
-                }}
-                onClick={() => {
-                  // 正在拖选文本时不触发光标行切换
-                  const sel = window.getSelection()
-                  if (sel && sel.toString().length > 0) return
-                  activeSourceFile &&
-                    setCursorLine(
-                      cursorLine && cursorLine.file === activeSourceFile && cursorLine.line === lineNo
-                        ? null
-                        : { file: activeSourceFile, line: lineNo }
-                    )
-                }}
-                className={
-                  isPcLine
-                    ? 'flex cursor-pointer border-b border-green-500/20 bg-green-500/15 select-none'
-                    : isCursorLine
-                      ? 'flex cursor-pointer border-b border-amber-300/40 bg-amber-400/10 select-none'
-                      : 'flex cursor-pointer border-b border-transparent hover:bg-muted/30 select-none'
-                }
-              >
-                {/* 断点槽 + PC 标记 + 行号 */}
-                <div
-                  className={cn(
-                    'sticky left-0 flex w-14 shrink-0 select-none items-center gap-1 pr-1 text-right',
-                    isPcLine
-                      ? 'bg-green-500/15'
-                      : isCursorLine
-                        ? 'bg-amber-400/10'
-                        : 'bg-background'
-                  )}
-                >
-                  {isExecutable ? (
-                    <button
-                      onClick={() => uid && activeSourceFile && toggleBreakpoint(uid, activeSourceFile, lineNo)}
-                      disabled={!uid || !activeSourceFile || state === 'disconnected'}
-                      title={hasBp ? '移除断点' : '设置断点'}
-                      className={cn(
-                        'flex w-3 shrink-0 cursor-pointer items-center justify-center text-[11px] leading-none transition-transform hover:scale-125 disabled:cursor-default disabled:opacity-40'
-                      )}
-                    >
-                      {hasBp && isPcLine ? (
-                        // 断点与运行指示重叠：红点与运行指示在同一 12px 格内层叠，
-                        // 位置大小与普通状态一致，仅运行指示附加半透明
-                        <span className="relative block size-3">
-                          <span className="absolute inset-0 flex items-center justify-center text-red-500">●</span>
-                          <span className="absolute inset-0 flex items-center justify-center font-bold leading-none text-green-500 opacity-50">▶</span>
-                        </span>
-                      ) : hasBp ? (
-                        <span className="text-red-500">●</span>
-                      ) : isPcLine ? (
-                        <span className="font-bold leading-none text-green-500">▶</span>
-                      ) : (
-                        <span className="text-gray-300">●</span>
-                      )}
-                    </button>
-                  ) : (
-                    <span className="flex w-3 shrink-0" />
-                  )}
-                  <span className={isPcLine ? 'font-bold text-green-500' : 'text-muted-foreground'}>
-                    {lineNo}
-                  </span>
-                </div>
-                {/* 代码（带语法高亮，可选中文本） */}
-                <pre className="flex-1 whitespace-pre select-text pr-4">
-                  {tokens.length
-                    ? tokens.map((t, ti) =>
-                        t.cls ? (
-                          <span key={ti} className={t.cls}>
-                            {t.text}
-                          </span>
-                        ) : (
-                          t.text
-                        )
-                      )
-                    : content || ' '}
-                </pre>
-              </div>
-            )
-          })
         )}
       </div>
 

@@ -1,0 +1,23 @@
+/* Monaco Zone 源码视图装饰层样式（对齐 Tailwind 深色配色） */
+/* PC 行整行高亮（绿） */
+.cm-pc {
+  background: rgba(110, 231, 183, 0.14) !important;
+}
+/* 光标行整行高亮（琥珀） */
+.cm-cursor {
+  background: rgba(252, 211, 77, 0.1) !important;
+}
+/* 断点红点（glyph margin） */
+.cm-bp::before {
+  content: '●';
+  color: #f85149;
+  font-size: 12px;
+  line-height: 20px;
+}
+/* PC 运行指示 ▶（glyph margin） */
+.cm-pc-glyph::before {
+  content: '▶';
+  color: #3fb950;
+  font-size: 11px;
+  line-height: 20px;
+}
