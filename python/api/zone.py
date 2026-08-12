@@ -530,11 +530,28 @@ async def zone_stack(uid: str):
         except Exception:
             pass
 
+    # 目标刚复位/暂停时，寄存器读取可能瞬时失败（pc 缺失会让回溯为空）。
+    # 若关键寄存器缺失，稍等后整体重读一次，对齐 zone_status 稳定读到 pc 的时机。
+    if not regs.get("pc"):
+        await asyncio.sleep(0.1)
+        for name in reg_names:
+            try:
+                value = core.read_core_register(name)
+                regs[name] = int(value) if isinstance(value, float) else value
+            except Exception:
+                pass
+
     def read_mem(addr: int, length: int) -> bytes:
         return backend.read_memory(uid, addr, length)
 
     try:
         frames = await asyncio.to_thread(elf_backend.unwind, uid, regs, read_mem)
+        if not frames:
+            logger.warning(
+                "zone_stack empty frames: pc=%s sp=%s lr=%s halted=%s",
+                regs.get("pc"), regs.get("sp"), regs.get("lr"),
+                target.is_halted(),
+            )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Unwind failed: {e}")
 

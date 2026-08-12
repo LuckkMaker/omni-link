@@ -204,6 +204,21 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, state, pc])
 
+  // 目标刚复位/暂停时，栈回溯可能瞬时为空（寄存器读取尚未稳定，如 start 后停在 Reset_Handler）。
+  // 此时延迟补刷一次，避免误报"无有效调用栈"；step/后续刷新取到有效帧后停止重试。
+  const emptyRetriedRef = useRef(false)
+  useEffect(() => {
+    if (!ready || state !== 'halted' || loading || error) {
+      emptyRetriedRef.current = false
+      return
+    }
+    if (frames.length === 0 && !emptyRetriedRef.current) {
+      emptyRetriedRef.current = true
+      const t = setTimeout(() => void refresh(), 400)
+      return () => clearTimeout(t)
+    }
+  }, [ready, state, frames, loading, error, refresh])
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {!ready ? (
