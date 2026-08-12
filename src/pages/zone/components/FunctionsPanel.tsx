@@ -3,6 +3,7 @@ import { Search } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { zoneFunctions, zoneSourceLine } from '@/services/zone.service'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 import { cn } from '@/lib/utils'
 import { gridColumns, TableHeaderCell, useColumnResize, useColumnSort, type ColumnDef } from './sortableTable'
 
@@ -42,7 +43,8 @@ export function FunctionsPanel({ uid, connected }: { uid: string | null; connect
   const [error, setError] = useState<string | null>(null)
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const gotoSource = useZoneStore((s) => s.gotoSource)
-  const elfPath = useZoneStore((s) => s.elfPath)
+  // 函数符号表仅依赖 ELF 符号，用 elfLoaded 提前加载，无需等待目标连接/会话启动
+  const { elfLoaded } = useSessionReady(uid, connected)
 
   /** 点击函数行：解析函数地址对应的源码位置，跳转主源码视图到该行 */
   const gotoFunction = useCallback(
@@ -75,9 +77,10 @@ export function FunctionsPanel({ uid, connected }: { uid: string | null; connect
 
   const load = useCallback(async () => {
     // ELF 未加载时不请求后端，避免 No ELF loaded 的 400 报错
-    if (!uid || !elfPath) {
+    if (!elfLoaded || !uid) {
       setFunctions([])
       setTotal(0)
+      setError(null)
       return
     }
     setLoading(true)
@@ -93,7 +96,7 @@ export function FunctionsPanel({ uid, connected }: { uid: string | null; connect
     } finally {
       setLoading(false)
     }
-  }, [uid, filter, elfPath])
+  }, [elfLoaded, uid, filter])
 
   // 过滤防抖
   useEffect(() => {
@@ -171,12 +174,8 @@ export function FunctionsPanel({ uid, connected }: { uid: string | null; connect
       <div className="min-h-0 flex-1 overflow-auto">
         {error ? (
           <div className="p-3 text-xs text-red-500">{error}</div>
-        ) : !connected ? (
+        ) : !elfLoaded ? (
           <div className="min-h-0 flex-1" />
-        ) : !uid || !elfPath ? (
-          <div className="flex h-full items-center justify-center p-4 text-center text-xs text-muted-foreground">
-            未加载 ELF
-          </div>
         ) : loading && functions.length === 0 ? (
           <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
             Loading...

@@ -659,6 +659,13 @@ async def zone_memory_read(uid: str, req: ReadMemoryRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/probes/{uid}/zone/memory/resolve")
+async def zone_memory_resolve(uid: str, expr: str):
+    """解析内存地址表达式（纯 hex / &name / name / name[offset]） → 地址"""
+    result = await asyncio.to_thread(elf_backend.resolve_memory_address, uid, expr)
+    return result
+
+
 # ── 会话配置持久化 ──────────────────────────
 
 _SESSION_DIR = None

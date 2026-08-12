@@ -470,6 +470,16 @@ export async function zoneReadMemory(
   return data
 }
 
+/** 解析内存地址表达式（纯 hex / &name / name / name[offset]） → 地址 */
+export async function zoneResolveMemoryAddress(
+  uid: string,
+  expr: string
+): Promise<{ address: number | null; name?: string; size?: number; error?: string }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/memory/resolve`, { params: { expr } })
+  return data
+}
+
 // ── 会话配置 ──────────────────────────────
 
 /** 列出会话 */

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, AlertCircle, ChevronRight, ChevronDown } from 'lucide-react'
 import { zoneStack, type CallStackFrame, type CallStackLocal } from '@/services/zone.service'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 import { cn } from '@/lib/utils'
 
 interface CallStackPanelProps {
@@ -129,6 +130,7 @@ function collectValueTexts(locals: CallStackLocal[] | undefined, prefix: string,
 export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
+  const { ready } = useSessionReady(uid, connected)
 
   const [frames, setFrames] = useState<CallStackFrame[]>([])
   const [loading, setLoading] = useState(false)
@@ -150,7 +152,7 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   }, [])
 
   const refresh = useCallback(async () => {
-    if (!uid) return
+    if (!ready || !uid) return
     setLoading(true)
     try {
       const res = await zoneStack(uid)
@@ -164,9 +166,9 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
       })
       const prev = prevTextsRef.current
       const changedPaths = new Set<string>()
-      for (const [path, text] of curr) {
+      curr.forEach((text, path) => {
         if (prev.has(path) && prev.get(path) !== text) changedPaths.add(path)
-      }
+      })
       setChanged(changedPaths)
       prevTextsRef.current = curr
     } catch (e) {
@@ -175,15 +177,16 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
     } finally {
       setLoading(false)
     }
-  }, [uid])
+  }, [ready])
 
   // halt/step 时自动刷新（PC 变化或状态进入 halted）
   const lastState = useRef(state)
   const lastPc = useRef(pc)
   const didInit = useRef(false)
   useEffect(() => {
-    if (!uid) {
+    if (!ready) {
       setFrames([])
+      setError(null)
       return
     }
     if (state === 'halted') {
@@ -199,14 +202,12 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
     lastState.current = state
     lastPc.current = pc
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, state, pc])
+  }, [ready, state, pc])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {!connected ? (
+      {!ready ? (
         <div className="min-h-0 flex-1" />
-      ) : !uid ? (
-        <Empty text="未连接" />
       ) : state !== 'halted' ? (
         <Empty text="目标运行中，暂停后查看调用栈" />
       ) : error ? (

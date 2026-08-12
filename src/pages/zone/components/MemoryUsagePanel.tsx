@@ -3,6 +3,7 @@ import { RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { zoneMemoryUsage, type MemoryUsage } from '@/services/zone.service'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 import { cn } from '@/lib/utils'
 
 function fmtBytes(n: number | undefined | null): string {
@@ -37,14 +38,15 @@ function UsageBar({ label, value, max, color }: { label: string; value: number; 
  * 默认 flash 上限 2MB、ram 上限 512KB（可随实际调整），用于进度条可视化。
  */
 export function MemoryUsagePanel({ uid, connected }: { uid: string | null; connected: boolean }) {
-  const elfPath = useZoneStore((s) => s.elfPath)
+  // 内存占用按 ELF section 近似估算，仅依赖 ELF 符号，用 elfLoaded 提前加载，无需等待目标连接/会话启动
+  const { elfLoaded } = useSessionReady(uid, connected)
   const [usage, setUsage] = useState<MemoryUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   const load = useCallback(async () => {
     // ELF 未加载时不请求后端，避免 No ELF loaded 的 400 报错
-    if (!uid || !elfPath) {
+    if (!elfLoaded || !uid) {
       setUsage(null)
       setError(null)
       return
@@ -61,7 +63,7 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
     } finally {
       setLoading(false)
     }
-  }, [uid, elfPath])
+  }, [elfLoaded, uid])
 
   useEffect(() => {
     void load()
@@ -90,11 +92,11 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
       <div className="min-h-0 flex-1 overflow-auto pt-2">
         {error ? (
           <div className="flex h-full items-center justify-center text-xs text-red-500">{error}</div>
-        ) : !connected ? (
+        ) : !elfLoaded ? (
           <div className="min-h-0 flex-1" />
-        ) : !uid || !elfPath || !usage ? (
+        ) : !usage ? (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-            {uid && elfPath ? '加载中...' : uid ? '未加载 ELF' : '未连接探针'}
+            加载中...
           </div>
         ) : (
           <table className="w-full border-collapse text-left">

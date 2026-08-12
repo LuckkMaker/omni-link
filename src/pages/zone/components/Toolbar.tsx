@@ -66,15 +66,20 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const startSession = useZoneStore((s) => s.startSession)
   const stopSession = useZoneStore((s) => s.stopSession)
   const state = useZoneStore((s) => s.state)
+  const sessionStatus = useZoneStore((s) => s.sessionStatus)
   const currentFunction = useZoneStore((s) => s.currentFunction)
   const clearBreakpoints = useZoneStore((s) => s.clearBreakpoints)
 
   const disabled = !connected || !uid || busy
-  // Step Out 仅在当前行位于函数内才可用（参考 Keil MDK：非 function 行禁用）
-  const stepOutDisabled = disabled || (state === 'halted' && !currentFunction)
-
-  // 会话进行中 = 目标非断连态（running/halted/unknown）→ 图标红色；未启动（disconnected）→ 绿色
-  const sessionActive = state !== 'disconnected'
+  // 会话进行中 = 真正启动过调试会话（sessionStatus === 'active'）→ 图标红色；未启动 → 绿色。
+  // 注意：不能用 state !== 'disconnected' 判断，侧边栏连接设备后目标可能为 running，
+  // 但 zone 会话尚未启动（未加载 ELF），此时仍应显示 Start Session。
+  const sessionActive = sessionStatus === 'active'
+  const sessionConnecting = sessionStatus === 'connecting'
+  // 会话启动中禁止再次操作（避免重复触发 start/stop）
+  const sessionDisabled = !uid || busy || sessionConnecting
+  // Step Out 仅在目标暂停且当前行落在函数内时可用（非函数行无法出栈）
+  const stepOutDisabled = disabled || state !== 'halted' || !currentFunction
 
   // 每次启动调试会话都强制弹窗选择 ELF 文件（不做自动记忆/回退），再按所选方式自动重连并执行动作
   const handleStart = useCallback(async (mode: ZoneStartMode) => {
@@ -90,6 +95,9 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
     if (sessionActive) void stopSession(uid)
     else void handleStart('download_reset')
   }, [uid, sessionActive, stopSession, handleStart])
+
+  // 会话启动中显示「启动中...」，禁用按钮
+  const mainText = sessionConnecting ? '启动中...' : sessionActive ? 'Stop Session' : 'Start Session'
 
   return (
     <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-2">

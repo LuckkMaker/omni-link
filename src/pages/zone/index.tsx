@@ -132,7 +132,8 @@ export default function ZonePage() {
       void refreshStatus(uid)
     } else {
       setState('disconnected')
-      // 断开/重连后清除所有断点，避免 UI 残留
+      // 断开/重连后清除调试会话状态与断点，避免 UI 残留
+      useZoneStore.setState({ sessionStatus: 'idle' })
       useZoneStore.getState().breakpoints.length > 0 && setBreakpoints([])
     }
   }, [isConnected, uid, refreshStatus, setState, setBreakpoints])
@@ -280,7 +281,7 @@ export default function ZonePage() {
           {/* 左栏：Console 固定（无 tab 栏） */}
           <div className="flex min-w-0 flex-col overflow-hidden" style={{ width: `${bottomLeftRatio * 100}%` }}>
             <div className="flex shrink-0 items-center border-b border-border">
-              <BottomTab active icon={SquareTerminal} label="Console" />
+              <BottomTab active icon={SquareTerminal} label="Console" onClick={() => {}} />
             </div>
             <div className="min-h-0 flex-1 overflow-hidden">
               <TerminalDock />

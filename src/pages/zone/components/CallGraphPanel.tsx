@@ -3,6 +3,7 @@ import { Share2, ChevronRight, ChevronDown, RefreshCw, Loader2, AlertCircle, Sea
 import { Input } from '@/components/ui/input'
 import { zoneCallGraph, zoneFunctions, zoneStack, type CallGraphCallee } from '@/services/zone.service'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 
 interface CallGraphPanelProps {
   uid: string | null
@@ -29,7 +30,7 @@ function fmtAddr(addr: number): string {
  */
 export function CallGraphPanel({ uid, connected }: CallGraphPanelProps) {
   const pc = useZoneStore((s) => s.pc)
-  const elfPath = useZoneStore((s) => s.elfPath)
+  const { ready } = useSessionReady(uid, connected)
 
   const [root, setRoot] = useState<GNode | null>(null)
   const [rootLabel, setRootLabel] = useState<string>('')
@@ -72,7 +73,7 @@ export function CallGraphPanel({ uid, connected }: CallGraphPanelProps) {
 
   // 默认根：当前 PC 所在函数
   useEffect(() => {
-    if (!uid || !elfPath) {
+    if (!ready || !uid) {
       setRoot(null)
       setRootLabel('')
       return
@@ -112,13 +113,13 @@ export function CallGraphPanel({ uid, connected }: CallGraphPanelProps) {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, elfPath, pc])
+  }, [ready, pc])
 
   // 函数搜索（选择根）
   const onSearch = useCallback(
     async (q: string) => {
       setFilter(q)
-      if (!uid || !q.trim()) {
+      if (!ready || !uid || !q.trim()) {
         setPickResults([])
         return
       }
@@ -129,7 +130,7 @@ export function CallGraphPanel({ uid, connected }: CallGraphPanelProps) {
         setPickResults([])
       }
     },
-    [uid]
+    [ready, uid]
   )
 
   const pickRoot = useCallback(
@@ -256,10 +257,8 @@ export function CallGraphPanel({ uid, connected }: CallGraphPanelProps) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {!connected ? (
+        {!ready ? (
           <div className="min-h-0 flex-1" />
-        ) : !uid || !elfPath ? (
-          <Empty text="未加载 ELF" />
         ) : error ? (
           <Empty text={error} isError />
         ) : !root ? (

@@ -12,6 +12,7 @@
 """
 
 import os
+import re
 import bisect
 import logging
 import threading
@@ -384,6 +385,54 @@ class ElfBackend:
             "line": loc.get("line") if loc else None,
             "function": loc.get("function") if loc else None,
         }
+
+    def resolve_memory_address(self, uid: str, expr: str) -> dict:
+        """解析内存地址表达式 → {address, name, size, error}。
+
+        支持：
+            - 纯 hex：0x08000000 / 08000000
+            - &name / name：符号（复用 resolve_symbol 的精确+子串匹配）
+            - name[offset]：数组元素，元素大小取自 DWARF（无 DWARF 时按字节偏移）
+        失败返回 {"address": None, "error": "..."}。
+        """
+        addr = None
+        try:
+            if not expr:
+                return {"address": None, "error": "空表达式"}
+            expr = expr.strip()
+
+            # 1. 纯 hex
+            if re.fullmatch(r"(?:0x)?[0-9a-fA-F]{1,8}", expr):
+                return {"address": int(expr, 16), "name": expr}
+
+            # 2. 数组下标 name[offset]
+            m = re.fullmatch(r"&?([A-Za-z_]\w*)\[(\d+)\]", expr)
+            if m:
+                name, idx = m.group(1), int(m.group(2))
+                sym = self.resolve_symbol(uid, name)
+                if not sym:
+                    return {"address": None, "error": f"符号 {name} 未找到"}
+                entry = self._get(uid)
+                dl = entry.get("dwarf_locals") if entry else None
+                elem_size = None
+                if dl is not None:
+                    info = dl.array_info(name)
+                    if info is not None:
+                        elem_size, count = info
+                        if idx >= count:
+                            return {"address": None, "error": f"下标 {idx} 超出数组 {name}[{count}]"}
+                if elem_size is None:
+                    elem_size = 1  # 无 DWARF 时按字节偏移
+                return {"address": sym["address"] + idx * elem_size, "name": f"{name}[{idx}]", "size": elem_size}
+
+            # 3. &name / name
+            name = expr[1:] if expr.startswith("&") else expr
+            sym = self.resolve_symbol(uid, name)
+            if not sym:
+                return {"address": None, "error": f"符号 {name} 未找到"}
+            return {"address": sym["address"], "name": sym.get("name", name), "size": sym.get("size")}
+        except Exception as e:
+            return {"address": None, "error": str(e)}
 
     def search_source(self, uid: str, query: str, limit: int = 200) -> dict:
         """在全部源文件中做文本搜索（供「转到引用」的轻量实现）。

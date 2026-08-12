@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo, useLayoutEffect } from 'react'
 import { Loader2, AlertCircle } from 'lucide-react'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 import * as zoneService from '@/services/zone.service'
 import type { DisasmRow } from '@/services/zone.service'
 
@@ -142,7 +143,9 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
   const pc = useZoneStore((s) => s.pc)
   const state = useZoneStore((s) => s.state)
   const disasmAvailable = useZoneStore((s) => s.disasmAvailable)
-  const elfPath = useZoneStore((s) => s.elfPath)
+  // 反汇编从 ELF 读取代码段，仅依赖 ELF 符号，用 elfLoaded 提前加载，无需等待目标连接/会话启动。
+  // PC 高亮/自动滚动在会话 active、PC 就绪后由 effect 自动锚定到实际指令。
+  const { elfLoaded } = useSessionReady(uid, connected)
 
   const [rows, setRows] = useState<DisasmRow[]>([])
   const [baseAddress, setBaseAddress] = useState<number | null>(null)
@@ -304,9 +307,9 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
     [uid]
   )
 
-  // 初始：无 ELF 时显示提示；有 ELF 时从 PC 或默认地址反汇编
+  // 初始：ELF 未加载时清空；加载后从 PC 或默认地址反汇编（PC 就绪后自动重定位）
   useEffect(() => {
-    if (!elfPath) {
+    if (!elfLoaded) {
       setRows([])
       setBaseAddress(null)
       setError(null)
@@ -327,7 +330,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
       void loadInitial(startAddr)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elfPath, pc, state])
+  }, [elfLoaded, pc, state])
 
   // 滚动到边缘时加载更多/更前
   const onScroll = useCallback(() => {
@@ -383,12 +386,8 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
         onScroll={onScroll}
         className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-relaxed"
       >
-        {!connected ? (
+        {!elfLoaded ? (
           <div className="min-h-0 flex-1" />
-        ) : !elfPath ? (
-          <div className="flex h-full items-center justify-center text-muted-foreground">
-            请先加载 ELF 文件
-          </div>
         ) : !disasmAvailable ? (
           <div className="flex h-full items-center justify-center gap-2 text-amber-600">
             <AlertCircle className="size-4" />

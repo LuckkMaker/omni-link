@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
-import { FolderOpen } from 'lucide-react'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 import { cn } from '@/lib/utils'
 import { gridColumns, TableHeaderCell, useColumnResize, useColumnSort, type ColumnDef } from './sortableTable'
 import type { SourceFileInfo } from '@/services/zone.service'
@@ -22,6 +22,8 @@ export function SourceFilesPanel({ uid, connected }: { uid: string | null; conne
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const activeSourceFile = useZoneStore((s) => s.activeSourceFile)
   const openSourceFile = useZoneStore((s) => s.openSourceFile)
+  // 源码文件列表仅依赖 ELF 符号，用 elfLoaded 提前展示，无需等待目标连接/会话启动
+  const { elfLoaded } = useSessionReady(uid, connected)
 
   const columns = useMemo<ColumnDef<SourceFileInfo>[]>(
     () => [
@@ -60,18 +62,12 @@ export function SourceFilesPanel({ uid, connected }: { uid: string | null; conne
   const { widths, startResize } = useColumnResize(columns)
   const template = gridColumns(columns, widths)
 
-  if (!connected) {
+  if (!elfLoaded) {
     return <div className="h-full min-h-0" />
   }
 
   if (sourceFiles.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-xs text-muted-foreground">
-        <FolderOpen className="size-6 opacity-50" />
-        <span>未加载 ELF 或 ELF 无 DWARF 源码信息</span>
-        <span className="text-[10px] opacity-70">点击工具栏「Start Session」导入</span>
-      </div>
-    )
+    return <div className="h-full min-h-0" />
   }
 
   return (

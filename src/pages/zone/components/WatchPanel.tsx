@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { zoneReadMemory } from '@/services/zone.service'
 import { useZoneStore } from '../store'
+import { useSessionReady } from '../hooks'
 
 interface WatchPanelProps {
   uid: string | null
@@ -40,6 +41,7 @@ let nextId = 1
 export function WatchPanel({ uid, connected }: WatchPanelProps) {
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
+  const { ready } = useSessionReady(uid, connected)
 
   const [items, setItems] = useState<WatchItem[]>([])
   const [input, setInput] = useState('')
@@ -59,7 +61,7 @@ export function WatchPanel({ uid, connected }: WatchPanelProps) {
   }, [])
 
   const refresh = useCallback(async () => {
-    if (!uid || !connected) return
+    if (!ready || !uid) return
     setLoading(true)
     try {
       // 一次性读取全部寄存器
@@ -117,13 +119,13 @@ export function WatchPanel({ uid, connected }: WatchPanelProps) {
     } finally {
       setLoading(false)
     }
-  }, [uid, connected, items])
+  }, [ready, items])
 
   // 暂停/单步时自动刷新
   const lastState = useRef(state)
   const lastPc = useRef(pc)
   useEffect(() => {
-    if (!uid || !connected) return
+    if (!ready) return
     if (state === 'halted') {
       const stateChanged = lastState.current !== 'halted'
       const pcChanged = lastPc.current !== pc
@@ -132,7 +134,7 @@ export function WatchPanel({ uid, connected }: WatchPanelProps) {
     lastState.current = state
     lastPc.current = pc
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, state, pc])
+  }, [ready, state, pc])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -142,7 +144,7 @@ export function WatchPanel({ uid, connected }: WatchPanelProps) {
         <button
           className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent"
           onClick={() => void refresh()}
-          disabled={!connected}
+          disabled={!ready}
           title="刷新"
         >
           <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -166,7 +168,7 @@ export function WatchPanel({ uid, connected }: WatchPanelProps) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {!connected ? (
+        {!ready ? (
           <div className="min-h-0 flex-1" />
         ) : error ? (
           <Empty text={error} isError />

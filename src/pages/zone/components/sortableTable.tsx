@@ -130,8 +130,7 @@ export function TableHeaderCell({ col, sort, onSort, onResize }: HeaderCellProps
       className={cn(
         'relative select-none whitespace-nowrap border-r border-border bg-card px-2 py-1 text-[10px] font-medium uppercase tracking-wide last:border-r-0',
         sortable ? 'cursor-pointer hover:bg-accent' : '',
-        align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left',
-        col.headerClassName
+        align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'
       )}
       onClick={sortable ? () => onSort(col.key) : undefined}
     >

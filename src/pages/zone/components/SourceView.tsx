@@ -38,6 +38,7 @@ export function SourceView({ uid }: SourceViewProps) {
   const sourceFiles = useZoneStore((s) => s.sourceFiles)
   const pc = useZoneStore((s) => s.pc)
   const state = useZoneStore((s) => s.state)
+  const elfPath = useZoneStore((s) => s.elfPath)
   const breakpoints = useZoneStore((s) => s.breakpoints)
   const toggleBreakpoint = useZoneStore((s) => s.toggleBreakpoint)
   const refreshBreakpoints = useZoneStore((s) => s.refreshBreakpoints)
@@ -229,8 +230,8 @@ export function SourceView({ uid }: SourceViewProps) {
 
   // 连接后刷新断点列表
   useEffect(() => {
-    if (uid) void refreshBreakpoints(uid)
-  }, [uid, refreshBreakpoints])
+    if (uid && elfPath) void refreshBreakpoints(uid)
+  }, [uid, elfPath, refreshBreakpoints])
 
   // 将指定行滚动到容器中央（相比 scrollIntoView 更稳定，不受 sticky 与祖先滚动影响）
   // 使用双重 requestAnimationFrame：首帧布局稳定后，第二帧再滚动，确保行元素已渲染定位。
@@ -394,7 +395,7 @@ export function SourceView({ uid }: SourceViewProps) {
 
   // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
   useEffect(() => {
-    if (!uid || pc === null || pc === undefined) {
+    if (!uid || !elfPath || pc === null || pc === undefined) {
       setPcLine(null)
       return
     }
@@ -445,7 +446,7 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => {
       cancelled = true
     }
-  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, scrollToLine])
+  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, scrollToLine, elfPath])
 
   // 加载当前文件的可执行行号（仅这些行可打断点）
   useEffect(() => {

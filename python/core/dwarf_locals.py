@@ -676,6 +676,37 @@ class DwarfLocals:
                     best = (low, f)
         return best[1] if best else None
 
+    def array_info(self, name):
+        """按变量名在 DWARF 中查找数组，返回 (element_size, element_count)；非数组/未找到返回 None。
+
+        供内存地址表达式 name[offset] 解析元素字节大小使用。
+        """
+        for cu in self.dwarfinfo.iter_CUs():
+            for die in cu.iter_DIEs():
+                if die.tag != _TAG_VARIABLE:
+                    continue
+                if "DW_AT_name" not in die.attributes:
+                    continue
+                if _to_str(die.attributes["DW_AT_name"].value) != name:
+                    continue
+                if "DW_AT_type" not in die.attributes:
+                    continue
+                t = die.get_DIE_from_attribute("DW_AT_type")
+                depth = 0
+                while (t.tag in (_TAG_TYPEDEF, _TAG_CONST, _TAG_VOLATILE, _TAG_RESTRICT)
+                       and "DW_AT_type" in t.attributes and depth < 12):
+                    t = t.get_DIE_from_attribute("DW_AT_type")
+                    depth += 1
+                if t.tag != _TAG_ARRAY:
+                    return None
+                count = self._array_count(t)
+                elem_size = 1
+                if "DW_AT_type" in t.attributes:
+                    res = self._resolve_type(t.get_DIE_from_attribute("DW_AT_type"))
+                    elem_size = res[1] or 1
+                return (elem_size, count)
+        return None
+
 
 def _to_str(v):
     if isinstance(v, bytes):

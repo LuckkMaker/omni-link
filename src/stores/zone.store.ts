@@ -33,6 +33,16 @@ export type RefreshMode = 'on_stop' | 'periodic_always' | 'periodic_running' | '
 /** Zone 会话启动方式（Load ELF 下拉选项） */
 export type ZoneStartMode = 'download_reset' | 'attach_running' | 'attach_halt'
 
+/** 内存窗口：独立锚点地址 + 分组宽度 + 端序 */
+export interface MemoryWindow {
+  id: string
+  /** 地址（hex 字符串，支持 0x 前缀） */
+  address: string
+  /** 分组字节宽度 */
+  byteWidth: 1 | 2 | 4
+  bigEndian: boolean
+}
+
 interface ZoneStore {
   // ── 调试状态 ──────────────────────────────
   /** 目标状态 */
@@ -65,14 +75,20 @@ interface ZoneStore {
   // ── 检查器 ────────────────────────────────
   /** 当前检查器 tab */
   activeInspectorTab: InspectorTabId
-  /** 内存查看地址（字符串，支持 0x 前缀） */
+  /** 内存查看地址（字符串，支持 0x 前缀）——兼容持久化，始终与激活窗口地址同步 */
   memoryAddress: string
+  /** 内存窗口列表（多窗口，至少保留一个） */
+  memoryWindows: MemoryWindow[]
+  /** 激活的内存窗口 id */
+  activeMemoryWindow: string
 
   // ── 刷新策略 ──────────────────────────────
   refreshMode: RefreshMode
 
   // ── 会话 ───────────────────────────────────
   sessions: ZoneSession[]
+  /** Zone 调试会话生命周期：idle 未启动 / connecting 启动中 / active 已启动（与目标连接状态正交） */
+  sessionStatus: 'idle' | 'connecting' | 'active'
 
   // ── 断点 ───────────────────────────────────
   breakpoints: SourceBreakpoint[]
@@ -104,6 +120,14 @@ interface ZoneStore {
   closeAllFiles: () => void
   setActiveInspectorTab: (tab: InspectorTabId) => void
   setMemoryAddress: (addr: string) => void
+  /** 新建内存窗口（默认复制激活窗口设置；preset 可覆盖） */
+  addMemoryWindow: (preset?: Partial<MemoryWindow>) => void
+  /** 关闭内存窗口（至少保留一个，关闭的是激活项时切换到相邻窗口） */
+  closeMemoryWindow: (id: string) => void
+  /** 切换激活的内存窗口 */
+  selectMemoryWindow: (id: string) => void
+  /** 更新内存窗口的局部设置（地址/宽度/端序/格式），并同步 memoryAddress */
+  updateMemoryWindow: (id: string, patch: Partial<MemoryWindow>) => void
   setRefreshMode: (mode: RefreshMode) => void
   setBreakpoints: (bps: SourceBreakpoint[]) => void
   /** 设置源码视图当前光标所在行 */
@@ -160,6 +184,7 @@ export const useZoneStore = create<ZoneStore>()(
     (set, get) => ({
       // ── 初始状态 ──────────────────────────
       state: 'disconnected',
+      sessionStatus: 'idle',
       pc: null,
       currentFunction: null,
       busy: false,
@@ -175,6 +200,8 @@ export const useZoneStore = create<ZoneStore>()(
 
       activeInspectorTab: 'registers',
       memoryAddress: '0x20000000',
+      memoryWindows: [{ id: 'mem-1', address: '0x20000000', byteWidth: 1, bigEndian: false }],
+      activeMemoryWindow: 'mem-1',
 
       refreshMode: 'on_stop',
 
@@ -246,6 +273,45 @@ export const useZoneStore = create<ZoneStore>()(
         })),
       setActiveInspectorTab: (activeInspectorTab) => set({ activeInspectorTab }),
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
+      addMemoryWindow: (preset) =>
+        set((s) => {
+          const active = s.memoryWindows.find((w) => w.id === s.activeMemoryWindow)
+          const base = active ?? s.memoryWindows[0] ?? { address: '0x20000000', byteWidth: 1, bigEndian: false }
+          const id = 'mem-' + Math.random().toString(36).slice(2, 8)
+          const win: MemoryWindow = {
+            id,
+            address: preset?.address ?? base.address,
+            byteWidth: preset?.byteWidth ?? base.byteWidth,
+            bigEndian: preset?.bigEndian ?? base.bigEndian,
+          }
+          return { memoryWindows: [...s.memoryWindows, win], activeMemoryWindow: id }
+        }),
+      closeMemoryWindow: (id) =>
+        set((s) => {
+          if (s.memoryWindows.length <= 1) return {} // 至少保留一个
+          const windows = s.memoryWindows.filter((w) => w.id !== id)
+          let active = s.activeMemoryWindow
+          if (active === id) {
+            const idx = s.memoryWindows.findIndex((w) => w.id === id)
+            active = (windows[idx] ?? windows[idx - 1] ?? windows[0]).id
+          }
+          const activeWin = windows.find((w) => w.id === active) ?? windows[0]
+          // 同步 memoryAddress（兼容持久化）
+          return { memoryWindows: windows, activeMemoryWindow: active, memoryAddress: activeWin.address }
+        }),
+      selectMemoryWindow: (id) =>
+        set((s) => {
+          const win = s.memoryWindows.find((w) => w.id === id)
+          return win ? { activeMemoryWindow: id, memoryAddress: win.address } : {}
+        }),
+      updateMemoryWindow: (id, patch) =>
+        set((s) => {
+          const windows = s.memoryWindows.map((w) => (w.id === id ? { ...w, ...patch } : w))
+          // 更新激活窗口且改了地址时，同步 memoryAddress
+          const addrChanged = (patch.address !== undefined) && id === s.activeMemoryWindow
+          const activeWin = windows.find((w) => w.id === s.activeMemoryWindow) ?? windows[0]
+          return addrChanged ? { memoryWindows: windows, memoryAddress: activeWin.address } : { memoryWindows: windows }
+        }),
       setRefreshMode: (refreshMode) => set({ refreshMode }),
       setBreakpoints: (breakpoints) => set({ breakpoints }),
       setCursorLine: (cursorLine) => set({ cursorLine }),
@@ -336,7 +402,7 @@ export const useZoneStore = create<ZoneStore>()(
         try {
           await probeService.disconnectProbe(uid)
           // 停止会话后清除全部断点，避免残留影响下次会话
-          set({ state: 'disconnected', pc: null, busy: false, breakpoints: [] })
+          set({ state: 'disconnected', sessionStatus: 'idle', pc: null, busy: false, breakpoints: [] })
           zoneLog('info', 'Zone Stop debug session')
           useNotificationStore.getState().push({
             type: 'success',
@@ -456,7 +522,7 @@ export const useZoneStore = create<ZoneStore>()(
       },
 
       startSession: async (uid, mode, path) => {
-        set({ busy: true, error: null, followSource: true })
+        set({ busy: true, error: null, followSource: true, sessionStatus: 'connecting' })
         // 每个会话启动方式绑定所需连接模式
         const connectMode: ConnectMode = mode === 'download_reset' ? 'halt' : 'attach'
         const labels: Record<ZoneStartMode, string> = {
@@ -489,7 +555,7 @@ export const useZoneStore = create<ZoneStore>()(
           // 同步真实运行状态（download_reset 后目标仍在运行，attach_halt 后已暂停），
           // 避免工具栏/后续 step 的依据状态与实际不一致
           await get().refreshStatus(uid)
-          set({ busy: false })
+          set({ busy: false, sessionStatus: 'active' })
           useNotificationStore.getState().push({
             type: 'success',
             title: labels[mode],
@@ -500,7 +566,7 @@ export const useZoneStore = create<ZoneStore>()(
           return true
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Start session failed'
-          set({ busy: false, error: msg })
+          set({ busy: false, error: msg, sessionStatus: 'idle' })
           useNotificationStore.getState().push({
             type: 'error',
             title: '会话启动失败',
@@ -542,11 +608,15 @@ export const useZoneStore = create<ZoneStore>()(
           return
         }
         const d = res.session.data
+        const loadedAddr = (d.memoryAddress as string) ?? '0x20000000'
         set({
           elfPath: (d.elfPath as string) ?? null,
           activeSourceFile: (d.activeSourceFile as string) ?? null,
           activeInspectorTab: (d.activeInspectorTab as InspectorTabId) ?? 'registers',
-          memoryAddress: (d.memoryAddress as string) ?? '0x20000000',
+          memoryAddress: loadedAddr,
+          // 加载会话时重置为单个窗口（锚点取会话地址）
+          memoryWindows: [{ id: 'mem-1', address: loadedAddr, byteWidth: 1, bigEndian: false }],
+          activeMemoryWindow: 'mem-1',
           refreshMode: (d.refreshMode as RefreshMode) ?? 'on_stop',
         })
         useNotificationStore.getState().push({

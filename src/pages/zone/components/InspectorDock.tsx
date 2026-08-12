@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Loader2, AlertCircle, Cpu, Blocks, Binary, Share2, ChevronRight, ChevronDown } from 'lucide-react'
+import { Loader2, AlertCircle, Cpu, Blocks, Binary, Share2, ChevronRight, ChevronDown, X, Plus } from 'lucide-react'
 import { useZoneStore, type InspectorTabId } from '../store'
+import { useSessionReady } from '../hooks'
 import * as zoneService from '@/services/zone.service'
 import type { Peripheral, PeripheralRegister, PeripheralField, CoreRegister } from '@/services/zone.service'
 import { cn } from '@/lib/utils'
@@ -88,7 +89,7 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
 }
 
 // ── 通用刷新触发器：根据状态与刷新策略决定是否自动刷新 ──
-function useAutoRefresh(uid: string | null, connected: boolean, refresh: () => void) {
+function useAutoRefresh(uid: string | null, connected: boolean, ready: boolean, refresh: () => void) {
   const state = useZoneStore((s) => s.state)
   const pc = useZoneStore((s) => s.pc)
   const refreshMode = useZoneStore((s) => s.refreshMode)
@@ -96,7 +97,8 @@ function useAutoRefresh(uid: string | null, connected: boolean, refresh: () => v
   const lastPc = useRef(pc)
 
   useEffect(() => {
-    if (!uid || !connected) return
+    // 会话未就绪（未连接 / 未加载 ELF / 未启动调试会话）时不自动轮询
+    if (!uid || !connected || !ready) return
 
     // On Stop：halt 时刷新；step 时状态保持 halted 但 PC 变化，据此再次刷新
     if (refreshMode === 'on_stop') {
@@ -122,7 +124,7 @@ function useAutoRefresh(uid: string | null, connected: boolean, refresh: () => v
     }
     // off：不自动刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, state, pc, refreshMode, refresh])
+  }, [uid, connected, ready, state, pc, refreshMode, refresh])
 }
 
 /** 十六进制格式化（32 位） */
@@ -153,14 +155,21 @@ function wordHex(bytes: number[], width: 1 | 2 | 4, bigEndian: boolean): string 
   return (val >>> 0).toString(16).toUpperCase().padStart(width * 2, '0')
 }
 
+
+
 // ── 寄存器面板（CPU Core：Name / Value / Description） ──────────
 function RegistersPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
+  const { ready } = useSessionReady(uid, connected)
   const [registers, setRegisters] = useState<CoreRegister[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
-    if (!uid || !connected) return
+    if (!ready || !uid) {
+      setRegisters([])
+      setError(null)
+      return
+    }
     setLoading(true)
     try {
       const res = await zoneService.zoneCoreRegisters(uid)
@@ -173,23 +182,23 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
     } finally {
       setLoading(false)
     }
-  }, [uid, connected])
+  }, [ready, uid])
 
-  useAutoRefresh(uid, connected, refresh)
+  useAutoRefresh(uid, connected, ready, refresh)
 
   useEffect(() => {
-    if (connected) void refresh()
-  }, [connected, refresh])
+    if (ready) void refresh()
+  }, [ready, refresh])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {loading && registers.length === 0 ? (
+      {!ready ? (
+        <div className="min-h-0 flex-1" />
+      ) : loading && registers.length === 0 ? (
         <div className="flex h-full items-center justify-center text-muted-foreground">
           <Loader2 className="mr-2 size-4 animate-spin" />
           读取中...
         </div>
-      ) : !connected ? (
-        <div className="min-h-0 flex-1" />
       ) : error ? (
         <Empty text={error} isError />
       ) : (
@@ -218,7 +227,7 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
 
 // ── 外设面板（外设 → 寄存器 → 位域 三级折叠：Name / Value / Description） ──
 function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
-  const elfPath = useZoneStore((s) => s.elfPath)
+  const { ready } = useSessionReady(uid, connected)
   const [peripherals, setPeripherals] = useState<Peripheral[]>([])
   const [expandedPeriph, setExpandedPeriph] = useState<Set<string>>(new Set())
   const [expandedReg, setExpandedReg] = useState<Set<string>>(new Set())
@@ -227,7 +236,7 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
   const [error, setError] = useState<string | null>(null)
 
   const refreshValues = useCallback(async () => {
-    if (!uid || !connected) return
+    if (!ready || !uid) return
     // 收集所有寄存器的地址
     const allRegs: PeripheralRegister[] = []
     for (const p of peripherals) {
@@ -245,11 +254,18 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
     } catch {
       // 忽略
     }
-  }, [uid, connected, peripherals])
+  }, [ready, uid, peripherals])
 
   const refreshPeripherals = useCallback(async () => {
-    // ELF 未加载时不请求后端，避免 No ELF loaded 的 400 报错
-    if (!uid || !connected || !elfPath) return
+    // 会话未就绪时不请求后端，避免 No ELF loaded 的 400 报错
+    if (!ready || !uid) {
+      setPeripherals([])
+      setRegValues(new Map())
+      setExpandedPeriph(new Set())
+      setExpandedReg(new Set())
+      setError(null)
+      return
+    }
     setLoading(true)
     try {
       const res = await zoneService.zonePeripherals(uid)
@@ -268,25 +284,18 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
     } finally {
       setLoading(false)
     }
-  }, [uid, connected, elfPath])
+  }, [ready, uid])
 
-  useAutoRefresh(uid, connected, refreshValues)
+  useAutoRefresh(uid, connected, ready, refreshValues)
 
   useEffect(() => {
-    if (connected) {
-      void refreshPeripherals()
-    } else {
-      setPeripherals([])
-      setRegValues(new Map())
-      setExpandedPeriph(new Set())
-      setExpandedReg(new Set())
-    }
-  }, [connected, refreshPeripherals])
+    void refreshPeripherals()
+  }, [refreshPeripherals])
 
   // 外设/寄存器展开后读取寄存器值
   useEffect(() => {
-    if (connected && (expandedPeriph.size > 0 || expandedReg.size > 0)) void refreshValues()
-  }, [connected, expandedPeriph, expandedReg, refreshValues])
+    if (ready && (expandedPeriph.size > 0 || expandedReg.size > 0)) void refreshValues()
+  }, [ready, expandedPeriph, expandedReg, refreshValues])
 
   const togglePeriph = useCallback((name: string) => {
     setExpandedPeriph((prev) => {
@@ -307,13 +316,13 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {loading && peripherals.length === 0 ? (
+      {!ready ? (
+        <div className="min-h-0 flex-1" />
+      ) : loading && peripherals.length === 0 ? (
         <div className="flex h-full items-center justify-center text-muted-foreground">
           <Loader2 className="mr-2 size-4 animate-spin" />
           读取中...
         </div>
-      ) : !connected ? (
-        <div className="min-h-0 flex-1" />
       ) : error ? (
         <Empty text={error} isError />
       ) : peripherals.length === 0 ? (
@@ -442,21 +451,40 @@ function ChevronDownGlyph({ open }: { open: boolean }) {
 
 // ── 内存面板（底部 tab 使用；导出以便被 Zone 底部 tab 复用） ──
 export function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
-  const memoryAddress = useZoneStore((s) => s.memoryAddress)
-  const setMemoryAddress = useZoneStore((s) => s.setMemoryAddress)
-  // 字节宽度（1/2/4 字节分组，参考 Flash FilePanel 的 HexToolbar）
-  const [byteWidth, setByteWidth] = useState<1 | 2 | 4>(1)
-  // 端序：小端 / 大端（参考 vscode-memory-inspector 的 Group Endianness）
-  const [bigEndian, setBigEndian] = useState(false)
+  const { ready } = useSessionReady(uid, connected)
+  const memoryWindows = useZoneStore((s) => s.memoryWindows)
+  const activeMemoryWindow = useZoneStore((s) => s.activeMemoryWindow)
+  const addMemoryWindow = useZoneStore((s) => s.addMemoryWindow)
+  const closeMemoryWindow = useZoneStore((s) => s.closeMemoryWindow)
+  const selectMemoryWindow = useZoneStore((s) => s.selectMemoryWindow)
+  const updateMemoryWindow = useZoneStore((s) => s.updateMemoryWindow)
+
+  // 激活窗口（数据源：宽度/端序/格式/地址均来自窗口）
+  const active = memoryWindows.find((w) => w.id === activeMemoryWindow) ?? memoryWindows[0]
+  const byteWidth = active?.byteWidth ?? 1
+  const bigEndian = active?.bigEndian ?? false
+
+  // 地址输入框（本地编辑，回车提交；允许 hex / 符号 / &var / var[下标]）
+  const [addrInput, setAddrInput] = useState(active?.address ?? '0x20000000')
   const [rows, setRows] = useState<{ address: number; bytes: number[]; ascii: string }[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // 切换窗口时同步输入框
+  useEffect(() => {
+    setAddrInput(active?.address ?? '0x20000000')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMemoryWindow])
+
   const refresh = useCallback(async () => {
-    if (!uid || !connected) return
+    if (!ready || !uid) {
+      setRows([])
+      setError(null)
+      return
+    }
     setLoading(true)
     try {
-      const addr = parseInt(memoryAddress, 16)
+      const addr = parseInt(active.address, 16)
       if (isNaN(addr)) throw new Error('无效地址')
       const res = await zoneService.zoneReadMemory(uid, addr & ~0xf, 256)
       if (res.success) {
@@ -484,28 +512,93 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
     } finally {
       setLoading(false)
     }
-  }, [uid, connected, memoryAddress])
+  }, [ready, uid, active.address])
 
-  useAutoRefresh(uid, connected, refresh)
+  useAutoRefresh(uid, connected, ready, refresh)
 
   // 手动刷新（含地址变化）
   useEffect(() => {
-    if (connected) void refresh()
-  }, [connected, refresh])
+    if (ready) void refresh()
+  }, [ready, refresh])
+
+  // 回车解析地址表达式（纯 hex 直接提交；符号/&var/var[下标] 走后端解析）
+  const handleAddrEnter = useCallback(async () => {
+    if (!uid) return
+    const expr = addrInput.trim()
+    if (!expr) return
+    if (/^(?:0x)?[0-9a-fA-F]{1,8}$/.test(expr)) {
+      const hex = expr.startsWith('0x') ? expr : '0x' + expr
+      updateMemoryWindow(active.id, { address: hex })
+      setAddrInput(hex)
+      return
+    }
+    try {
+      const res = await zoneService.zoneResolveMemoryAddress(uid, expr)
+      if (res.address != null) {
+        const hex = '0x' + res.address.toString(16).toUpperCase()
+        updateMemoryWindow(active.id, { address: hex })
+        setAddrInput(hex)
+      } else {
+        setError(res.error || '无法解析地址')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '解析地址失败')
+    }
+  }, [uid, addrInput, active.id, updateMemoryWindow])
 
   const readLength = rows.length * 16
   const startAddr = rows.length > 0 ? rows[0].address : NaN
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* 工具栏（参考 Flash FilePanel：字节宽度分段 + 端序 + 地址跳转 + 右侧信息） */}
+      {/* 窗口 tab 栏：多窗口切换 + 新建 + 关闭（至少保留一个） */}
+      <div className="flex shrink-0 items-center border-b border-border">
+        {memoryWindows.map((w) => {
+          const isActive = w.id === active.id
+          return (
+            <div
+              key={w.id}
+              className={cn(
+                'group/tab flex items-center gap-1 border-r border-border px-2 py-1 text-xs',
+                isActive ? 'bg-muted/40 text-foreground' : 'text-muted-foreground hover:bg-muted/20'
+              )}
+            >
+              <button
+                onClick={() => selectMemoryWindow(w.id)}
+                className="font-mono"
+                title={w.address}
+              >
+                {w.address}
+              </button>
+              {memoryWindows.length > 1 && (
+                <button
+                  onClick={() => closeMemoryWindow(w.id)}
+                  className="flex opacity-0 transition-opacity group-hover/tab:opacity-100 hover:text-red-500"
+                  title="关闭窗口"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </div>
+          )
+        })}
+        <button
+          onClick={() => addMemoryWindow()}
+          className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:bg-muted/20 hover:text-foreground"
+          title="新建窗口（复制当前设置）"
+        >
+          <Plus className="size-3.5" />
+        </button>
+      </div>
+
+      {/* 工具栏（参考 Flash FilePanel：字节宽度分段 + 端序 + 格式 + 地址跳转 + 右侧信息） */}
       <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-border px-2 py-1.5">
         {/* 字节宽度切换 */}
         <div className="flex items-center rounded border border-border">
           {([1, 2, 4] as const).map((w) => (
             <button
               key={w}
-              onClick={() => setByteWidth(w)}
+              onClick={() => updateMemoryWindow(active.id, { byteWidth: w })}
               className={cn(
                 'px-1.5 py-0.5 text-[11px] font-medium transition-colors',
                 byteWidth === w
@@ -523,7 +616,7 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
           {[{ v: false, l: 'LE' }, { v: true, l: 'BE' }].map((o) => (
             <button
               key={o.l}
-              onClick={() => setBigEndian(o.v)}
+              onClick={() => updateMemoryWindow(active.id, { bigEndian: o.v })}
               className={cn(
                 'px-2 py-0.5 text-[11px] font-medium transition-colors',
                 bigEndian === o.v
@@ -536,25 +629,27 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
           ))}
         </div>
 
+        
+
         <div className="h-5 w-px bg-border mx-0.5" />
 
-        {/* 地址跳转 — 固定 0x 前缀 */}
+        {/* 地址跳转 — 支持 hex / 符号 / &var / var[下标] */}
         <div className="flex items-center h-6 rounded-md border border-border overflow-hidden">
           <span className="flex items-center px-1.5 h-full text-xs font-mono text-muted-foreground bg-muted/50 border-r border-border">0x</span>
           <input
-            value={memoryAddress}
-            onChange={(e) => setMemoryAddress(e.target.value.replace(/[^0-9a-fA-F]/g, ''))}
-            onKeyDown={(e) => { if (e.key === 'Enter') void refresh() }}
-            placeholder="20000000"
+            value={addrInput.startsWith('0x') ? addrInput.slice(2) : addrInput}
+            onChange={(e) => setAddrInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void handleAddrEnter() }}
+            placeholder="20000000 / buf[0]"
             spellCheck={false}
             autoComplete="off"
-            className="h-6 w-20 bg-transparent px-1.5 font-mono text-xs outline-none"
+            className="h-6 w-28 bg-transparent px-1.5 font-mono text-xs outline-none"
           />
         </div>
         <button
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={() => void refresh()}
-          disabled={!connected}
+          disabled={!ready}
           title="刷新"
         >
           <RefreshGlyph spinning={loading} />
@@ -570,13 +665,13 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
 
       {/* Hex 内容区（参考 Flash HexViewer：地址 0xXXXX_XXXX | 按字分组 Hex | ASCII） */}
       <div className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-5">
-        {!connected ? (
+        {!ready ? (
           <div className="min-h-0 flex-1" />
         ) : error ? (
           <Empty text={error} isError />
         ) : (
           rows.map((row) => {
-            // 按 byteWidth 切成等宽字（16 字节一行 → 1B:16 字 / 2B:8 字 / 4B:4 字）
+            // 按 byteWidth 切成等宽字（16 字节一行 → 1B:16 字 / 2B:8 字 / 4B:4 字），固定十六进制
             const words: string[] = []
             for (let i = 0; i < row.bytes.length; i += byteWidth) {
               words.push(wordHex(row.bytes.slice(i, i + byteWidth), byteWidth, bigEndian))
