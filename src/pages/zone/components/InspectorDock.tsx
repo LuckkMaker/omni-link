@@ -59,6 +59,7 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
     { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
   ]
   const expandedSections = sections.filter((s) => expanded.includes(s.id))
+  const collapsedSections = sections.filter((s) => !expanded.includes(s.id))
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card">
@@ -69,20 +70,14 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
           <div className="min-h-0 flex-1 overflow-hidden border-t border-border">{s.content}</div>
         </div>
       ))}
-      {/* 折叠的 section 固定在底部 */}
+      {/* 折叠的 section 固定在底部；content 保持挂载（会话启动后预取数据），仅 CSS 隐藏不占空间 */}
       <div className="mt-auto flex shrink-0 flex-col">
-        {sections
-          .filter((s) => !expanded.includes(s.id))
-          .map((s) => (
-            <RailTab
-              key={s.id}
-              active={false}
-              onClick={() => toggle(s.id)}
-              icon={s.icon}
-              label={s.label}
-              title={s.label}
-            />
-          ))}
+        {collapsedSections.map((s) => (
+          <div key={s.id} className="flex flex-col">
+            <RailTab active={false} onClick={() => toggle(s.id)} icon={s.icon} label={s.label} title={s.label} />
+            <div className="hidden">{s.content}</div>
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -235,12 +230,18 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // 始终引用最新展开状态，供 refreshValues 按需读取（避免 useCallback 闭包过期）
+  const expandedPeriphRef = useRef(expandedPeriph)
+  expandedPeriphRef.current = expandedPeriph
+
   const refreshValues = useCallback(async () => {
     if (!ready || !uid) return
-    // 收集所有寄存器的地址
+    // 只收集当前展开外设的寄存器地址（对齐 Keil 按需读取，避免全量刷新）
+    const names = expandedPeriphRef.current
+    if (names.size === 0) return
     const allRegs: PeripheralRegister[] = []
     for (const p of peripherals) {
-      allRegs.push(...(p.registers ?? []))
+      if (names.has(p.name)) allRegs.push(...(p.registers ?? []))
     }
     const addrs = allRegs.map((r) => r.address)
     if (addrs.length === 0) return
@@ -292,10 +293,10 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
     void refreshPeripherals()
   }, [refreshPeripherals])
 
-  // 外设/寄存器展开后读取寄存器值
+  // 外设加载完成 / 展开状态变化时，读取当前展开外设的寄存器值（按需、分组）；halt/单步由 useAutoRefresh 刷新
   useEffect(() => {
-    if (ready && (expandedPeriph.size > 0 || expandedReg.size > 0)) void refreshValues()
-  }, [ready, expandedPeriph, expandedReg, refreshValues])
+    if (ready && peripherals.length > 0) void refreshValues()
+  }, [ready, peripherals, expandedPeriph, refreshValues])
 
   const togglePeriph = useCallback((name: string) => {
     setExpandedPeriph((prev) => {

@@ -303,10 +303,17 @@ export default function ZonePage() {
               <BottomTab active={bottomTab === 'watch'} onClick={() => setBottomTab('watch')} icon={Eye} label="Watch" />
               <BottomTab active={bottomTab === 'memory'} onClick={() => setBottomTab('memory')} icon={MemoryStick} label="Memory" />
             </div>
-            <div className="min-h-0 flex-1 overflow-hidden">
-              {bottomTab === 'callstack' && <CallStackPanel uid={uid} connected={isConnected} />}
-              {bottomTab === 'watch' && <WatchPanel uid={uid} connected={isConnected} />}
-              {bottomTab === 'memory' && <MemoryPanel uid={uid} connected={isConnected} />}
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              {/* 三个面板始终挂载（会话启动后各自预取数据），仅 CSS 隐藏未激活 tab 的面板 */}
+              <div className={cn('min-h-0 flex-1', bottomTab !== 'callstack' && 'hidden')}>
+                <CallStackPanel uid={uid} connected={isConnected} />
+              </div>
+              <div className={cn('min-h-0 flex-1', bottomTab !== 'watch' && 'hidden')}>
+                <WatchPanel uid={uid} connected={isConnected} />
+              </div>
+              <div className={cn('min-h-0 flex-1', bottomTab !== 'memory' && 'hidden')}>
+                <MemoryPanel uid={uid} connected={isConnected} />
+              </div>
             </div>
           </div>
         </div>

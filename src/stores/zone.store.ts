@@ -24,6 +24,13 @@ function zoneLog(level: 'info' | 'warning' | 'error', message: string) {
   })
 }
 
+/** 从请求错误中提取后端返回的明确原因（FastAPI detail），优先于 axios 的 "Request failed with status code XXX" */
+export function extractApiErrorDetail(err: unknown): string | null {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  return null
+}
+
 /** 右侧检查器 dock 的 section 类型 */
 export type InspectorTabId = 'disasm' | 'callstack' | 'callgraph' | 'registers' | 'peripherals'
 
@@ -384,7 +391,9 @@ export const useZoneStore = create<ZoneStore>()(
           const st = await zoneService.zoneStatus(uid)
           set({ state: st.state, pc: st.pc, busy: false })
         } catch (err) {
-          const msg = err instanceof Error ? err.message : 'Reset failed'
+          const detail = extractApiErrorDetail(err)
+          const fallback = err instanceof Error ? err.message : 'Reset failed'
+          const msg = detail ?? fallback
           set({ busy: false, error: msg })
           zoneLog('error', `Zone Reset failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: 'Reset failed', message: msg })
@@ -588,8 +597,17 @@ export const useZoneStore = create<ZoneStore>()(
             // 烧录（不自动运行）。复位并暂停在 Reset_Handler（参考 Keil：会话启动不自动运行到 main，
             // 由用户手动 [Run]/[Step] 进入程序，避免在调试起点上强加 breakpoint 副作用）
             useNotificationStore.getState().update(notifId, { message: '正在下载固件并复位目标...' })
-            await programFlash(uid, path, true, false)
+            const flashRes = await programFlash(uid, path, true, false)
             zoneLog('info', 'Zone Download & Reset Program')
+            // 烧录是「软失败」：接口返回 success=false 但 HTTP 层面不抛错（如 SWD 通信失败）。
+            // 此时连接可能已中断，必须在此中止启动，避免继续执行已失效的 reset 再抛一次误导性错误。
+            if (!flashRes.success) {
+              throw new Error(
+                flashRes.error
+                  ? `固件下载失败：${flashRes.error}`
+                  : '固件下载失败，请检查仿真器与目标板连接，或降低调试时钟频率'
+              )
+            }
             await get().reset(uid, 'halt')
           } else if (mode === 'attach_halt') {
             useNotificationStore.getState().update(notifId, { message: '正在暂停目标...' })
@@ -619,7 +637,11 @@ export const useZoneStore = create<ZoneStore>()(
           })
           return true
         } catch (err) {
-          const msg = err instanceof Error ? err.message : 'Start session failed'
+          // 优先展示后端返回的明确原因（如探针未连接、目标未选择、烧录失败等），
+          // 避免只显示 axios 的 "Request failed with status code 500" 让用户无法理解。
+          const detail = extractApiErrorDetail(err)
+          const fallback = err instanceof Error ? err.message : 'Start session failed'
+          const msg = detail ?? fallback
           // 仅当仍由本次启动负责状态（未被 stop 覆盖）时才写回 idle/error
           if (get().sessionNonce === nonce) set({ busy: false, error: msg, sessionStatus: 'idle' })
           useNotificationStore.getState().update(notifId, {

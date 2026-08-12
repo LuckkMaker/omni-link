@@ -25,6 +25,9 @@ function formatProbeName(product: string, vendor: string): string {
   return 'DAPLink'
 }
 
+/** localStorage key：记录上一次选择的 ELF 路径，方便下次启动会话时快速确认 */
+const ELF_LAST_PATH_KEY = 'omni_link_last_elf_path'
+
 interface ConnectionConfigDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -82,6 +85,8 @@ export function ConnectionConfigDialog({
 
   const [deviceDialogOpen, setDeviceDialogOpen] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [probeError, setProbeError] = useState<string | null>(null)
+  const [elfError, setElfError] = useState<string | null>(null)
   const [elfPath, setElfPath] = useState<string | null>(null)
 
   // 当前设备显示名
@@ -97,8 +102,20 @@ export function ConnectionConfigDialog({
       fetchProbes()
       if (deviceList.length === 0) fetchDevices()
     }
-    if (open) setErrorMsg(initialError ?? null)
+    if (open) {
+      setErrorMsg(initialError ?? null)
+      setProbeError(null)
+      setElfError(null)
+    }
   }, [open, status, initialError, fetchProbes, fetchDevices, deviceList.length])
+
+  // 打开 start 模式时，预填上一次选择的 ELF 路径（作为默认值，用户仍可重新选择或确认使用）
+  useEffect(() => {
+    if (open && mode === 'start') {
+      const last = localStorage.getItem(ELF_LAST_PATH_KEY)
+      if (last) setElfPath(last)
+    }
+  }, [open, mode])
 
   // 选择 ELF 文件（仅 start 模式）
   const handlePickElf = async () => {
@@ -106,27 +123,35 @@ export function ConnectionConfigDialog({
       extensions: ['elf', 'axf'],
       title: '选择 ELF 文件',
     })
-    if (path) setElfPath(path)
+    if (path) {
+      setElfPath(path)
+      setElfError(null)
+      localStorage.setItem(ELF_LAST_PATH_KEY, path)
+    }
   }
 
   const handleConfirm = () => {
     if (showElf) {
       if (!selectedProbe) {
-        setErrorMsg('请先选择仿真器')
+        setProbeError('请先选择仿真器')
         return
       }
       if (!elfPath) {
-        setErrorMsg('请选择 ELF 文件')
+        setElfError('请选择 ELF/AXF 文件')
         return
       }
       const path = elfPath
       onOpenChange(false)
       setErrorMsg(null)
+      setProbeError(null)
+      setElfError(null)
       setElfPath(null)
       onStartSession?.(path)
     } else {
       onOpenChange(false)
       setErrorMsg(null)
+      setProbeError(null)
+      setElfError(null)
     }
   }
 
@@ -141,14 +166,17 @@ export function ConnectionConfigDialog({
           {/* 仿真器选择 + 刷新 */}
           <div className="min-w-0 space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">仿真器</span>
+              <span className="text-sm font-medium">
+                仿真器
+                {probeError && <span className="ml-2 text-xs font-normal text-red-500">{probeError}</span>}
+              </span>
               <Button variant="ghost" size="sm" onClick={() => fetchProbes()} disabled={loadingProbes}>
                 <RefreshCw className={cn('size-4', loadingProbes && 'animate-spin')} />
               </Button>
             </div>
             <Select
               value={selectedUid ?? ''}
-              onValueChange={(v) => selectProbe(v)}
+              onValueChange={(v) => { selectProbe(v); setProbeError(null) }}
               disabled={probes.length === 0}
             >
               <SelectTrigger className="h-9">
@@ -254,13 +282,16 @@ export function ConnectionConfigDialog({
           {/* ELF 文件选择（仅 zone 页 Start Session 入口显示） */}
           {showElf && (
             <div className="min-w-0 space-y-2">
-              <span className="text-sm font-medium">可执行文件</span>
+              <span className="text-sm font-medium">
+                可执行文件
+                {elfError && <span className="ml-2 text-xs font-normal text-red-500">{elfError}</span>}
+              </span>
               <button
                 onClick={handlePickElf}
                 className="flex w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm transition-colors hover:bg-accent"
               >
                 <span className={cn('min-w-0 truncate', elfPath ? 'font-medium' : 'text-muted-foreground')}>
-                  {elfPath ? elfPath.split(/[\\/]/).pop() : '点击选择 ELF 文件'}
+                  {elfPath ? elfPath.split(/[\\/]/).pop() : '点击选择可执行文件'}
                 </span>
                 <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
               </button>
