@@ -369,6 +369,12 @@ class ElfBackend:
             loc = self.get_line_for_address(uid, f["address"])
             f["file"] = loc.get("file") if loc else None
             f["line"] = loc.get("line") if loc else None
+            # 优先用 DWARF 声明行（函数定义行）而非函数体首条指令行，保证跳转/CodeLens 落在函数定义处
+            dl = entry.get("dwarf_locals")
+            if dl is not None:
+                decl = dl.get_func_decl_line(f["address"])
+                if decl:
+                    f["line"] = decl
         return {"success": True, "functions": page, "total": total}
 
     def resolve_symbol(self, uid: str, name: str) -> Optional[dict]:

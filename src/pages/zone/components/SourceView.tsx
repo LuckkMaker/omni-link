@@ -19,6 +19,63 @@ const MODEL_CACHE_LIMIT = 30
 /** 语义 provider（定义/引用/文档符号）注册覆盖的语言 */
 const SOURCE_LANGS = ['cpp', 'arm-asm', 'plaintext']
 
+/** 全局命令通过它调用当前编辑器实例的处理函数（避免闭包过期） */
+let activeEditorHandlers: {
+  wordAtCursor: () => string
+  goToDefinition: (word: string) => void
+  peekDefinition: () => void
+  goToReferences: (word: string) => void
+} | null = null
+
+/** 全局命令与键位是否已注册（避免组件重挂载时重复注册） */
+let commandsRegistered = false
+
+/** 注册全局命令与键位（仅一次）。命令通过 activeEditorHandlers 调用当前编辑器逻辑，
+ *  确保 F12 等键位覆盖 Monaco 原生 revealDefinition，并派发到真实注册的命令。 */
+function ensureGlobalCommands() {
+  if (commandsRegistered) return
+  commandsRegistered = true
+  monaco.editor.addCommand({
+    id: 'omnilink.gotoDefinition',
+    run: () => {
+      const h = activeEditorHandlers
+      if (!h) return
+      const w = h.wordAtCursor()
+      if (w) h.goToDefinition(w)
+    },
+  })
+  monaco.editor.addCommand({
+    id: 'omnilink.peekDefinition',
+    run: () => {
+      activeEditorHandlers?.peekDefinition()
+    },
+  })
+  monaco.editor.addCommand({
+    id: 'omnilink.gotoReferences',
+    run: () => {
+      const h = activeEditorHandlers
+      if (!h) return
+      const w = h.wordAtCursor()
+      if (w) h.goToReferences(w)
+    },
+  })
+  monaco.editor.addCommand({
+    id: 'omnilink.findAllReferences',
+    run: () => {
+      const h = activeEditorHandlers
+      if (!h) return
+      const w = h.wordAtCursor()
+      if (w) h.goToReferences(w)
+    },
+  })
+  monaco.editor.addKeybindingRules([
+    { keybinding: monaco.KeyCode.F12, command: 'omnilink.gotoDefinition' },
+    { keybinding: monaco.KeyMod.Alt | monaco.KeyCode.F12, command: 'omnilink.peekDefinition' },
+    { keybinding: monaco.KeyMod.Shift | monaco.KeyCode.F12, command: 'omnilink.gotoReferences' },
+    { keybinding: monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, command: 'omnilink.findAllReferences' },
+  ])
+}
+
 /** zoneFunctions 返回的单条函数 */
 type ZoneFunc = { name: string; address: number; size: number; file?: string | null; line?: number | null }
 
@@ -44,6 +101,34 @@ function norm(p: string): string {
 /** 判断两个源码路径（可能一个为 basename）是否指向同一文件 */
 function isSameSource(a: string, b: string): boolean {
   return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
+}
+
+/** 右键菜单项：左侧标签 + 右侧快捷键提示 */
+function MenuItem({
+  label,
+  shortcut,
+  onClick,
+  disabled,
+}: {
+  label: string
+  shortcut?: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <span className="flex-1 text-left">{label}</span>
+      {shortcut && <span className="text-xs text-muted-foreground">{shortcut}</span>}
+    </button>
+  )
+}
+
+function MenuSeparator() {
+  return <div className="-mx-1 my-1 h-px bg-muted/60" />
 }
 
 /** 计算当前内容相对原始内容的修改/新增行号（用于 minimap 修改行高亮，对齐 VS Code） */
@@ -200,6 +285,10 @@ export function SourceView({ uid }: SourceViewProps) {
   useEffect(() => {
     executableLinesRef.current = executableLines
   }, [executableLines])
+  const navGotoRef = useRef(navGoto)
+  useEffect(() => {
+    navGotoRef.current = navGoto
+  }, [navGoto])
   useEffect(() => {
     editingRef.current = editing
   }, [editing])
@@ -273,6 +362,27 @@ export function SourceView({ uid }: SourceViewProps) {
     [sourceFiles]
   )
 
+  // 预加载目标文件的 Monaco 模型（不导航、不切换当前文件），供 F12 原生跳转与 Peek 内联预览使用
+  const ensureModel = useCallback(async (file: string): Promise<monaco.editor.ITextModel | null> => {
+    const u = uidRef.current
+    if (!u) return null
+    const key = norm(file)
+    let model = modelsRef.current.get(key)
+    if (model) return model
+    const res = await zoneService.zoneSourceContent(u, file)
+    if (!res.success) return null
+    if (!originalsRef.current.has(key)) {
+      originalsRef.current.set(key, res.lines?.join('\n') ?? '')
+    }
+    model = monaco.editor.createModel(
+      res.lines?.join('\n') ?? '',
+      monacoLangFor(file),
+      monaco.Uri.parse('file:///' + key)
+    )
+    modelsRef.current.set(key, model)
+    return model
+  }, [])
+
   // 关闭右键菜单/引用面板：点击外部 / 按 ESC / 窗口失焦
   useEffect(() => {
     if (!tabMenu && !codeMenu && !refsPanel) return
@@ -325,44 +435,87 @@ export function SourceView({ uid }: SourceViewProps) {
     setCodeMenu(null)
   }, [])
 
-  // 转到定义：后端符号表解析 → 打开文件并滚动到对应行
-  const goToDefinition = useCallback(async () => {
-    if (!uid || !codeMenu?.word) return
-    setCodeMenu(null)
-    const res = await zoneService.zoneResolveSymbol(uid, codeMenu.word)
-    if (!res.success || !res.symbol || !res.symbol.file || res.symbol.line == null) {
-      useZoneStore.getState().setError?.(`未找到符号定义: ${codeMenu.word}`)
-      return
-    }
-    const target = matchSourceFile(res.symbol.file)
-    if (target) gotoSource(target, res.symbol.line)
-    else useZoneStore.getState().setError?.(`定义文件不在源码列表: ${res.symbol.file}`)
-  }, [uid, codeMenu, matchSourceFile, gotoSource])
+  // 转到定义：后端符号表解析 → 打开文件并滚动到对应行（供右键菜单 / F12 / Ctrl+点击复用）
+  const goToDefinitionWord = useCallback(
+    async (word: string) => {
+      const u = uidRef.current
+      if (!u || !word) return
+      const res = await zoneService.zoneResolveSymbol(u, word)
+      if (!res.success || !res.symbol || !res.symbol.file || res.symbol.line == null) {
+        useZoneStore.getState().setError?.(`未找到符号定义: ${word}`)
+        return
+      }
+      const target = matchSourceFile(res.symbol.file)
+      if (target) gotoSource(target, res.symbol.line)
+      else useZoneStore.getState().setError?.(`定义文件不在源码列表: ${res.symbol.file}`)
+    },
+    [matchSourceFile, gotoSource]
+  )
 
-  // 转到引用：轻量全文检索，结果在面板中列出
-  const goToReferences = useCallback(async () => {
-    if (!uid || !codeMenu?.word) return
-    const query = codeMenu.word
-    const base = { x: codeMenu.x, y: codeMenu.y, query }
+  const goToDefinition = useCallback(() => {
+    const word = codeMenu?.word ?? ''
     setCodeMenu(null)
-    setRefsPanel({ ...base, hits: [], loading: true })
-    try {
-      const res = await zoneService.zoneSearchSource(uid, query)
-      setRefsPanel((p) => (p && p.query === query ? { ...p, hits: res.results ?? [], loading: false } : p))
-    } catch {
-      setRefsPanel((p) => (p && p.query === query ? { ...p, hits: [], loading: false } : p))
-    }
-  }, [uid, codeMenu])
+    void goToDefinitionWord(word)
+  }, [codeMenu, goToDefinitionWord])
+
+  // 转到引用：轻量全文检索，结果在面板中列出（供右键菜单 / Shift+F12 / Ctrl+Shift+F 复用）
+  const goToReferencesWord = useCallback(
+    async (word: string, x = 0, y = 0) => {
+      const u = uidRef.current
+      if (!u || !word) return
+      setRefsPanel({ x, y, query: word, hits: [], loading: true })
+      try {
+        const res = await zoneService.zoneSearchSource(u, word)
+        setRefsPanel((p) => (p && p.query === word ? { ...p, hits: res.results ?? [], loading: false } : p))
+      } catch {
+        setRefsPanel((p) => (p && p.query === word ? { ...p, hits: [], loading: false } : p))
+      }
+    },
+    []
+  )
+
+  const goToReferences = useCallback(() => {
+    if (!codeMenu?.word) return
+    const { word, x, y } = codeMenu
+    setCodeMenu(null)
+    void goToReferencesWord(word, x, y)
+  }, [codeMenu, goToReferencesWord])
 
   // Peek 定义：将光标移到触发词后触发 Monaco 原生 peek（依赖上面注册的 DefinitionProvider）
-  const peekDefinition = useCallback(() => {
+  const peekDefinitionAt = useCallback((pos: { lineNumber: number; column: number } | null) => {
     const editor = editorRef.current
-    if (editor && codeMenu?.pos) {
-      editor.setPosition(new monaco.Position(codeMenu.pos.lineNumber, codeMenu.pos.column))
+    if (editor && pos) {
+      editor.setPosition(new monaco.Position(pos.lineNumber, pos.column))
       editor.trigger('source-editor', 'editor.action.peekDefinition', null)
     }
+  }, [])
+
+  const peekDefinition = useCallback(() => {
+    peekDefinitionAt(codeMenu?.pos ?? null)
     setCodeMenu(null)
-  }, [codeMenu])
+  }, [codeMenu, peekDefinitionAt])
+
+  // 读取光标处单词（供快捷键使用）
+  const wordAtCursor = useCallback(() => {
+    const editor = editorRef.current
+    const pos = editor?.getPosition()
+    const model = editor?.getModel()
+    if (!pos || !model) return ''
+    return model.getWordAtPosition(pos)?.word ?? ''
+  }, [])
+
+  // 剪切 / 粘贴（仅编辑模式生效，对齐 VS Code 编辑操作）
+  const cutSelection = useCallback(() => {
+    const editor = editorRef.current
+    if (editor && editingRef.current) editor.trigger('source-editor', 'editor.action.clipboardCutAction', null)
+    setCodeMenu(null)
+  }, [])
+
+  const pasteClipboard = useCallback(() => {
+    const editor = editorRef.current
+    if (editor && editingRef.current) editor.trigger('source-editor', 'editor.action.clipboardPasteAction', null)
+    setCodeMenu(null)
+  }, [])
 
   // 连接后刷新断点列表
   useEffect(() => {
@@ -556,10 +709,32 @@ export function SourceView({ uid }: SourceViewProps) {
           pos: pos ? { lineNumber: pos.lineNumber, column: pos.column } : null,
         })
       })
+
+      // 键盘快捷键（对齐 VS Code）：F12 转到定义 / Alt+F12 Peek / Shift+F12 转到引用 / Ctrl+Shift+F 查找引用。
+      // 通过全局命令 + addKeybindingRules 实现，确保覆盖 Monaco 原生 F12（revealDefinition）。
+      ensureGlobalCommands()
       applyDecorations()
     },
     [uid, toggleBreakpoint, setCursorLine, applyDecorations]
   )
+
+  // 维护全局命令的当前处理器（随依赖更新，避免闭包过期）；并确保全局命令/键位已注册
+  useEffect(() => {
+    activeEditorHandlers = {
+      wordAtCursor,
+      goToDefinition: (word) => void goToDefinitionWord(word),
+      peekDefinition: () => {
+        const editor = editorRef.current
+        const pos = editor?.getPosition()
+        peekDefinitionAt(pos ? { lineNumber: pos.lineNumber, column: pos.column } : null)
+      },
+      goToReferences: (word) => void goToReferencesWord(word),
+    }
+    ensureGlobalCommands()
+    return () => {
+      activeEditorHandlers = null
+    }
+  }, [wordAtCursor, goToDefinitionWord, peekDefinitionAt, goToReferencesWord])
 
   // 自建轻量 hover provider —— 悬停符号时复用后端符号表展示类型/地址/所属函数/定义位置。
   // 独立 useEffect 依赖 uid：onMount 只在首挂载执行一次，会捕获到首挂载时的 null uid，
@@ -656,7 +831,7 @@ export function SourceView({ uid }: SourceViewProps) {
       })
     )
 
-    // 转到定义：符号表解析 → 打开目标文件并返回 Location
+    // 转到定义：符号表解析 → 预加载目标模型并返回 Location（不导航，避免 Peek 跳走 / F12 双重滚动）
     disposables.push(
       monaco.languages.registerDefinitionProvider(SOURCE_LANGS, {
         provideDefinition: async (model, position) => {
@@ -666,7 +841,8 @@ export function SourceView({ uid }: SourceViewProps) {
           if (!res.success || !res.symbol || !res.symbol.file || res.symbol.line == null) return null
           const target = matchSourceFile(res.symbol.file)
           if (!target) return null
-          gotoSource(target, res.symbol.line)
+          // 预加载目标模型（不切换文件、不滚动），供 F12 原生跳转与 Peek 内联预览使用
+          await ensureModel(target)
           return {
             uri: fileUri(target),
             range: new monaco.Range(res.symbol.line, 1, res.symbol.line, 1),
@@ -724,38 +900,10 @@ export function SourceView({ uid }: SourceViewProps) {
       })
     )
 
-    // CodeLens：在每个函数声明行展示其链接地址 + 大小（嵌入式调试参考信息）
-    disposables.push(
-      monaco.languages.registerCodeLensProvider(SOURCE_LANGS, {
-        provideCodeLenses: async (model) => {
-          const file = currentFileRef.current
-          if (!file) return { lenses: [], dispose: () => {} }
-          const key = norm(file)
-          const funcs = await getCachedFunctions(uid)
-          const lenses: monaco.languages.CodeLens[] = []
-          for (const fn of funcs) {
-            if (!fn.file || fn.line == null) continue
-            const fnNorm = norm(fn.file)
-            if (fnNorm !== key && !fnNorm.endsWith('/' + key) && !key.endsWith('/' + fnNorm)) continue
-            lenses.push({
-              range: new monaco.Range(fn.line, 1, fn.line, 1),
-              id: `func-${fn.line}`,
-              command: {
-                id: 'omnilink-codelens-info',
-                title: `0x${fn.address.toString(16).toUpperCase()} · ${fn.size}B`,
-              },
-            })
-          }
-          return { lenses, dispose: () => {} }
-        },
-        resolveCodeLens: async (model, lens) => lens,
-      })
-    )
-
     return () => {
       disposables.forEach((d) => d.dispose())
     }
-  }, [uid, matchSourceFile, gotoSource])
+  }, [uid, matchSourceFile, ensureModel])
 
   // 文件切换时：保存旧文件的视口状态（在内容加载前执行）
   useEffect(() => {
@@ -824,13 +972,18 @@ export function SourceView({ uid }: SourceViewProps) {
             // 切换文件：重置修改行标记（新文件相对其自身原始内容重新计算）
             changedLinesRef.current = { modified: new Set(), added: new Set() }
             const vs = viewStatesRef.current.get(key)
-            // 「转到定义/引用」导航目标优先：打开文件后滚动到目标行并清除
-            const nav = navGoto
+            // 「转到定义/引用」导航目标优先：打开文件后滚动到目标行并清除。
+            // 用 ref 读取 navGoto，避免 clearGoto() 触发依赖重跑导致 RAF 被取消（居中失效）
+            const nav = navGotoRef.current
             if (nav && norm(nav.file) === key) {
               clearGoto()
               setPcLine(null)
               setCursorLine({ file: activeSourceFile, line: nav.line })
-              editor.revealLineInCenter(nav.line)
+              // setModel 后编辑器尚未完成新模型布局，立即 reveal 无法正确居中；延后到下一帧再居中
+              requestAnimationFrame(() => {
+                if (cancelled) return
+                editor.revealLineInCenter(nav.line)
+              })
             } else if (followSourceRef.current === false && vs) {
               // 用户手动切换回已打开并滚动过的文件：恢复视口（优先于 PC 定位滚动）
               editor.restoreViewState(vs)
@@ -897,7 +1050,30 @@ export function SourceView({ uid }: SourceViewProps) {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, activeSourceFile, navGoto, setCursorLine, clearGoto, applyDecorations])
+  }, [uid, activeSourceFile, setCursorLine, clearGoto, applyDecorations])
+
+  // 处理「目标文件已是当前激活文件」的跳转（activeSourceFile 未变化，主 effect 不会重跑）。
+  // 仅当目标 model 已加载并已设置到编辑器时直接居中；跨文件跳转由主 effect 在加载后处理。
+  useEffect(() => {
+    if (!navGoto) return
+    const editor = editorRef.current
+    const key = norm(navGoto.file)
+    const model = modelsRef.current.get(key)
+    if (
+      editor &&
+      activeSourceFile &&
+      isSameSource(norm(activeSourceFile), navGoto.file) &&
+      model &&
+      editor.getModel() === model
+    ) {
+      const line = navGoto.line
+      clearGoto()
+      setCursorLine({ file: activeSourceFile, line })
+      requestAnimationFrame(() => {
+        if (editorRef.current) editorRef.current.revealLineInCenter(line)
+      })
+    }
+  }, [navGoto, activeSourceFile, clearGoto, setCursorLine])
 
   // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
   useEffect(() => {
@@ -1294,47 +1470,28 @@ export function SourceView({ uid }: SourceViewProps) {
         </div>
       )}
 
-      {/* 代码区右键菜单：复制 / 全选 / 转到定义 / 转到引用 */}
+      {/* 代码区右键菜单（对齐 VS Code）：编辑 / 符号导航 / 视图操作 */}
       {codeMenu && (
         <div
-          className="fixed z-50 min-w-[10rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
+          className="fixed z-50 min-w-[12rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
           style={{ left: codeMenu.x, top: codeMenu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <button
-            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
-            onClick={copySelection}
-          >
-            复制
-          </button>
-          <button
-            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
-            onClick={selectAll}
-          >
-            全选
-          </button>
-          <div className="-mx-1 my-1 h-px bg-muted/60" />
-          <button
-            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-            onClick={() => void goToDefinition()}
-            disabled={!codeMenu.word}
-          >
-            转到定义
-          </button>
-          <button
-            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-            onClick={peekDefinition}
-            disabled={!codeMenu.word}
-          >
-            Peek 定义
-          </button>
-          <button
-            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+          <MenuItem label="剪切" shortcut="Ctrl+X" onClick={cutSelection} disabled={!editing} />
+          <MenuItem label="复制" shortcut="Ctrl+C" onClick={copySelection} />
+          <MenuItem label="粘贴" shortcut="Ctrl+V" onClick={pasteClipboard} disabled={!editing} />
+          <MenuSeparator />
+          <MenuItem label="转到定义" shortcut="F12" onClick={() => void goToDefinition()} disabled={!codeMenu.word} />
+          <MenuItem label="Peek 定义" shortcut="Alt+F12" onClick={peekDefinition} disabled={!codeMenu.word} />
+          <MenuItem label="转到引用" shortcut="Shift+F12" onClick={() => void goToReferences()} disabled={!codeMenu.word} />
+          <MenuItem
+            label="查找所有引用"
+            shortcut="Ctrl+Shift+F"
             onClick={() => void goToReferences()}
             disabled={!codeMenu.word}
-          >
-            转到引用
-          </button>
+          />
+          <MenuSeparator />
+          <MenuItem label="全选" shortcut="Ctrl+A" onClick={selectAll} />
         </div>
       )}
 

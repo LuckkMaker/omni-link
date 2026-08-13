@@ -58,9 +58,9 @@ class VarInfo:
 
 
 class FuncInfo:
-    __slots__ = ("name", "address", "ret_type", "signature", "frame_base", "args", "locals")
+    __slots__ = ("name", "address", "ret_type", "signature", "frame_base", "args", "locals", "decl_line")
 
-    def __init__(self, name, address, ret_type, signature, frame_base, args, locals_):
+    def __init__(self, name, address, ret_type, signature, frame_base, args, locals_, decl_line=None):
         self.name = name
         self.address = address
         self.ret_type = ret_type
@@ -69,6 +69,8 @@ class FuncInfo:
         self.frame_base = frame_base
         self.args = args
         self.locals = locals_
+        # decl_line: DWARF 函数声明行（定义所在行），用于跳转/CodeLens 定位
+        self.decl_line = decl_line
 
 
 # ── ULEB128 / SLEB128（pyelftools 内部有，但这里自实现，操作字节流更直接） ──
@@ -156,6 +158,10 @@ class DwarfLocals:
         signature = self._format_signature(ret_type_name, name, param_types)
         frame_base = self._frame_base_of(die)
 
+        decl_line = None
+        if "DW_AT_decl_line" in die.attributes:
+            decl_line = die.attributes["DW_AT_decl_line"].value
+
         self._funcs[low_pc] = FuncInfo(
             name=name,
             address=low_pc,
@@ -164,6 +170,7 @@ class DwarfLocals:
             frame_base=frame_base,
             args=args,
             locals_=locals_,
+            decl_line=decl_line,
         )
 
     def _make_var(self, die, is_param):
@@ -320,6 +327,15 @@ class DwarfLocals:
             "ret": func.ret_type or ("void" if func.signature else ""),
             "params": params,
         }
+
+    def get_func_decl_line(self, address):
+        """按函数入口地址返回 DWARF 声明行（函数定义所在行）；无则 None。"""
+        if not self._funcs:
+            return None
+        func = self._funcs.get(address)
+        if func is None:
+            func = self._find_func_by_addr(address)
+        return func.decl_line if func is not None else None
 
     # ── 位置表达式求值 ────────────────────────
     def _frame_base_num(self, func, regs, cfa):
