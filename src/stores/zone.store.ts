@@ -538,17 +538,19 @@ export const useZoneStore = create<ZoneStore>()(
           const result = await zoneService.zoneLoadElf(uid, path)
           // 拉取含大小的源文件列表
           let files: SourceFileInfo[] = []
-          const activeFile = result.source_files[0] ?? null
           try {
             files = await zoneService.zoneSourceFiles(uid)
           } catch {
             files = result.source_files.map((p) => ({ path: p, name: p.split('/').pop() ?? p, size: null }))
           }
+          // 不自动选中首个源文件：会话启动后由 PC 跟随定位到 PC 所在文件（如 Reset_Handler 的
+          // startup 文件）。否则每次 start session 都会先打开 source_files[0]（如 stm32f4xx_hal.c）
+          // 再跳转到 PC 文件，造成源码窗先开一个无关文件再切换的抖动。
           set({
             elfPath: result.path,
             sourceFiles: files,
-            activeSourceFile: activeFile,
-            openFiles: activeFile ? [activeFile] : [],
+            activeSourceFile: null,
+            openFiles: [],
             followSource: true,
             disasmAvailable: result.disasm_available,
             busy: false,
