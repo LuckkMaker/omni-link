@@ -110,6 +110,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const pcLocationRef = useRef<{ file: string; line: number } | null>(null)
   // 当前正在显示的文件（用于切换时保存旧文件的视口状态）
   const currentFileRef = useRef<string | null>(null)
+  // minimap 强制刷新定时器（Monaco 已知：编辑内容变更后 minimap 不随内容重绘，需手动刷新）
+  const minimapRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 始终持有最新值（在异步回调内读取，避免闭包过期）
   const pcRef = useRef(pc)
@@ -437,9 +439,11 @@ export function SourceView({ uid }: SourceViewProps) {
         }
       })
       // 光标位置变化（鼠标点击 / 键盘方向键 / 跳转）→ 同步 Run-to-Cursor 光标行，
-      // 保证 Run to Cursor / 断点操作始终使用最新光标行（编辑模式下不触发）
+      // 保证 Run to Cursor / 断点操作始终使用最新光标行（编辑模式下不触发）。
+      // 仅响应用户显式移动（Explicit），忽略 setModel 等程序性重置（NotSet），避免误设光标行/跳转
       editor.onDidChangeCursorPosition((e) => {
         if (editingRef.current) return
+        if (e.reason !== monaco.editor.CursorChangeReason.Explicit) return
         const file = activeFileRef.current
         if (!file) return
         const line = e.position.lineNumber
@@ -693,7 +697,8 @@ export function SourceView({ uid }: SourceViewProps) {
       return
     }
     // 切换文件后，若光标行不属于新文件则清空，避免跨文件误触发 Run to Cursor / 断点操作
-    if (cursorLine && !isSameSource(norm(cursorLine.file), activeSourceFile)) {
+    const cl = cursorLineRef.current
+    if (cl && !isSameSource(norm(cl.file), activeSourceFile)) {
       setCursorLine(null)
     }
     let cancelled = false
@@ -809,7 +814,7 @@ export function SourceView({ uid }: SourceViewProps) {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, activeSourceFile, cursorLine, navGoto, setCursorLine, clearGoto, applyDecorations])
+  }, [uid, activeSourceFile, navGoto, setCursorLine, clearGoto, applyDecorations])
 
   // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
   useEffect(() => {
