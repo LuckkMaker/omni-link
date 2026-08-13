@@ -3,6 +3,7 @@ import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
+import type { HoverInfo, SourceSymbol } from '@/services/zone.service'
 import { monaco, monacoLangFor, applyOmniTheme, isDarkTheme, type MonacoThemeName } from '@/lib/monaco-setup'
 import { ASM_MNEMONICS, ASM_REGISTERS } from '@/lib/source-highlight'
 import { buildSourceDecorations } from '@/lib/source-decorations'
@@ -97,6 +98,27 @@ async function getCachedFunctions(uid: string): Promise<ZoneFunc[]> {
 function norm(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+$/, '')
 }
+
+/** 地址格式化：0x 前缀 + 8 位十六进制大写 */
+function fmtAddr(addr: number): string {
+  return `0x${addr.toString(16).toUpperCase().padStart(8, '0')}`
+}
+
+/** 数值格式化：按位宽补齐十六进制位数（未知位宽默认 32bit） */
+function fmtValue(v: number | null | undefined, bitSize?: number): string {
+  if (v == null) return '不可用'
+  const bits = bitSize && bitSize > 0 ? bitSize : 32
+  const digits = Math.max(1, Math.ceil(bits / 4))
+  return `0x${v.toString(16).toUpperCase().padStart(digits, '0')}`
+}
+
+/** 常见 C 关键字（hover 兜底提示时排除，避免对 if/while 等显示"未找到调试信息"） */
+const C_KEYWORDS = new Set([
+  'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue',
+  'return', 'goto', 'void', 'int', 'char', 'float', 'double', 'long', 'short', 'unsigned',
+  'signed', 'const', 'static', 'volatile', 'extern', 'register', 'struct', 'union', 'enum',
+  'typedef', 'sizeof', 'inline', 'restrict', 'auto', 'asm', 'bool', 'true', 'false', 'NULL',
+])
 
 /** 判断两个源码路径（可能一个为 basename）是否指向同一文件 */
 function isSameSource(a: string, b: string): boolean {
@@ -736,7 +758,11 @@ export function SourceView({ uid }: SourceViewProps) {
     }
   }, [wordAtCursor, goToDefinitionWord, peekDefinitionAt, goToReferencesWord])
 
-  // 自建轻量 hover provider —— 悬停符号时复用后端符号表展示类型/地址/所属函数/定义位置。
+  // 自建轻量 hover provider —— 悬停符号时：
+  //   - 函数 → [函数 = 地址]
+  //   - 变量 → [变量 = 值]（需目标暂停读取；结构体/数组显示首地址）
+  //   - 寄存器 → [寄存器 = 值]（r0-r12/sp/lr/pc 等，需目标暂停）
+  //   并补充静态符号信息（签名/类型/定义位置）。
   // 独立 useEffect 依赖 uid：onMount 只在首挂载执行一次，会捕获到首挂载时的 null uid，
   // 导致 hover 永远请求失败；改由 uid 驱动注册/清理可保证闭包捕获到最新 uid。
   useEffect(() => {
@@ -745,26 +771,85 @@ export function SourceView({ uid }: SourceViewProps) {
       provideHover: async (model, position) => {
         const word = model.getWordAtPosition(position)
         if (!word) return null
-        const res = await zoneService.zoneResolveSymbol(uid, word.word)
-        if (!res.success || !res.symbol) return null
-        const s = res.symbol
+        const w = word.word
+        // 并行获取：调试 hover 信息（函数地址/变量值/寄存器值）+ 静态符号信息（签名/定义位置）
+        let hoverRes: { success: boolean; state?: 'disconnected' | 'running' | 'halted'; info?: HoverInfo | null } = { success: false }
+        let symRes: { success: boolean; symbol?: SourceSymbol | null } = { success: false }
+        try {
+          ;[hoverRes, symRes] = await Promise.all([
+            zoneService.zoneHoverInfo(uid, w),
+            zoneService.zoneResolveSymbol(uid, w),
+          ])
+        } catch {
+          // 网络异常时静默回退到静态符号信息
+        }
+        const info = hoverRes.info
+        const s = symRes.success && symRes.symbol ? symRes.symbol : null
         const lines: monaco.IMarkdownString[] = []
-        // 函数符号：优先展示 DWARF 签名（返回类型 f(参数类型...)）
-        if (s.signature) {
-          lines.push({ value: `\`${s.signature}\`` })
-        } else {
-          const typeFrag = s.type && s.type !== 'unknown' ? `\`${s.type}\`` : ''
-          const addrFrag = s.address != null ? `@ \`0x${s.address.toString(16).toUpperCase()}\`` : ''
-          lines.push({ value: `**${s.name}** ${typeFrag} ${addrFrag}`.trim() })
+
+        // ── 主行：按调试 hover 格式 ──
+        if (info?.kind === 'function') {
+          lines.push({ value: `**[函数 = ${fmtAddr(info.address ?? 0)}]**` })
+        } else if (info?.kind === 'register') {
+          if (info.available) {
+            lines.push({ value: `**[寄存器 = ${fmtValue(info.value, 32)}]**` })
+          } else {
+            lines.push({ value: `**[寄存器 = 不可用]**` })
+          }
+        } else if (info?.kind === 'variable') {
+          if (info.available) {
+            if (info.var_kind === 'struct' || info.var_kind === 'array') {
+              // 结构体/数组：显示首地址
+              lines.push({ value: `**[变量 = ${fmtAddr(info.address ?? 0)}]**` })
+            } else {
+              lines.push({ value: `**[变量 = ${fmtValue(info.value, info.bit_size)}]**` })
+            }
+          } else {
+            lines.push({ value: `**[变量 = 不可用]**` })
+          }
         }
-        // 返回类型 + 参数列表（仅函数符号且已解析出签名时展示）
-        if (s.ret) lines.push({ value: `返回类型: \`${s.ret}\`` })
-        if (s.params && s.params.length > 0) {
-          lines.push({ value: `参数: ${s.params.map((p) => `\`${p}\``).join(', ')}` })
+
+        // 目标运行中且悬停到需读值的符号：提示暂停后才能读取
+        if (hoverRes.state === 'running' && (info?.kind === 'variable' || info?.kind === 'register')) {
+          lines.push({ value: `_目标运行中，暂停后才能读取当前值_` })
         }
-        if (s.size != null) lines.push({ value: `size: ${s.size} bytes` })
-        if (s.function) lines.push({ value: `所属函数: \`${s.function}\`` })
-        if (s.file && s.line != null) lines.push({ value: `定义于: \`${s.file}:${s.line}\`` })
+
+        // ── 补充静态符号信息 ──
+        if (s) {
+          // 函数符号：优先展示 DWARF 签名（返回类型 f(参数类型...)）
+          if (s.signature) {
+            lines.push({ value: `\`${s.signature}\`` })
+          } else {
+            const typeFrag = s.type && s.type !== 'unknown' ? `\`${s.type}\`` : ''
+            const addrFrag = s.address != null ? `@ \`${fmtAddr(s.address)}\`` : ''
+            lines.push({ value: `**${s.name}** ${typeFrag} ${addrFrag}`.trim() })
+          }
+          // 返回类型 + 参数列表（仅函数符号且已解析出签名时展示）
+          if (s.ret) lines.push({ value: `返回类型: \`${s.ret}\`` })
+          if (s.params && s.params.length > 0) {
+            lines.push({ value: `参数: ${s.params.map((p) => `\`${p}\``).join(', ')}` })
+          }
+          if (s.size != null) lines.push({ value: `size: ${s.size} bytes` })
+          if (s.function) lines.push({ value: `所属函数: \`${s.function}\`` })
+          if (s.file && s.line != null) lines.push({ value: `定义于: \`${s.file}:${s.line}\`` })
+        }
+
+        // ── 兜底：悬停到标识符但无调试/符号信息时给出上下文提示，避免"hover 无内容" ──
+        if (lines.length === 0) {
+          const isIdent = /^[A-Za-z_][A-Za-z0-9_]*$/.test(w) && w.length > 1 && !C_KEYWORDS.has(w)
+          if (isIdent) {
+            lines.push({ value: `**${w}**` })
+            if (hoverRes.state === 'running') {
+              lines.push({ value: `_目标运行中，暂停后才能读取该符号的值_` })
+            } else if (hoverRes.state === 'disconnected') {
+              lines.push({ value: `_未连接目标，无法读取该符号的值_` })
+            } else {
+              lines.push({ value: `_未找到该符号的调试信息（可能被优化掉或无调试符号）_` })
+            }
+          }
+        }
+
+        if (lines.length === 0) return null
         return { range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn), contents: lines }
       },
     })
@@ -1180,9 +1265,9 @@ export function SourceView({ uid }: SourceViewProps) {
       modelsRef.current.clear()
       viewStatesRef.current.clear()
       decorationIdsRef.current = []
-      // 释放 hover provider，避免重复注册
-      hoverDisposableRef.current?.dispose()
-      hoverDisposableRef.current = null
+      // 注意：不在此处 dispose hover provider —— 它由 [uid] effect 注册/清理。
+      // 若在此 dispose，会话停止后重新启动（uid 不变）时 [uid] effect 不会重跑，
+      // hover provider 将永远不再注册，导致 hover 失效。
       dirtyMapRef.current.clear()
       setDirty(false)
       setEditing(false)
@@ -1404,9 +1489,10 @@ export function SourceView({ uid }: SourceViewProps) {
             snippetSuggestions: 'none',
             autoClosingBrackets: editing ? 'languageDefined' : 'never',
             multiCursorModifier: 'ctrlCmd',
-            // 第一优先级改造：开启选中词 / 光标词高亮（VS Code 默认体验；singleFile 只高亮当前文件内出现位）
+            // 第一优先级改造：开启选中词高亮（双击选中后高亮匹配；关闭光标词 occurrences，
+            // 避免单击单词就高亮全部匹配 —— 匹配高亮仅双击选中后触发）
             selectionHighlight: true,
-            occurrencesHighlight: 'singleFile',
+            occurrencesHighlight: 'off',
             // 第一优先级改造：开启括号配对高亮（配色在 monaco-setup.ts 主题中补齐）
             bracketPairColorization: { enabled: true },
             links: false,

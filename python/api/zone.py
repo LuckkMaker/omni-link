@@ -83,6 +83,11 @@ class SourceSaveRequest(BaseModel):
     content: str
 
 
+class HoverRequest(BaseModel):
+    """源码 hover：悬停的标识符"""
+    name: str
+
+
 # ── 调试控制 ──────────────────────────────
 
 @router.post("/probes/{uid}/zone/debug/halt")
@@ -446,6 +451,55 @@ async def zone_source_symbol(uid: str, name: str):
     """按名字解析符号定义位置（转到定义）"""
     result = elf_backend.resolve_symbol(uid, name)
     return {"success": result is not None, "symbol": result}
+
+
+# 悬停读取的核心寄存器（与 elf_backend 局部变量求值所需寄存器对齐）
+_HOVER_REG_NAMES = [
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12",
+    "sp", "lr", "pc", "msp", "psp", "control",
+    "xpsr", "primask", "basepri", "faultmask", "ipsr", "fpscr",
+]
+
+
+@router.post("/probes/{uid}/zone/hover")
+async def zone_hover(uid: str, req: HoverRequest):
+    """源码 hover 调试信息：函数地址 / 变量值。
+
+    函数符号离线可解析（无需目标连接）；变量值需目标暂停并读取寄存器/内存。
+    目标运行中时变量值不可读，前端回退到静态符号信息。
+    """
+    if not elf_backend.is_loaded(uid):
+        return {"success": True, "state": "disconnected", "info": None}
+
+    # 读取当前寄存器（目标暂停时才有意义；运行中/未连接 regs 为空，变量解析会失败）
+    regs: dict = {}
+    pc = None
+    state = "disconnected"
+    session = backend._get_session(uid)
+    if session is not None:
+        try:
+            core = session.target.selected_core_or_raise
+            if session.target.is_halted():
+                state = "halted"
+                for name in _HOVER_REG_NAMES:
+                    try:
+                        value = core.read_core_register(name)
+                        regs[name] = int(value) if isinstance(value, float) else value
+                    except Exception:
+                        pass
+                pc = regs.get("pc")
+            else:
+                state = "running"
+        except Exception:
+            state = "disconnected"
+
+    def read_mem(addr: int, length: int) -> bytes:
+        return backend.read_memory(uid, addr, length)
+
+    info = await asyncio.to_thread(
+        elf_backend.resolve_hover_info, uid, req.name, pc, regs, read_mem
+    )
+    return {"success": True, "state": state, "info": info}
 
 
 @router.get("/probes/{uid}/zone/source/search")

@@ -20,6 +20,14 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
+# 悬停可识别的核心寄存器名（小写）。与 zone.py 的 _HOVER_REG_NAMES 对齐，
+# 悬停这些名字时直接返回寄存器当前值（目标需暂停）。
+HOVER_REG_NAMES = {
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12",
+    "sp", "lr", "pc", "msp", "psp", "control", "xpsr",
+    "primask", "basepri", "faultmask", "ipsr", "fpscr",
+}
+
 
 class ElfBackend:
     """ELF 调试信息后端
@@ -715,6 +723,111 @@ class ElfBackend:
             "ret": ret or ("void" if signature else ""),
             "variables": variables,
         }
+
+    def resolve_hover_info(self, uid: str, name: str, pc: int, regs: dict, read_mem: callable) -> Optional[dict]:
+        """根据名字解析 hover 调试信息（函数/局部变量/全局变量）。
+
+        优先级：
+          1. 函数符号 → 返回 [函数 = 地址]（符号表中 STT_FUNC）
+          2. 局部变量（当前 PC 所在函数内按名匹配）→ 返回 [变量 = 值]
+          3. 全局变量（按名匹配）→ 返回 [变量 = 值]
+
+        返回结构：
+          {
+            "kind": "function" | "variable",
+            "name": str,
+            "address": int (函数必存，变量可选),
+            "value": int (变量可选，若 available),
+            "type": str (可选，类型名),
+            "available": bool (变量是否成功读取),
+            "size": int (字节数，可选)
+          }
+        """
+        entry = self._get(uid)
+        if not entry:
+            return None
+        sd = entry.get("symbol_decoder")
+        if not sd:
+            return None
+
+        # 0. 寄存器名匹配（r0-r12/sp/lr/pc 等）→ 返回寄存器当前值（目标需暂停）
+        reg_name = name.lower()
+        if reg_name in HOVER_REG_NAMES:
+            value = regs.get(reg_name)
+            if value is not None:
+                return {
+                    "kind": "register",
+                    "name": reg_name,
+                    "value": int(value),
+                    "available": True,
+                }
+            return {
+                "kind": "register",
+                "name": reg_name,
+                "available": False,
+            }
+
+        # 1. 优先匹配函数符号 → 返回函数类型的 hover
+        sym = sd.symbol_dict.get(name)
+        if sym and sym.type == "STT_FUNC":
+            return {
+                "kind": "function",
+                "name": sym.name,
+                "address": sym.address,
+                "size": sym.size,
+            }
+
+        dl = entry.get("dwarf_locals")
+
+        # 2. 当前 PC 所在函数内查找局部变量/形参（局部可遮蔽全局，优先于全局）
+        if dl is not None and pc is not None and pc != 0:
+            fn = self._find_func(uid, pc & ~1)
+            if fn:
+                try:
+                    local_var = dl.get_local_var(fn[3], name, regs, read_mem, pc & ~1)
+                except Exception:
+                    local_var = None
+                if local_var and local_var["available"]:
+                    return {
+                        "kind": "variable",
+                        "name": local_var["name"],
+                        "type": local_var["type"],
+                        "address": local_var["address"],
+                        "value": local_var["value"],
+                        "available": True,
+                        "bit_size": local_var["bit_size"],
+                        "var_kind": local_var.get("kind", "scalar"),
+                    }
+
+        # 3. 全局变量（DWARF 索引按名匹配，更准确含值与类型）
+        if sym and sym.type == "STT_OBJECT" and dl is not None:
+            try:
+                glob_var = dl.get_global_var(name, regs, read_mem)
+            except Exception:
+                glob_var = None
+            if glob_var and glob_var["available"]:
+                return {
+                    "kind": "variable",
+                    "name": glob_var["name"],
+                    "type": glob_var["type"],
+                    "address": glob_var["address"],
+                    "value": glob_var["value"],
+                    "available": True,
+                    "bit_size": glob_var["bit_size"],
+                    "var_kind": glob_var.get("kind", "scalar"),
+                }
+
+        # 4. 符号表中找到了 OBJECT 但 DWARF 未解析成功：降级显示地址
+        if sym and sym.type == "STT_OBJECT":
+            return {
+                "kind": "variable",
+                "name": sym.name,
+                "address": sym.address,
+                "available": False,
+                "size": sym.size,
+            }
+
+        return None
 
     def get_callees(self, uid: str, address: int) -> dict:
         entry = self._get(uid)

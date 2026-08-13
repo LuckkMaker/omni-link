@@ -319,6 +319,37 @@ export async function zoneResolveSymbol(
   return data
 }
 
+/** 源码 hover 调试信息（函数地址 / 变量值 / 寄存器值） */
+export interface HoverInfo {
+  /** 类别：function 函数 / variable 变量 / register 寄存器 */
+  kind: 'function' | 'variable' | 'register'
+  name: string
+  /** 函数地址 / 变量所在地址 */
+  address?: number
+  /** 变量当前值（available 为 true 时有效） */
+  value?: number | null
+  /** 变量类型名 */
+  type?: string
+  /** 变量值是否成功读取 */
+  available?: boolean
+  /** 变量位宽（字节数 × 8），用于按位宽补齐显示 */
+  bit_size?: number
+  /** 符号大小（字节数） */
+  size?: number
+  /** 变量类别：scalar 标量 / struct 结构体 / array 数组 / pointer 指针 */
+  var_kind?: 'scalar' | 'struct' | 'array' | 'pointer'
+}
+
+/** 源码 hover：解析函数地址 / 变量值（需目标暂停读取变量） */
+export async function zoneHoverInfo(
+  uid: string,
+  name: string
+): Promise<{ success: boolean; state?: 'disconnected' | 'running' | 'halted'; info?: HoverInfo | null }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/hover`, { name })
+  return data
+}
+
 /** 源文件搜索结果（转到引用） */
 export interface SourceSearchHit {
   file: string

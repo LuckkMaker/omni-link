@@ -31,6 +31,21 @@ export function extractApiErrorDetail(err: unknown): string | null {
   return null
 }
 
+/** 将断点操作的后端错误详情翻译为友好的中文提示（后端为英文，直接展示用户看不懂） */
+function friendlyBreakpointError(detail: string): string {
+  if (/^No code at /.test(detail)) {
+    const loc = detail.replace(/^No code at /, '')
+    return `该行没有可执行代码，无法设置断点（${loc}）`
+  }
+  if (detail === 'No ELF loaded') return '未加载 ELF 固件，无法设置断点'
+  if (detail === 'Probe not connected') return '探针未连接，无法设置断点'
+  if (detail.startsWith('Target not available')) {
+    const reason = detail.replace(/^Target not available:?\s*/, '')
+    return `目标不可用，无法设置断点${reason ? `：${reason}` : ''}`
+  }
+  return detail
+}
+
 /** 右侧检查器 dock 的 section 类型 */
 export type InspectorTabId = 'disasm' | 'callstack' | 'registers' | 'peripherals'
 
@@ -495,7 +510,11 @@ export const useZoneStore = create<ZoneStore>()(
           await get().refreshBreakpoints(uid)
           return true
         } catch (err) {
-          const msg = err instanceof Error ? err.message : 'Breakpoint failed'
+          // 优先展示后端返回的明确原因（如"该行无代码"），并翻译为中文，避免只显示
+          // axios 的 "Request failed with status code 400" 让用户无法理解。
+          const detail = extractApiErrorDetail(err)
+          const fallback = err instanceof Error ? err.message : 'Breakpoint failed'
+          const msg = friendlyBreakpointError(detail ?? fallback)
           set({ error: msg })
           zoneLog('error', `Zone breakpoint failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '断点操作失败', message: msg })

@@ -109,6 +109,8 @@ class DwarfLocals:
         self.dwarfinfo = dwarfinfo
         # address -> FuncInfo
         self._funcs = {}
+        # name -> VarInfo（全局变量，DW_OP_addr 定位）
+        self._globals = {}
         self._loclists = None
         try:
             self._loclists = dwarfinfo.location_lists()
@@ -119,6 +121,17 @@ class DwarfLocals:
     # ── 索引构建 ──────────────────────────────
     def _build(self):
         for cu in self.dwarfinfo.iter_CUs():
+            # 顶层 DW_TAG_variable = 全局变量（非函数内局部变量），DW_OP_addr 定位
+            try:
+                top = cu.get_top_DIE()
+                for die in top.iter_children():
+                    if die.tag == _TAG_VARIABLE:
+                        try:
+                            self._index_global(die)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
             for die in cu.iter_DIEs():
                 if die.tag != _TAG_SUBPROGRAM:
                     continue
@@ -172,6 +185,17 @@ class DwarfLocals:
             locals_=locals_,
             decl_line=decl_line,
         )
+
+    def _index_global(self, die):
+        """索引全局变量（CU 顶层 DW_TAG_variable），按名字精确匹配"""
+        if "DW_AT_name" not in die.attributes:
+            return
+        name = _to_str(die.attributes["DW_AT_name"].value)
+        if not name:
+            return
+        v = self._make_var(die, is_param=False)
+        if v:
+            self._globals[name] = v
 
     def _make_var(self, die, is_param):
         if "DW_AT_name" not in die.attributes:
@@ -404,7 +428,8 @@ class DwarfLocals:
                     off, i = _read_sleb(expr, i)
                     push("addr", reg_val(op - 0x70) + off)
                 elif op == 0x03:  # DW_OP_addr
-                    push("val", int.from_bytes(expr[i:i + 4], "little"))
+                    # 语义是「变量所在内存地址」，用 addr 类别以便 _eval_var 解引用读取值
+                    push("addr", int.from_bytes(expr[i:i + 4], "little"))
                     i += 4
                 elif op in (0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f):
                     sz = {0x08: 1, 0x09: 1, 0x0a: 2, 0x0b: 2, 0x0c: 4, 0x0d: 4, 0x0e: 8, 0x0f: 8}[op]
@@ -512,6 +537,51 @@ class DwarfLocals:
             info = self._eval_var(var, pc, regs, frame_base, cfa)
             variables.append(info)
         return func.signature, func.ret_type, variables
+
+    def get_local_var(self, address, name, regs, read_mem, pc=None):
+        """在当前函数（address 所在）中按名字查找局部变量/形参并读取当前值。
+
+        Args:
+            address: 帧内地址（函数入口或函数内任意 PC）
+            name: 变量名（精确匹配）
+            regs: 当前寄存器（r0..r12, sp, lr, pc, ...）
+            read_mem: callable(addr, length) -> bytes
+            pc: 位置列表 PC 匹配用（默认 address）
+
+        Returns:
+            {name, type, value, address, available, is_param, bit_size, kind, children} 或 None
+        """
+        func = self._funcs.get(address)
+        if func is None:
+            func = self._nearest_func(address)
+        if func is None:
+            return None
+        self._read_mem = read_mem
+        pc = pc if pc is not None else address
+        cfa = regs.get("sp") or 0
+        frame_base = self._frame_base_num(func, regs, cfa)
+        for var in list(func.args) + list(func.locals):
+            if var.name == name:
+                return self._eval_var(var, pc, regs, frame_base, cfa)
+        return None
+
+    def get_global_var(self, name, regs, read_mem):
+        """按名字读取全局变量值（DW_OP_addr 定位，frame_base 无关）。
+
+        Args:
+            name: 全局变量名（精确匹配）
+            regs: 当前寄存器
+            read_mem: callable(addr, length) -> bytes
+
+        Returns:
+            {name, type, value, address, available, is_param, bit_size, kind, children} 或 None
+        """
+        var = self._globals.get(name)
+        if var is None:
+            return None
+        self._read_mem = read_mem
+        cfa = regs.get("sp") or 0
+        return self._eval_var(var, 0, regs, 0, cfa)
 
     def _eval_var(self, var, pc, regs, frame_base, cfa):
         size = var.type_size or 4
