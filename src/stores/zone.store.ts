@@ -32,7 +32,7 @@ export function extractApiErrorDetail(err: unknown): string | null {
 }
 
 /** 右侧检查器 dock 的 section 类型 */
-export type InspectorTabId = 'disasm' | 'callstack' | 'callgraph' | 'registers' | 'peripherals'
+export type InspectorTabId = 'disasm' | 'callstack' | 'registers' | 'peripherals'
 
 /** 刷新策略模式（参考 vscode-memory-inspector） */
 export type RefreshMode = 'on_stop' | 'periodic_always' | 'periodic_running' | 'off'
