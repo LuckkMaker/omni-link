@@ -287,6 +287,40 @@ class DwarfLocals:
             ret = "enum"
         return f"{ret} f({', '.join(parts)})"
 
+    # ── 轻量签名查询（离线，不依赖寄存器/内存） ──
+    def _find_func_by_addr(self, address):
+        """返回包含 address 的函数（取 low_pc <= address 且最接近者）；无则 None。"""
+        best = None
+        for low, func in self._funcs.items():
+            if low <= address and (best is None or low > best[0]):
+                best = (low, func)
+        return best[1] if best else None
+
+    def get_func_signature(self, address):
+        """按地址返回函数签名信息（供 hover / 符号解析，无需寄存器与内存）。
+
+        Args:
+            address: 函数入口地址（或函数内任意 PC）
+
+        Returns:
+            {signature, ret, params} 或 None；
+            signature 为 `返回类型 f(参数类型...)` 可读形式，
+            ret 为返回类型名（缺省按 void），params 为形参类型名列表。
+        """
+        if not self._funcs:
+            return None
+        func = self._funcs.get(address)
+        if func is None:
+            func = self._find_func_by_addr(address)
+        if func is None:
+            return None
+        params = [a.type_name for a in func.args]
+        return {
+            "signature": func.signature,
+            "ret": func.ret_type or ("void" if func.signature else ""),
+            "params": params,
+        }
+
     # ── 位置表达式求值 ────────────────────────
     def _frame_base_num(self, func, regs, cfa):
         fb = func.frame_base

@@ -397,7 +397,7 @@ class ElfBackend:
         if info is None or info.address == 0:
             return None
         loc = self.get_line_for_address(uid, info.address)
-        return {
+        result = {
             "name": info.name,
             "address": info.address,
             "size": info.size,
@@ -406,6 +406,20 @@ class ElfBackend:
             "line": loc.get("line") if loc else None,
             "function": loc.get("function") if loc else None,
         }
+        # 函数符号附加 DWARF 签名信息（离线，不依赖寄存器/内存），供 hover 展示
+        if info.type == "STT_FUNC":
+            dl = entry.get("dwarf_locals")
+            if dl is not None:
+                try:
+                    sig = dl.get_func_signature(info.address)
+                except Exception:
+                    logger.exception("get_func_signature failed")
+                    sig = None
+                if sig:
+                    result["signature"] = sig.get("signature", "")
+                    result["ret"] = sig.get("ret", "")
+                    result["params"] = sig.get("params", [])
+        return result
 
     def resolve_memory_address(self, uid: str, expr: str) -> dict:
         """解析内存地址表达式 → {address, name, size, error}。

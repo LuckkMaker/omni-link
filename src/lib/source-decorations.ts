@@ -61,12 +61,18 @@ export function buildSourceDecorations(
     })
   }
 
-  // 断点：glyph 红点
+  // 断点：glyph 红点 + overview ruler 标尺标记（右侧滚动条一眼看到全文件断点分布）
   for (const bp of input.breakpoints) {
     if (input.activeFile && sameFile(bp.file, input.activeFile) && valid(bp.line)) {
       dels.push({
         range: new monaco.Range(bp.line, 1, bp.line, 1),
-        options: { glyphMarginClassName: 'cm-bp' },
+        options: {
+          glyphMarginClassName: 'cm-bp',
+          overviewRuler: {
+            color: '#f85149',
+            position: monaco.editor.OverviewRulerLane.Left,
+          },
+        },
       })
     }
   }

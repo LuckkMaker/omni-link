@@ -21,19 +21,100 @@ loader.config({ monaco })
 
 // ── ARM/Thumb 汇编语言（Monarch）────────────────────────────
 monaco.languages.register({ id: 'arm-asm' })
+
+// 词表预编译正则（避免每次 tokenize 重复拼接，提升大文件性能）
+const _MNEMONIC_RE = new RegExp(`\\b(?:${Array.from(ASM_MNEMONICS).join('|')})\\b`, 'i')
+const _REG_RE = new RegExp(`\\b(?:${Array.from(ASM_REGISTERS).join('|')})\\b`, 'i')
+
 monaco.languages.setMonarchTokensProvider('arm-asm', {
   defaultToken: 'identifier',
   tokenizer: {
     root: [
-      [/;.*$/, 'comment'],
-      [/\.[A-Za-z_][A-Za-z0-9_]*/, 'preproc'],
-      [new RegExp(`\\b(?:${Array.from(ASM_MNEMONICS).join('|')})\\b`, 'i'), 'keyword'],
-      [new RegExp(`\\b(?:${Array.from(ASM_REGISTERS).join('|')})\\b`, 'i'), 'type'],
-      [/[0-9][0-9a-fA-FxXbBoO_]*/, 'number'],
+      [/;.*$/, 'comment'], // 分号注释
+      [/@.*$/, 'comment'], // ARM GNU 汇编 @ 注释
+      [/^\.[A-Za-z_][A-Za-z0-9_]*/, 'preproc'], // 伪指令（.syntax / .thumb / .section...）
+      [/#[A-Za-z_][A-Za-z0-9_]*/, 'preproc'], // C 风格预处理（#include / #define）
+      [/^[A-Za-z_.][A-Za-z0-9_.]*\s*:/, 'tag'], // 顶层标签（函数名 / 程序标签）
+      [/"/, { token: 'string.quote', bracket: '@open', next: '@string_double' }],
+      [/'/, { token: 'string.quote', bracket: '@open', next: '@string_single' }],
+      [_MNEMONIC_RE, 'keyword'],
+      [_REG_RE, 'type'],
+      [/\b(?:0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9][0-9a-fA-F]*)\b/, 'number'],
+      [/[=\-+*\/&|^!<>~()\[\]{}]/, 'delimiter'],
       [/[A-Za-z_][A-Za-z0-9_]*/, 'identifier'],
+    ],
+    string_double: [
+      [/[^\\"]+/, 'string'],
+      [/\\./, 'string.escape'],
+      [/"/, { token: 'string.quote', bracket: '@close', next: '@pop' }],
+    ],
+    string_single: [
+      [/[^\\']+/, 'string'],
+      [/\\./, 'string.escape'],
+      [/'/, { token: 'string.quote', bracket: '@close', next: '@pop' }],
     ],
   },
 } as monaco.languages.IMonarchLanguage)
+
+// 语言配置：注释 / 括号 / 自动闭合（与 C 编辑体验一致）
+monaco.languages.setLanguageConfiguration('arm-asm', {
+  comments: { lineComment: ';' },
+  brackets: [
+    ['{', '}'],
+    ['[', ']'],
+    ['(', ')'],
+  ],
+  autoClosingPairs: [
+    { open: '{', close: '}' },
+    { open: '[', close: ']' },
+    { open: '(', close: ')' },
+    { open: '"', close: '"' },
+    { open: "'", close: "'" },
+  ],
+  surroundingPairs: [
+    { open: '{', close: '}' },
+    { open: '[', close: ']' },
+    { open: '(', close: ')' },
+    { open: '"', close: '"' },
+    { open: "'", close: "'" },
+  ],
+  // 汇编智能缩进：标签行顶格（不缩进），指令/块内自动缩进，} 回退
+  indentationRules: {
+    // 行尾 { 或标签行 → 下一行缩进
+    increaseIndentPattern: /^.*\{\s*$/,
+    // 行首 } → 回退缩进
+    decreaseIndentPattern: /^\s*\}\s*$/,
+    // 标签行（列 0 的 label:）不缩进
+    unIndentedLinePattern: /^\s*[A-Za-z_.][A-Za-z0-9_.]*\s*:\s*$/,
+    // 标签行后下一行缩进（指令对齐在标签之下）
+    indentNextLinePattern: /^\s*[A-Za-z_.][A-Za-z0-9_.]*\s*:\s*$/,
+  },
+} as monaco.languages.LanguageConfiguration)
+
+// 折叠 provider：按顶层标签（函数 / 程序标签）将汇编程序折叠为块
+monaco.languages.registerFoldingRangeProvider('arm-asm', {
+  provideFoldingRanges: (model) => {
+    const ranges: monaco.languages.FoldingRange[] = []
+    const count = model.getLineCount()
+    const starts: number[] = []
+    for (let l = 1; l <= count; l++) {
+      const text = model.getLineContent(l)
+      if (!text) continue
+      const first = text[0]
+      // 顶层标签：列 0 处、非空白、形如 `label:` 且非伪指令行
+      if (first !== ' ' && first !== '\t' && /^[A-Za-z_.][A-Za-z0-9_.]*\s*:/.test(text)) {
+        starts.push(l)
+      }
+    }
+    starts.forEach((s, i) => {
+      const end = i + 1 < starts.length ? starts[i + 1] - 1 : count
+      if (end - s >= 2) {
+        ranges.push({ start: s, end, kind: monaco.languages.FoldingRangeKind.Region })
+      }
+    })
+    return ranges
+  },
+})
 
 // ── omni-dark / omni-light 主题 ─────────────────────────────
 // omni-dark 运行时读取 globals.css 的 CSS 变量（--background/--foreground/--primary 等）
@@ -90,7 +171,10 @@ function defineOmniDarkTheme(): void {
       { token: 'type', foreground: hslToHex(primary, '58a6ff') },
       { token: 'number', foreground: '#d2a8ff' },
       { token: 'string', foreground: '#f97583' },
+      { token: 'string.escape', foreground: '#ffab70' },
       { token: 'preproc', foreground: '#ffab70' },
+      { token: 'tag', foreground: '#ffa657' },
+      { token: 'delimiter', foreground: hslToHex(fg, 'e6edf3') },
       { token: 'identifier', foreground: hslToHex(fg, 'e6edf3') },
     ],
     colors: {
@@ -125,6 +209,31 @@ function defineOmniDarkTheme(): void {
       'editorBracketPairGuide.activeBackground4': '#ffa657',
       'editorBracketPairGuide.activeBackground5': '#7ee787',
       'editorBracketPairGuide.activeBackground6': '#ffa657',
+      // Find/替换控件 + 命令面板 + 列表配色（保证 Ctrl+F 等与主题一致）
+      'input.background': hslToHex(bg, '#0d1117'),
+      'input.foreground': hslToHex(fg, '#e6edf3'),
+      'input.border': hslToHex(primary, '#58a6ff'),
+      'editorWidget.background': hslToHex(bg, '#0d1117'),
+      'editorWidget.foreground': hslToHex(fg, '#e6edf3'),
+      'editorWidget.border': hslToHex(accent, '#21262d'),
+      'editorWidget.shadow': '#00000066',
+      'picker.background': hslToHex(bg, '#0d1117'),
+      'picker.foreground': hslToHex(fg, '#e6edf3'),
+      'list.hoverBackground': hslToHex(accent, '#21262d'),
+      'list.focusBackground': hslToHex(accent, '#21262d'),
+      'list.focusForeground': hslToHex(fg, '#e6edf3'),
+      'list.activeSelectionBackground': hslToHex(primary, '#1f6feb'),
+      'list.activeSelectionForeground': hslToHex(fg, '#e6edf3'),
+      'focusBorder': hslToHex(primary, '#58a6ff'),
+      'editor.findMatchBackground': '#3a2d1a',
+      'editor.findMatchBorder': '#ffd700',
+      'editor.findMatchHighlightBackground': '#2d3a2d',
+      'editor.findRangeHighlightBackground': '#2d3a2d',
+      'editorOverviewRuler.findMatchForeground': '#ffd700',
+      'minimap.findMatchHighlight': '#ffd700',
+      'minimap.selectionHighlight': hslToHex(primary, '#58a6ff'),
+      'editorStickyScroll.background': hslToHex(bg, '#0d1117'),
+      'editorStickyScrollHover.background': hslToHex(accent, '#21262d'),
     },
   })
 }
@@ -141,7 +250,10 @@ function defineOmniLightTheme(): void {
       { token: 'type', foreground: '#267f99' },
       { token: 'number', foreground: '#098658' },
       { token: 'string', foreground: '#a31515' },
+      { token: 'string.escape', foreground: '#795e26' },
       { token: 'preproc', foreground: '#795e26' },
+      { token: 'tag', foreground: '#795e26' },
+      { token: 'delimiter', foreground: '#000000' },
       { token: 'identifier', foreground: '#000000' },
     ],
     colors: {
@@ -176,6 +288,31 @@ function defineOmniLightTheme(): void {
       'editorBracketPairGuide.activeBackground4': '#ff0000',
       'editorBracketPairGuide.activeBackground5': '#0000ff',
       'editorBracketPairGuide.activeBackground6': '#008000',
+      // Find/替换控件 + 命令面板 + 列表配色（浅色配浅灰背景 + 深色文字）
+      'input.background': '#ffffff',
+      'input.foreground': '#000000',
+      'input.border': '#007fd4',
+      'editorWidget.background': '#f3f3f3',
+      'editorWidget.foreground': '#000000',
+      'editorWidget.border': '#c8c8c8',
+      'editorWidget.shadow': '#a8a8a866',
+      'picker.background': '#f3f3f3',
+      'picker.foreground': '#000000',
+      'list.hoverBackground': '#e8e8e8',
+      'list.focusBackground': '#d6ebff',
+      'list.focusForeground': '#000000',
+      'list.activeSelectionBackground': '#007fd4',
+      'list.activeSelectionForeground': '#ffffff',
+      'focusBorder': '#007fd4',
+      'editor.findMatchBackground': '#ffffaa',
+      'editor.findMatchBorder': '#ffd700',
+      'editor.findMatchHighlightBackground': '#ffffaa55',
+      'editor.findRangeHighlightBackground': '#ffffaa55',
+      'editorOverviewRuler.findMatchForeground': '#ffd700',
+      'minimap.findMatchHighlight': '#ffd700',
+      'minimap.selectionHighlight': '#007fd4',
+      'editorStickyScroll.background': '#ffffff',
+      'editorStickyScrollHover.background': '#e8e8e8',
     },
   })
 }
@@ -194,10 +331,16 @@ export function isDarkTheme(): boolean {
   return false
 }
 
-/** 应用当前主题对应的 Monaco 主题；返回主题名 */
-export function applyOmniTheme(): MonacoThemeName {
-  defineOmniDarkTheme()
-  defineOmniLightTheme()
+/** 主题是否已定义（避免反复 defineTheme 消耗；force 时强制重定义以刷新 CSS 变量） */
+let _themesDefined = false
+
+/** 应用当前主题对应的 Monaco 主题；返回主题名。force 时强制重定义（用于挂载后 CSS 变量就绪刷新）。 */
+export function applyOmniTheme(force = false): MonacoThemeName {
+  if (!_themesDefined || force) {
+    defineOmniDarkTheme()
+    defineOmniLightTheme()
+    _themesDefined = true
+  }
   return isDarkTheme() ? 'omni-dark' : 'omni-light'
 }
 
@@ -205,8 +348,16 @@ export function applyOmniTheme(): MonacoThemeName {
 export function monacoLangFor(file: string | null | undefined): string {
   const p = (file ?? '').replace(/\\/g, '/').toLowerCase()
   const base = p.split('/').pop() ?? ''
-  if (/\.(c|h|cpp|hpp|cc|cxx)$/.test(base)) return 'cpp'
+  if (/\.(c|cc|cpp|cxx)$/.test(base)) return 'cpp'
+  if (/\.(h|hh|hpp|hxx)$/.test(base)) return 'cpp'
   if (/\.(s|asm)$/.test(base)) return 'arm-asm'
+  if (/\.py$/.test(base)) return 'python'
+  if (/\.json$/.test(base)) return 'json'
+  if (/\.(md|markdown)$/.test(base)) return 'markdown'
+  if (/\.(sh|bash)$/.test(base)) return 'shell'
+  if (/\.(yml|yaml)$/.test(base)) return 'yaml'
+  if (/^(makefile|gnumakefile)$/.test(base)) return 'makefile'
+  if (/\.(ld|sct|icf)$/.test(base)) return 'plaintext'
   return 'plaintext'
 }
 

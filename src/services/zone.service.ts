@@ -299,6 +299,12 @@ export interface SourceSymbol {
   file?: string | null
   line?: number | null
   function?: string | null
+  /** 函数符号的 DWARF 签名（返回类型 f(参数类型...)，离线解析） */
+  signature?: string | null
+  /** 函数返回类型名 */
+  ret?: string | null
+  /** 形参类型名列表 */
+  params?: string[] | null
 }
 
 /** 按名字解析符号定义位置 */

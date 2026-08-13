@@ -1,15 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import Editor from '@monaco-editor/react'
+import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
 import { monaco, monacoLangFor, applyOmniTheme, isDarkTheme, type MonacoThemeName } from '@/lib/monaco-setup'
+import { ASM_MNEMONICS, ASM_REGISTERS } from '@/lib/source-highlight'
 import { buildSourceDecorations } from '@/lib/source-decorations'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-theme.css'
 
 interface SourceViewProps {
   uid: string | null
+}
+
+/** Monaco model 缓存上限（LRU）：超过后逐出最久未用的 model 并 dispose，防止内存持续增长 */
+const MODEL_CACHE_LIMIT = 30
+
+/** 语义 provider（定义/引用/文档符号）注册覆盖的语言 */
+const SOURCE_LANGS = ['cpp', 'arm-asm', 'plaintext']
+
+/** zoneFunctions 返回的单条函数 */
+type ZoneFunc = { name: string; address: number; size: number; file?: string | null; line?: number | null }
+
+/** 函数列表缓存（按 uid）：同一会话内复用，避免补全 / 文档符号每次全量拉取 2000 条 */
+const functionsCache = new Map<string, { funcs: ZoneFunc[]; ts: number }>()
+const FUNCTIONS_CACHE_TTL = 60_000
+
+/** 获取（并缓存）函数列表；缓存失效时重新拉取 */
+async function getCachedFunctions(uid: string): Promise<ZoneFunc[]> {
+  const hit = functionsCache.get(uid)
+  if (hit && Date.now() - hit.ts < FUNCTIONS_CACHE_TTL) return hit.funcs
+  const res = await zoneService.zoneFunctions(uid, '', 0, 2000)
+  const funcs = res.success ? res.functions : []
+  functionsCache.set(uid, { funcs, ts: Date.now() })
+  return funcs
 }
 
 /** 将两个源码路径归一化为可比较形态（统一 / 分隔、去尾部 /） */
@@ -74,6 +98,10 @@ export function SourceView({ uid }: SourceViewProps) {
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map())
   const viewStatesRef = useRef<Map<string, monaco.editor.ICodeEditorViewState | null>>(new Map())
   const decorationIdsRef = useRef<string[]>([])
+  // 每个文件首次加载时的磁盘原文（用于编辑模式 Diff 对比）
+  const originalsRef = useRef<Map<string, string>>(new Map())
+  // Diff 对比弹层开关
+  const [diffTarget, setDiffTarget] = useState<string | null>(null)
   // hover provider 一次性注册，会话停止 / 卸载时释放
   const hoverDisposableRef = useRef<monaco.IDisposable | null>(null)
   // 切换源文件后待跳转的 PC 行（文件模型加载完成后应用）
@@ -128,7 +156,12 @@ export function SourceView({ uid }: SourceViewProps) {
   const tabScrollRef = useRef<HTMLDivElement>(null)
   const [tabOverflow, setTabOverflow] = useState({ left: false, right: false })
   // 代码区右键菜单（触发位置 + 光标处标识符）
-  const [codeMenu, setCodeMenu] = useState<{ x: number; y: number; word: string } | null>(null)
+  const [codeMenu, setCodeMenu] = useState<{
+    x: number
+    y: number
+    word: string
+    pos: { lineNumber: number; column: number } | null
+  } | null>(null)
   // 转到引用结果面板
   const [refsPanel, setRefsPanel] = useState<{
     x: number
@@ -265,6 +298,16 @@ export function SourceView({ uid }: SourceViewProps) {
     }
   }, [uid, codeMenu])
 
+  // Peek 定义：将光标移到触发词后触发 Monaco 原生 peek（依赖上面注册的 DefinitionProvider）
+  const peekDefinition = useCallback(() => {
+    const editor = editorRef.current
+    if (editor && codeMenu?.pos) {
+      editor.setPosition(new monaco.Position(codeMenu.pos.lineNumber, codeMenu.pos.column))
+      editor.trigger('source-editor', 'editor.action.peekDefinition', null)
+    }
+    setCodeMenu(null)
+  }, [codeMenu])
+
   // 连接后刷新断点列表
   useEffect(() => {
     if (uid && elfPath) void refreshBreakpoints(uid)
@@ -329,6 +372,14 @@ export function SourceView({ uid }: SourceViewProps) {
     })
   }, [setCursorLine])
 
+  // 关闭文件前确认：文件有未保存修改时弹窗确认，避免误丢编辑内容
+  const confirmClose = useCallback((file: string): boolean => {
+    if (dirtyMapRef.current.get(norm(file))) {
+      return window.confirm(`文件「${file}」有未保存的修改，确定关闭？`)
+    }
+    return true
+  }, [])
+
   // 撤销当前文件最近一次编辑
   const undoCurrentFile = useCallback(() => {
     editorRef.current?.trigger('source-editor', 'undo', null)
@@ -365,7 +416,7 @@ export function SourceView({ uid }: SourceViewProps) {
     (editor: monaco.editor.IStandaloneCodeEditor) => {
       editorRef.current = editor
       // 挂载时按应用主题色刷新 Monaco 主题（CSS 变量此时已就绪），并同步当前主题名
-      setMonacoTheme(applyOmniTheme())
+      setMonacoTheme(applyOmniTheme(true))
       editor.onMouseDown((e) => {
         const pos = e.target.position
         if (!pos) return
@@ -384,8 +435,14 @@ export function SourceView({ uid }: SourceViewProps) {
           }
           return
         }
-        // 代码区点击 → 定位光标行（拖动选文本时不切换）
-        if (editingRef.current) return // 编辑模式下点击不触发 Run-to-Cursor 光标
+      })
+      // 光标位置变化（鼠标点击 / 键盘方向键 / 跳转）→ 同步 Run-to-Cursor 光标行，
+      // 保证 Run to Cursor / 断点操作始终使用最新光标行（编辑模式下不触发）
+      editor.onDidChangeCursorPosition((e) => {
+        if (editingRef.current) return
+        const file = activeFileRef.current
+        if (!file) return
+        const line = e.position.lineNumber
         const sel = editor.getSelection()
         if (sel && !sel.isEmpty()) return
         const cur = cursorLineRef.current
@@ -407,7 +464,12 @@ export function SourceView({ uid }: SourceViewProps) {
           const w = model.getWordAtPosition(pos)
           word = w ? w.word : ''
         }
-        setCodeMenu({ x: e.event.browserEvent.clientX, y: e.event.browserEvent.clientY, word })
+        setCodeMenu({
+          x: e.event.browserEvent.clientX,
+          y: e.event.browserEvent.clientY,
+          word,
+          pos: pos ? { lineNumber: pos.lineNumber, column: pos.column } : null,
+        })
       })
       applyDecorations()
     },
@@ -427,9 +489,19 @@ export function SourceView({ uid }: SourceViewProps) {
         if (!res.success || !res.symbol) return null
         const s = res.symbol
         const lines: monaco.IMarkdownString[] = []
-        const typeFrag = s.type && s.type !== 'unknown' ? `\`${s.type}\`` : ''
-        const addrFrag = s.address != null ? `@ \`0x${s.address.toString(16).toUpperCase()}\`` : ''
-        lines.push({ value: `**${s.name}** ${typeFrag} ${addrFrag}`.trim() })
+        // 函数符号：优先展示 DWARF 签名（返回类型 f(参数类型...)）
+        if (s.signature) {
+          lines.push({ value: `\`${s.signature}\`` })
+        } else {
+          const typeFrag = s.type && s.type !== 'unknown' ? `\`${s.type}\`` : ''
+          const addrFrag = s.address != null ? `@ \`0x${s.address.toString(16).toUpperCase()}\`` : ''
+          lines.push({ value: `**${s.name}** ${typeFrag} ${addrFrag}`.trim() })
+        }
+        // 返回类型 + 参数列表（仅函数符号且已解析出签名时展示）
+        if (s.ret) lines.push({ value: `返回类型: \`${s.ret}\`` })
+        if (s.params && s.params.length > 0) {
+          lines.push({ value: `参数: ${s.params.map((p) => `\`${p}\``).join(', ')}` })
+        }
         if (s.size != null) lines.push({ value: `size: ${s.size} bytes` })
         if (s.function) lines.push({ value: `所属函数: \`${s.function}\`` })
         if (s.file && s.line != null) lines.push({ value: `定义于: \`${s.file}:${s.line}\`` })
@@ -442,6 +514,163 @@ export function SourceView({ uid }: SourceViewProps) {
       hoverDisposableRef.current = null
     }
   }, [uid])
+
+  // ── 语义 Language Provider（原生导航：定义 / 引用 / 文档符号）──
+  // 复用后端符号表与轻量检索，注册为 Monaco 原生 provider，顺带点亮
+  // Peek 定义、面包屑、大纲。随 uid 驱动注册/清理，避免闭包捕获过期 uid。
+  useEffect(() => {
+    if (!uid) return
+    const disposables: monaco.IDisposable[] = []
+
+    // 文件路径 → model uri（与 createModel 一致）
+    const fileUri = (p: string) => monaco.Uri.parse('file:///' + norm(p))
+
+    // ── DWARF 符号补全中间件：基于后端符号表提供自动补全 ──
+    disposables.push(
+      monaco.languages.registerCompletionItemProvider(SOURCE_LANGS, {
+        triggerCharacters: ['.', '>', ':'],
+        provideCompletionItems: async (model, position) => {
+          const wordUntilPosition = model.getWordUntilPosition(position)
+          const word = wordUntilPosition.word
+          const range = {
+            startLineNumber: position.lineNumber,
+            startColumn: wordUntilPosition.startColumn,
+            endLineNumber: position.lineNumber,
+            endColumn: wordUntilPosition.endColumn,
+          }
+          const suggestions: monaco.languages.CompletionItem[] = []
+          // 汇编语言：先补助记符 + 寄存器
+          if (model.getLanguageId() === 'arm-asm') {
+            for (const m of Array.from(ASM_MNEMONICS)) {
+              if (!word || m.toLowerCase().startsWith(word.toLowerCase())) {
+                suggestions.push({ label: m, kind: monaco.languages.CompletionItemKind.Keyword, insertText: m, range })
+              }
+            }
+            for (const r of Array.from(ASM_REGISTERS)) {
+              if (!word || r.toLowerCase().startsWith(word.toLowerCase())) {
+                suggestions.push({ label: r, kind: monaco.languages.CompletionItemKind.Variable, insertText: r, range })
+              }
+            }
+          }
+          // 复用缓存的函数列表，补函数名（大小写不敏感前缀匹配）
+          const funcs = await getCachedFunctions(uid)
+          const lower = word.toLowerCase()
+          for (const fn of funcs) {
+            if (!word || fn.name.toLowerCase().startsWith(lower)) {
+              suggestions.push({
+                label: fn.name,
+                kind: monaco.languages.CompletionItemKind.Function,
+                detail: `0x${fn.address.toString(16).toUpperCase()}`,
+                insertText: fn.name,
+                range,
+              })
+            }
+          }
+          return { suggestions }
+        },
+      })
+    )
+
+    // 转到定义：符号表解析 → 打开目标文件并返回 Location
+    disposables.push(
+      monaco.languages.registerDefinitionProvider(SOURCE_LANGS, {
+        provideDefinition: async (model, position) => {
+          const word = model.getWordAtPosition(position)
+          if (!word) return null
+          const res = await zoneService.zoneResolveSymbol(uid, word.word)
+          if (!res.success || !res.symbol || !res.symbol.file || res.symbol.line == null) return null
+          const target = matchSourceFile(res.symbol.file)
+          if (!target) return null
+          gotoSource(target, res.symbol.line)
+          return {
+            uri: fileUri(target),
+            range: new monaco.Range(res.symbol.line, 1, res.symbol.line, 1),
+          }
+        },
+      })
+    )
+
+    // 转到引用：轻量全文检索 → Location 列表（供原生 Find All References / Peek）
+    disposables.push(
+      monaco.languages.registerReferenceProvider(SOURCE_LANGS, {
+        provideReferences: async (model, position) => {
+          const word = model.getWordAtPosition(position)
+          if (!word) return []
+          const res = await zoneService.zoneSearchSource(uid, word.word)
+          if (!res.success || !res.results) return []
+          const locations: monaco.languages.Location[] = []
+          for (const h of res.results) {
+            const target = matchSourceFile(h.file)
+            if (!target) continue
+            locations.push({
+              uri: fileUri(target),
+              range: new monaco.Range(h.line, 1, h.line, 1),
+            })
+          }
+          return locations
+        },
+      })
+    )
+
+    // 文档符号：当前文件内函数列表（驱动面包屑 / 大纲 / 转符号）
+    disposables.push(
+      monaco.languages.registerDocumentSymbolProvider(SOURCE_LANGS, {
+        provideDocumentSymbols: async (model) => {
+          const file = currentFileRef.current
+          if (!file) return []
+          const key = norm(file)
+          const funcs = await getCachedFunctions(uid)
+          const symbols: monaco.languages.DocumentSymbol[] = []
+          for (const fn of funcs) {
+            if (!fn.file || fn.line == null) continue
+            const fnNorm = norm(fn.file)
+            if (fnNorm !== key && !fnNorm.endsWith('/' + key) && !key.endsWith('/' + fnNorm)) continue
+            symbols.push({
+              name: fn.name,
+              detail: `0x${fn.address.toString(16).toUpperCase()}`,
+              kind: monaco.languages.SymbolKind.Function,
+              tags: [],
+              range: new monaco.Range(fn.line, 1, fn.line + 1, 1),
+              selectionRange: new monaco.Range(fn.line, 1, fn.line, 1),
+            })
+          }
+          return symbols
+        },
+      })
+    )
+
+    // CodeLens：在每个函数声明行展示其链接地址 + 大小（嵌入式调试参考信息）
+    disposables.push(
+      monaco.languages.registerCodeLensProvider(SOURCE_LANGS, {
+        provideCodeLenses: async (model) => {
+          const file = currentFileRef.current
+          if (!file) return { lenses: [], dispose: () => {} }
+          const key = norm(file)
+          const funcs = await getCachedFunctions(uid)
+          const lenses: monaco.languages.CodeLens[] = []
+          for (const fn of funcs) {
+            if (!fn.file || fn.line == null) continue
+            const fnNorm = norm(fn.file)
+            if (fnNorm !== key && !fnNorm.endsWith('/' + key) && !key.endsWith('/' + fnNorm)) continue
+            lenses.push({
+              range: new monaco.Range(fn.line, 1, fn.line, 1),
+              id: `func-${fn.line}`,
+              command: {
+                id: 'omnilink-codelens-info',
+                title: `0x${fn.address.toString(16).toUpperCase()} · ${fn.size}B`,
+              },
+            })
+          }
+          return { lenses, dispose: () => {} }
+        },
+        resolveCodeLens: async (model, lens) => lens,
+      })
+    )
+
+    return () => {
+      disposables.forEach((d) => d.dispose())
+    }
+  }, [uid, matchSourceFile, gotoSource])
 
   // 文件切换时：保存旧文件的视口状态（在内容加载前执行）
   useEffect(() => {
@@ -476,6 +705,10 @@ export function SourceView({ uid }: SourceViewProps) {
         if (cancelled) return
         if (res.success) {
           const key = norm(activeSourceFile)
+          // 保存磁盘原文（首次加载时），供 Diff 对比
+          if (!originalsRef.current.has(key)) {
+            originalsRef.current.set(key, res.lines?.join('\n') ?? '')
+          }
           let model = modelsRef.current.get(key)
           if (!model) {
             model = monaco.editor.createModel(
@@ -484,6 +717,20 @@ export function SourceView({ uid }: SourceViewProps) {
               monaco.Uri.parse('file:///' + key)
             )
             modelsRef.current.set(key, model)
+          } else {
+            // LRU touch：删除后重插，将本次访问提升到 Map 末尾（最近使用）
+            modelsRef.current.delete(key)
+            modelsRef.current.set(key, model)
+          }
+          // 超限逐出最久未用（Map 迭代顺序即访问顺序，首个为最久未用）
+          while (modelsRef.current.size > MODEL_CACHE_LIMIT) {
+            const oldestKey = modelsRef.current.keys().next().value as string | undefined
+            if (oldestKey == null) break
+            const oldest = modelsRef.current.get(oldestKey)
+            if (oldest) oldest.dispose()
+            modelsRef.current.delete(oldestKey)
+            viewStatesRef.current.delete(oldestKey)
+            dirtyMapRef.current.delete(oldestKey)
           }
           const editor = editorRef.current
           if (editor) {
@@ -675,6 +922,8 @@ export function SourceView({ uid }: SourceViewProps) {
       dirtyMapRef.current.clear()
       setDirty(false)
       setEditing(false)
+      // 会话停止：清空函数列表缓存，避免切换 ELF 后仍命中旧符号表
+      functionsCache.clear()
     }
   }, [openFiles])
 
@@ -715,11 +964,15 @@ export function SourceView({ uid }: SourceViewProps) {
                     setTabMenu({ file: f, x: e.clientX, y: e.clientY })
                   }}
                 >
+                  {/* 脏文件圆点指示（未保存修改） */}
+                  {dirtyMapRef.current.get(norm(f)) && (
+                    <span className="size-1.5 shrink-0 rounded-full bg-red-500" title="未保存的修改" />
+                  )}
                   <span>{name}</span>
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      closeSourceFile(f)
+                      if (confirmClose(f)) closeSourceFile(f)
                     }}
                     className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/60 opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-500 group-hover:opacity-100"
                     title="关闭"
@@ -767,6 +1020,14 @@ export function SourceView({ uid }: SourceViewProps) {
                   撤销
                 </button>
                 <button
+                  onClick={() => setDiffTarget(activeSourceFile)}
+                  disabled={!activeSourceFile}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                  title="与磁盘原始版本对比"
+                >
+                  Diff 对比
+                </button>
+                <button
                   onClick={toggleEditing}
                   className="flex items-center gap-1 rounded px-2 py-1 text-xs text-primary transition-colors hover:bg-accent"
                   title="退出编辑模式"
@@ -799,7 +1060,7 @@ export function SourceView({ uid }: SourceViewProps) {
           <button
             className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
             onClick={() => {
-              closeSourceFile(tabMenu.file)
+              if (confirmClose(tabMenu.file)) closeSourceFile(tabMenu.file)
               setTabMenu(null)
             }}
           >
@@ -808,6 +1069,9 @@ export function SourceView({ uid }: SourceViewProps) {
           <button
             className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
             onClick={() => {
+              const others = openFiles.filter((f) => f !== tabMenu.file)
+              const hasDirty = others.some((f) => dirtyMapRef.current.get(norm(f)))
+              if (hasDirty && !window.confirm('存在未保存的修改，确定关闭其他文件？')) return
               closeOtherFiles(tabMenu.file)
               setTabMenu(null)
             }}
@@ -818,6 +1082,8 @@ export function SourceView({ uid }: SourceViewProps) {
           <button
             className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
             onClick={() => {
+              const hasDirty = openFiles.some((f) => dirtyMapRef.current.get(norm(f)))
+              if (hasDirty && !window.confirm('存在未保存的修改，确定关闭所有文件？')) return
               closeAllFiles()
               setTabMenu(null)
             }}
@@ -828,7 +1094,8 @@ export function SourceView({ uid }: SourceViewProps) {
         </div>
       )}
       {/* Monaco 代码区：Editor 常驻，loading/error 用覆盖层叠加，避免卸载导致实例 dispose 后异步回调崩溃 */}
-      <div className="relative min-h-0 flex-1 overflow-hidden">
+      {/* overflow-visible：允许 Monaco 的 Find 控件按钮 tooltip 溢出容器显示，避免被裁剪到窗口外 */}
+      <div className="relative min-h-0 flex-1 overflow-visible">
         <Editor
           theme={monacoTheme}
           language="plaintext"
@@ -840,9 +1107,21 @@ export function SourceView({ uid }: SourceViewProps) {
             folding: true,
             // 第三优先级改造：开启 minimap（右侧缩略图，可点击/拖拽跳转）
             minimap: { enabled: true, size: 'fit', maxColumn: 120, renderCharacters: true, showSlider: 'mouseover' },
+            // 大文件长函数阅读：粘性滚动（滚动时固定显示当前嵌套父级首行）
+            stickyScroll: { enabled: true },
+            // 彩虹缩进：启用缩进辅助线；括号仅高亮配对（bracketPairColorization），不画括号引导线
+            guides: { indentation: true, bracketPairs: false, highlightActiveIndentation: true },
+            // 补全幽灵预览（suggest 预览文本）
+            suggest: { preview: true },
+            // Find 主动选中：自动从当前选区播种搜索词，并在选区/多行内查找
+            find: { autoFindInSelection: 'multiline', seedSearchStringFromSelection: 'always' },
+            // 折叠控件始终显示（汇编折叠更易发现）
+            showFoldingControls: 'always',
             fontSize: 12,
             lineHeight: 20,
             fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
+            fontLigatures: true,
+            ariaLabel: '源码编辑器',
             scrollBeyondLastLine: false,
             // 第一优先级改造：开启当前行高亮（只高亮光标所在行，不与 PC 行装饰叠加冲突）
             renderLineHighlight: 'line',
@@ -861,7 +1140,7 @@ export function SourceView({ uid }: SourceViewProps) {
             // 第一优先级改造：开启括号配对高亮（配色在 monaco-setup.ts 主题中补齐）
             bracketPairColorization: { enabled: true },
             links: false,
-            renderWhitespace: 'none',
+            renderWhitespace: 'all',
             smoothScrolling: true,
             padding: { top: 4, bottom: 4 },
             scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
@@ -880,6 +1159,46 @@ export function SourceView({ uid }: SourceViewProps) {
           </div>
         )}
       </div>
+
+      {/* Diff 对比弹层：original=磁盘原文，modified=当前编辑值（均只读查看） */}
+      {diffTarget && (
+        <div className="absolute inset-0 z-20 flex flex-col border-t border-border bg-background">
+          <div className="flex shrink-0 items-center justify-between border-b border-border px-2 py-1 text-xs">
+            <span className="truncate font-medium">
+              Diff: {diffTarget.replace(/\\/g, '/').split('/').pop()}
+              <span className="ml-2 text-muted-foreground">左侧磁盘 · 右侧当前</span>
+            </span>
+            <button
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+              onClick={() => setDiffTarget(null)}
+              title="关闭对比"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1">
+            <DiffEditor
+              theme={monacoTheme}
+              language={monacoLangFor(diffTarget)}
+              original={originalsRef.current.get(norm(diffTarget)) ?? ''}
+              modified={editorRef.current?.getModel()?.getValue() ?? ''}
+              className="h-full"
+              options={{
+                readOnly: true,
+                renderSideBySide: true,
+                originalEditable: false,
+                fontSize: 12,
+                lineHeight: 20,
+                fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                renderWhitespace: 'none',
+                automaticLayout: true,
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* 代码区右键菜单：复制 / 全选 / 转到定义 / 转到引用 */}
       {codeMenu && (
@@ -907,6 +1226,13 @@ export function SourceView({ uid }: SourceViewProps) {
             disabled={!codeMenu.word}
           >
             转到定义
+          </button>
+          <button
+            className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            onClick={peekDefinition}
+            disabled={!codeMenu.word}
+          >
+            Peek 定义
           </button>
           <button
             className="flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
