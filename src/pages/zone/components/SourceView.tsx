@@ -3,7 +3,7 @@ import Editor from '@monaco-editor/react'
 import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
 import * as zoneService from '@/services/zone.service'
-import { monaco, monacoLangFor, applyOmniTheme } from '@/lib/monaco-setup'
+import { monaco, monacoLangFor, applyOmniTheme, isDarkTheme, type MonacoThemeName } from '@/lib/monaco-setup'
 import { buildSourceDecorations } from '@/lib/source-decorations'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-theme.css'
@@ -56,6 +56,10 @@ export function SourceView({ uid }: SourceViewProps) {
   const [error, setError] = useState<string | null>(null)
   const [pcLine, setPcLine] = useState<number | null>(null)
   const [executableLines, setExecutableLines] = useState<Set<number>>(new Set())
+  // Monaco 主题：跟随文档明暗（浅色 UI 用 omni-light，深色用 omni-dark）
+  const [monacoTheme, setMonacoTheme] = useState<MonacoThemeName>(() =>
+    isDarkTheme() ? 'omni-dark' : 'omni-light'
+  )
   // 编辑模式：editing 开关 + 各文件脏标记（未保存的修改）
   const [editing, setEditing] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -358,8 +362,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const handleMount = useCallback(
     (editor: monaco.editor.IStandaloneCodeEditor) => {
       editorRef.current = editor
-      // 挂载时按应用主题色刷新 Monaco 主题（CSS 变量此时已就绪）
-      applyOmniTheme()
+      // 挂载时按应用主题色刷新 Monaco 主题（CSS 变量此时已就绪），并同步当前主题名
+      setMonacoTheme(applyOmniTheme())
       editor.onMouseDown((e) => {
         const pos = e.target.position
         if (!pos) return
@@ -792,7 +796,7 @@ export function SourceView({ uid }: SourceViewProps) {
       {/* Monaco 代码区：Editor 常驻，loading/error 用覆盖层叠加，避免卸载导致实例 dispose 后异步回调崩溃 */}
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <Editor
-          theme="omni-dark"
+          theme={monacoTheme}
           language="plaintext"
           onMount={handleMount}
           options={{
@@ -805,15 +809,19 @@ export function SourceView({ uid }: SourceViewProps) {
             lineHeight: 20,
             fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
             scrollBeyondLastLine: false,
-            renderLineHighlight: 'none',
+            // 第一优先级改造：开启当前行高亮（只高亮光标所在行，不与 PC 行装饰叠加冲突）
+            renderLineHighlight: 'line',
             contextmenu: false,
             quickSuggestions: false,
             wordBasedSuggestions: 'off',
             suggestOnTriggerCharacters: false,
             parameterHints: { enabled: false },
             snippetSuggestions: 'none',
-            selectionHighlight: false,
-            occurrencesHighlight: 'off',
+            // 第一优先级改造：开启选中词 / 光标词高亮（VS Code 默认体验；singleFile 只高亮当前文件内出现位）
+            selectionHighlight: true,
+            occurrencesHighlight: 'singleFile',
+            // 第一优先级改造：开启括号配对高亮（配色在 monaco-setup.ts 主题中补齐）
+            bracketPairColorization: { enabled: true },
             links: false,
             renderWhitespace: 'none',
             smoothScrolling: true,
