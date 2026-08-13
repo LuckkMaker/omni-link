@@ -14,6 +14,13 @@
   font-size: 12px;
   line-height: 20px;
 }
+/* 可执行行灰色断点圆点（表示该行可打断点） */
+.cm-bp-available::before {
+  content: '●';
+  color: rgba(148, 163, 184, 0.55);
+  font-size: 12px;
+  line-height: 20px;
+}
 /* PC 运行指示 ▶（glyph margin） */
 .cm-pc-glyph::before {
   content: '▶';

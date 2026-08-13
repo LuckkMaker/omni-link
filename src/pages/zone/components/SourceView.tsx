@@ -167,6 +167,7 @@ export function SourceView({ uid }: SourceViewProps) {
   const pcRef = useRef(pc)
   const followSourceRef = useRef(followSource)
   const activeFileRef = useRef<string | null>(activeSourceFile)
+  const uidRef = useRef(uid)
   const stateRef = useRef(state)
   const pcLineRef = useRef<number | null>(pcLine)
   const cursorLineRef = useRef(cursorLine)
@@ -181,6 +182,9 @@ export function SourceView({ uid }: SourceViewProps) {
   useEffect(() => {
     activeFileRef.current = activeSourceFile
   }, [activeSourceFile])
+  useEffect(() => {
+    uidRef.current = uid
+  }, [uid])
   useEffect(() => {
     stateRef.current = state
   }, [state])
@@ -477,16 +481,17 @@ export function SourceView({ uid }: SourceViewProps) {
         const file = activeFileRef.current
         if (!file) return
         const line = pos.lineNumber
-        // 断点槽（glyph margin）点击 → 切换断点（仅可执行行 / PC 行 / 已设断点行）
-        if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
-          const hasBp = breakpointsRef.current.some(
-            (b) => b.line === line && isSameSource(norm(b.file), file)
-          )
-          const isExecutable =
-            executableLinesRef.current.has(line) || line === pcLineRef.current || hasBp
-          if (isExecutable && stateRef.current !== 'disconnected') {
-            void toggleBreakpoint(uid ?? '', file, line)
-          }
+        // 断点槽（glyph margin）或行号栏点击 → 切换断点（对齐 VS Code：点击行号 gutter 打断点）
+        const t = e.target.type
+        if (
+          t === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN ||
+          t === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS
+        ) {
+          // 会话未激活时不打断点；其余任意行均可切换（后端对无代码行返回明确错误）
+          if (stateRef.current === 'disconnected') return
+          // 用 uidRef 读取最新 uid：onMount 只在首挂载执行一次，闭包捕获的 uid 可能是初始 null，
+          // 若直接用捕获的 uid 会在会话激活后仍发空 uid 请求 → 后端 404
+          void toggleBreakpoint(uidRef.current ?? '', file, line)
           return
         }
       })

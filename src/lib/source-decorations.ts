@@ -81,6 +81,22 @@ export function buildSourceDecorations(
     }
   }
 
+  // 可执行行：glyph 灰色断点圆点（表示该行可打断点，对齐旧版自绘渲染器）
+  // 已设断点的行不再显示灰点（红点优先）
+  const bpLines = new Set(
+    input.breakpoints
+      .filter((b) => input.activeFile && sameFile(b.file, input.activeFile))
+      .map((b) => b.line)
+  )
+  input.executableLines.forEach((line) => {
+    if (valid(line) && !bpLines.has(line)) {
+      dels.push({
+        range: new monaco.Range(line, 1, line, 1),
+        options: { glyphMarginClassName: 'cm-bp-available' },
+      })
+    }
+  })
+
   // 编辑模式下：滚动条（overview ruler）修改行（黄）/ 新增行（绿）标记，对齐 VS Code 的修改行指示
   if (input.modifiedLines) {
     input.modifiedLines.forEach((line) => {
