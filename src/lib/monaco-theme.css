@@ -3,28 +3,53 @@
 .cm-pc {
   background: rgba(110, 231, 183, 0.14) !important;
 }
+/* PC 行号背景高亮（与内容行同色，连行号一起高亮） */
+.cm-pc-margin {
+  background: rgba(110, 231, 183, 0.14) !important;
+}
+/* PC 运行指示与断点同行时半透明，露出断点红点（运行指示用 ::after，叠在断点 ::before 之上） */
+.cm-pc-over-bp::after {
+  opacity: 0.45;
+}
 /* 光标行整行高亮（琥珀） */
 .cm-cursor {
   background: rgba(252, 211, 77, 0.1) !important;
 }
-/* 断点红点（glyph margin） */
+/* 断点红点（glyph margin）：更大、靠右贴近行号（对齐 VS Code 断点样式）
+   用 ::before 渲染；配合 PC 运行指示（::after）绝对定位重叠，半透明时露出红点 */
 .cm-bp::before {
   content: '●';
   color: #f85149;
-  font-size: 12px;
+  font-size: 16px;
   line-height: 20px;
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 /* 可执行行灰色断点圆点（表示该行可打断点） */
 .cm-bp-available::before {
   content: '●';
   color: rgba(148, 163, 184, 0.55);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 20px;
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
 }
-/* PC 运行指示 ▶（glyph margin） */
-.cm-pc-glyph::before {
+/* PC 运行指示 ▶（glyph margin）：用 ::after 避免与断点 ::before 冲突，可与断点重叠 */
+.cm-pc-glyph::after {
   content: '▶';
   color: #3fb950;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 20px;
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+/* PC 在可执行行（无断点）时隐藏灰色可打断点圆点，避免叠在绿色箭头下 */
+.cm-pc-glyph.cm-bp-available::before {
+  display: none;
 }

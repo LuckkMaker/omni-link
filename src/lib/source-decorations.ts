@@ -40,15 +40,25 @@ export function buildSourceDecorations(
   const dels: monaco.editor.IModelDeltaDecoration[] = []
   const valid = (l: number) => l >= 1 && l <= input.lineCount
 
-  // PC 行：整行高亮 + glyph 运行指示
+  // PC 行：整行高亮（含行号背景）+ glyph 运行指示
   if (input.pcLine != null && valid(input.pcLine)) {
+    // 同行有断点时，运行指示半透明显示，避免盖住断点红点
+    const bpOnPcLine = input.breakpoints.some(
+      (b) => input.activeFile && sameFile(b.file, input.activeFile) && b.line === input.pcLine
+    )
     dels.push({
       range: new monaco.Range(input.pcLine, 1, input.pcLine, 1),
-      options: { isWholeLine: true, className: 'cm-pc' },
+      options: {
+        isWholeLine: true,
+        className: 'cm-pc',
+        marginClassName: 'cm-pc-margin',
+      },
     })
     dels.push({
       range: new monaco.Range(input.pcLine, 1, input.pcLine, 1),
-      options: { glyphMarginClassName: 'cm-pc-glyph' },
+      options: {
+        glyphMarginClassName: bpOnPcLine ? 'cm-pc-glyph cm-pc-over-bp' : 'cm-pc-glyph',
+      },
     })
   }
 
