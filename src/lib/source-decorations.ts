@@ -28,6 +28,10 @@ export interface SourceDecorationInput {
   executableLines: Set<number>
   /** 当前模型的总行数 */
   lineCount: number
+  /** 编辑模式下相对原始内容被修改的行号（minimap 黄色标记） */
+  modifiedLines?: Set<number>
+  /** 编辑模式下相对原始内容新增的行号（minimap 绿色标记） */
+  addedLines?: Set<number>
 }
 
 export function buildSourceDecorations(
@@ -75,6 +79,32 @@ export function buildSourceDecorations(
         },
       })
     }
+  }
+
+  // 编辑模式下：滚动条（overview ruler）修改行（黄）/ 新增行（绿）标记，对齐 VS Code 的修改行指示
+  if (input.modifiedLines) {
+    input.modifiedLines.forEach((line) => {
+      if (valid(line)) {
+        dels.push({
+          range: new monaco.Range(line, 1, line, 1),
+          options: {
+            overviewRuler: { color: '#ffcc00', position: monaco.editor.OverviewRulerLane.Full },
+          },
+        })
+      }
+    })
+  }
+  if (input.addedLines) {
+    input.addedLines.forEach((line) => {
+      if (valid(line)) {
+        dels.push({
+          range: new monaco.Range(line, 1, line, 1),
+          options: {
+            overviewRuler: { color: '#3fb950', position: monaco.editor.OverviewRulerLane.Full },
+          },
+        })
+      }
+    })
   }
 
   return dels

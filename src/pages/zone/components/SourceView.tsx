@@ -46,6 +46,54 @@ function isSameSource(a: string, b: string): boolean {
   return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
 }
 
+/** 计算当前内容相对原始内容的修改/新增行号（用于 minimap 修改行高亮，对齐 VS Code） */
+function computeChangedLines(original: string, current: string): { modified: Set<number>; added: Set<number> } {
+  const modified = new Set<number>()
+  const added = new Set<number>()
+  if (original === current) return { modified, added }
+  const a = original.split('\n')
+  const b = current.split('\n')
+  const n = a.length
+  const m = b.length
+
+  // LCS 长度表（dp[i][j]：a[i..] 与 b[j..] 的最长公共子序列长度）
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+    }
+  }
+
+  // 回溯：按变更块区分「新增」（纯插入）与「修改」（替换了原行）
+  let i = 0
+  let j = 0
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      i++
+      j++
+      continue
+    }
+    // 收集删除段（跳过原行）
+    let hasDel = false
+    while (i < n && (j >= m || dp[i + 1][j] >= dp[i][j + 1])) {
+      hasDel = true
+      i++
+    }
+    // 收集新增段（当前行）
+    while (j < m && (i >= n || dp[i][j + 1] > dp[i + 1][j])) {
+      if (hasDel) modified.add(j + 1)
+      else added.add(j + 1)
+      j++
+    }
+  }
+  // 尾部纯新增
+  while (j < m) {
+    added.add(j + 1)
+    j++
+  }
+  return { modified, added }
+}
+
 /**
  * 源码视图：Monaco 只读编辑器 + 语法高亮 + PC 行高亮 + 断点槽。
  * start session 后 PC 变化会自动切换到对应源文件并把执行行滚动到窗口中央并高亮。
@@ -112,6 +160,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const currentFileRef = useRef<string | null>(null)
   // minimap 强制刷新定时器（Monaco 已知：编辑内容变更后 minimap 不随内容重绘，需手动刷新）
   const minimapRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 编辑模式下相对原始内容的修改/新增行号（minimap 修改行高亮）
+  const changedLinesRef = useRef<{ modified: Set<number>; added: Set<number> }>({ modified: new Set(), added: new Set() })
 
   // 始终持有最新值（在异步回调内读取，避免闭包过期）
   const pcRef = useRef(pc)
@@ -327,6 +377,8 @@ export function SourceView({ uid }: SourceViewProps) {
       breakpoints: breakpointsRef.current,
       executableLines: executableLinesRef.current,
       lineCount: model.getLineCount(),
+      modifiedLines: changedLinesRef.current.modified,
+      addedLines: changedLinesRef.current.added,
     })
     decorationIdsRef.current = editor.deltaDecorations(decorationIdsRef.current, dels)
   }, [])
@@ -457,8 +509,32 @@ export function SourceView({ uid }: SourceViewProps) {
         if (!editingRef.current) return
         const file = activeFileRef.current
         if (!file) return
-        dirtyMapRef.current.set(norm(file), true)
-        setDirty(true)
+        const key = norm(file)
+        const original = originalsRef.current.get(key) ?? ''
+        const current = editor.getModel()?.getValue() ?? ''
+        // 完全撤销回原始内容时清除脏标记（tab 红点），否则标记为脏
+        if (current === original) {
+          dirtyMapRef.current.delete(key)
+          setDirty(false)
+        } else {
+          dirtyMapRef.current.set(key, true)
+          setDirty(true)
+        }
+        // 防抖：计算相对原始内容的修改/新增行并刷新 minimap 标记（对齐 VS Code 修改行高亮），
+        // 同时强制刷新 minimap 内容（Monaco 已知编辑后 minimap 不随内容重绘）
+        if (minimapRefreshTimerRef.current) clearTimeout(minimapRefreshTimerRef.current)
+        minimapRefreshTimerRef.current = setTimeout(() => {
+          const ed = editorRef.current
+          const model = ed?.getModel()
+          if (!ed || !model) return
+          const original = originalsRef.current.get(norm(file)) ?? ''
+          changedLinesRef.current = computeChangedLines(original, model.getValue())
+          applyDecorations()
+          ed.updateOptions({ minimap: { enabled: false } })
+          ed.updateOptions({
+            minimap: { enabled: true, size: 'fit', maxColumn: 120, renderCharacters: true, showSlider: 'mouseover' },
+          })
+        }, 150)
       })
       editor.onContextMenu((e) => {
         const pos = e.target.position
@@ -740,6 +816,8 @@ export function SourceView({ uid }: SourceViewProps) {
           const editor = editorRef.current
           if (editor) {
             editor.setModel(model)
+            // 切换文件：重置修改行标记（新文件相对其自身原始内容重新计算）
+            changedLinesRef.current = { modified: new Set(), added: new Set() }
             const vs = viewStatesRef.current.get(key)
             // 「转到定义/引用」导航目标优先：打开文件后滚动到目标行并清除
             const nav = navGoto
@@ -929,6 +1007,12 @@ export function SourceView({ uid }: SourceViewProps) {
       setEditing(false)
       // 会话停止：清空函数列表缓存，避免切换 ELF 后仍命中旧符号表
       functionsCache.clear()
+      // 清理 minimap 刷新定时器与修改行标记
+      if (minimapRefreshTimerRef.current) {
+        clearTimeout(minimapRefreshTimerRef.current)
+        minimapRefreshTimerRef.current = null
+      }
+      changedLinesRef.current = { modified: new Set(), added: new Set() }
     }
   }, [openFiles])
 
@@ -1122,8 +1206,8 @@ export function SourceView({ uid }: SourceViewProps) {
             find: { autoFindInSelection: 'multiline', seedSearchStringFromSelection: 'always' },
             // 折叠控件始终显示（汇编折叠更易发现）
             showFoldingControls: 'always',
-            fontSize: 12,
-            lineHeight: 20,
+            fontSize: 14,
+            lineHeight: 0,
             fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
             fontLigatures: true,
             ariaLabel: '源码编辑器',
@@ -1192,8 +1276,8 @@ export function SourceView({ uid }: SourceViewProps) {
                 readOnly: true,
                 renderSideBySide: true,
                 originalEditable: false,
-                fontSize: 12,
-                lineHeight: 20,
+                fontSize: 14,
+                lineHeight: 0,
                 fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
                 minimap: { enabled: false },
                 scrollBeyondLastLine: false,
