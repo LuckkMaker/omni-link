@@ -74,6 +74,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map())
   const viewStatesRef = useRef<Map<string, monaco.editor.ICodeEditorViewState | null>>(new Map())
   const decorationIdsRef = useRef<string[]>([])
+  // hover provider 一次性注册，会话停止 / 卸载时释放
+  const hoverDisposableRef = useRef<monaco.IDisposable | null>(null)
   // 切换源文件后待跳转的 PC 行（文件模型加载完成后应用）
   const pendingPcRef = useRef<{ file: string; line: number } | null>(null)
   // 最近一次解析到的 PC 源码位置；供模型加载完成后滚动居中
@@ -412,6 +414,35 @@ export function SourceView({ uid }: SourceViewProps) {
     [uid, toggleBreakpoint, setCursorLine, applyDecorations]
   )
 
+  // 自建轻量 hover provider —— 悬停符号时复用后端符号表展示类型/地址/所属函数/定义位置。
+  // 独立 useEffect 依赖 uid：onMount 只在首挂载执行一次，会捕获到首挂载时的 null uid，
+  // 导致 hover 永远请求失败；改由 uid 驱动注册/清理可保证闭包捕获到最新 uid。
+  useEffect(() => {
+    if (!uid) return
+    const disposable = monaco.languages.registerHoverProvider('*', {
+      provideHover: async (model, position) => {
+        const word = model.getWordAtPosition(position)
+        if (!word) return null
+        const res = await zoneService.zoneResolveSymbol(uid, word.word)
+        if (!res.success || !res.symbol) return null
+        const s = res.symbol
+        const lines: monaco.IMarkdownString[] = []
+        const typeFrag = s.type && s.type !== 'unknown' ? `\`${s.type}\`` : ''
+        const addrFrag = s.address != null ? `@ \`0x${s.address.toString(16).toUpperCase()}\`` : ''
+        lines.push({ value: `**${s.name}** ${typeFrag} ${addrFrag}`.trim() })
+        if (s.size != null) lines.push({ value: `size: ${s.size} bytes` })
+        if (s.function) lines.push({ value: `所属函数: \`${s.function}\`` })
+        if (s.file && s.line != null) lines.push({ value: `定义于: \`${s.file}:${s.line}\`` })
+        return { range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn), contents: lines }
+      },
+    })
+    hoverDisposableRef.current = disposable
+    return () => {
+      disposable.dispose()
+      hoverDisposableRef.current = null
+    }
+  }, [uid])
+
   // 文件切换时：保存旧文件的视口状态（在内容加载前执行）
   useEffect(() => {
     const prev = currentFileRef.current
@@ -638,6 +669,9 @@ export function SourceView({ uid }: SourceViewProps) {
       modelsRef.current.clear()
       viewStatesRef.current.clear()
       decorationIdsRef.current = []
+      // 释放 hover provider，避免重复注册
+      hoverDisposableRef.current?.dispose()
+      hoverDisposableRef.current = null
       dirtyMapRef.current.clear()
       setDirty(false)
       setEditing(false)
@@ -804,7 +838,8 @@ export function SourceView({ uid }: SourceViewProps) {
             automaticLayout: true,
             glyphMargin: true,
             folding: true,
-            minimap: { enabled: false },
+            // 第三优先级改造：开启 minimap（右侧缩略图，可点击/拖拽跳转）
+            minimap: { enabled: true, size: 'fit', maxColumn: 120, renderCharacters: true, showSlider: 'mouseover' },
             fontSize: 12,
             lineHeight: 20,
             fontFamily: "'JetBrainsMono', Consolas, 'Courier New', monospace",
@@ -812,11 +847,14 @@ export function SourceView({ uid }: SourceViewProps) {
             // 第一优先级改造：开启当前行高亮（只高亮光标所在行，不与 PC 行装饰叠加冲突）
             renderLineHighlight: 'line',
             contextmenu: false,
-            quickSuggestions: false,
-            wordBasedSuggestions: 'off',
-            suggestOnTriggerCharacters: false,
-            parameterHints: { enabled: false },
+            // 第二优先级改造：编辑体验 —— 仅在编辑模式下启用补全、自动闭合括号、多光标
+            quickSuggestions: editing ? { other: true, comments: false, strings: false } : false,
+            wordBasedSuggestions: editing ? 'currentDocument' : 'off',
+            suggestOnTriggerCharacters: editing,
+            parameterHints: { enabled: editing },
             snippetSuggestions: 'none',
+            autoClosingBrackets: editing ? 'languageDefined' : 'never',
+            multiCursorModifier: 'ctrlCmd',
             // 第一优先级改造：开启选中词 / 光标词高亮（VS Code 默认体验；singleFile 只高亮当前文件内出现位）
             selectionHighlight: true,
             occurrencesHighlight: 'singleFile',
