@@ -496,14 +496,13 @@ class DwarfLocals:
 
     def _read_word(self, addr, size, regs):
         if self._read_mem is None:
-            return 0
-        try:
-            data = self._read_mem(addr, size)
-            if data and len(data) >= size:
-                return int.from_bytes(data[:size], "little")
-        except Exception:
-            pass
-        return 0
+            raise RuntimeError("memory read unavailable")
+        # 读取失败直接抛出，由 _eval_var 捕获并置 available=False，
+        # 避免把失败误报为值 0（如目标运行中禁止读取时）。
+        data = self._read_mem(addr, size)
+        if data and len(data) >= size:
+            return int.from_bytes(data[:size], "little")
+        raise RuntimeError("short memory read")
 
     @staticmethod
     def _to_num(kind, value, regs):

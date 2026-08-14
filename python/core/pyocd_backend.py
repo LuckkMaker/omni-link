@@ -1587,13 +1587,26 @@ class PyOCDBackend(BackendInterface):
             return False
 
     def read_memory(self, probe_uid: str, address: int, size: int) -> bytes:
-        """读取内存"""
+        """读取内存（自动 halt，通过内存缓存层）"""
         session = self._get_session(probe_uid)
         if not session:
             raise RuntimeError("Not connected")
 
         session.target.halt()
         return bytes(session.target.read_memory_block8(address, size))
+
+    def read_memory_direct(self, probe_uid: str, address: int, size: int) -> bytes:
+        """直接读取内存（不 halt、不经过缓存层），仅适用于目标已暂停场景。
+
+        与 read_memory 的区别：
+          - 不调用 session.target.halt()：避免在已暂停目标上产生不必要的状态变更
+          - 通过 core 的 AP 直接读取，绕过 MemoryCache 缓存层，确保返回最新值
+        """
+        session = self._get_session(probe_uid)
+        if not session:
+            raise RuntimeError("Not connected")
+        core = session.target.selected_core_or_raise
+        return bytes(core.read_memory_block8(address, size))
 
     # ── 清理 ──────────────────────────────────────────────
 

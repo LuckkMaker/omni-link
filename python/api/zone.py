@@ -494,7 +494,12 @@ async def zone_hover(uid: str, req: HoverRequest):
             state = "disconnected"
 
     def read_mem(addr: int, length: int) -> bytes:
-        return backend.read_memory(uid, addr, length)
+        # 目标未暂停时禁止内存读取（避免 read_memory 内部 halt 的副作用）：
+        # 抛出异常让变量解析失败 → available=False，前端显示"暂停后才能读取"提示。
+        if state != "halted":
+            raise RuntimeError("target not halted")
+        # 已暂停：直接读物理内存，绕过缓存层，确保返回当前值
+        return backend.read_memory_direct(uid, addr, length)
 
     info = await asyncio.to_thread(
         elf_backend.resolve_hover_info, uid, req.name, pc, regs, read_mem

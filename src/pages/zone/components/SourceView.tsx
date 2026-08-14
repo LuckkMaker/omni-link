@@ -789,7 +789,7 @@ export function SourceView({ uid }: SourceViewProps) {
 
         // ── 主行：按调试 hover 格式 ──
         if (info?.kind === 'function') {
-          lines.push({ value: `**[函数 = ${fmtAddr(info.address ?? 0)}]**` })
+          lines.push({ value: `**[${info.name} = ${fmtAddr(info.address ?? 0)}]**` })
         } else if (info?.kind === 'register') {
           if (info.available) {
             lines.push({ value: `**[寄存器 = ${fmtValue(info.value, 32)}]**` })
@@ -830,7 +830,6 @@ export function SourceView({ uid }: SourceViewProps) {
             lines.push({ value: `参数: ${s.params.map((p) => `\`${p}\``).join(', ')}` })
           }
           if (s.size != null) lines.push({ value: `size: ${s.size} bytes` })
-          if (s.function) lines.push({ value: `所属函数: \`${s.function}\`` })
           if (s.file && s.line != null) lines.push({ value: `定义于: \`${s.file}:${s.line}\`` })
         }
 
