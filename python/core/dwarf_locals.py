@@ -102,6 +102,190 @@ def _read_sleb(data, i):
     return result, i
 
 
+# ── C 表达式词法 / 语法（供 Watch 面板表达式求值） ──────────
+# 支持：标识符、. 成员访问、-> 指针成员、[i] 下标、* 解引用、& 取址、括号。
+# 不做完整 C 语法（无函数调用、无类型转换、无算术运算）。
+
+class _Token:
+    __slots__ = ("kind", "value")
+
+    def __init__(self, kind, value):
+        self.kind = kind  # 'ident' | 'int' | 'op'
+        self.value = value
+
+
+def _tokenize(expr):
+    """将表达式拆为 token 列表；含非法字符返回 None。"""
+    tokens = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        c = expr[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c.isalpha() or c == "_":
+            j = i
+            while j < n and (expr[j].isalnum() or expr[j] == "_"):
+                j += 1
+            tokens.append(_Token("ident", expr[i:j]))
+            i = j
+            continue
+        if c.isdigit():
+            j = i
+            if expr[j] == "0" and j + 1 < n and expr[j + 1] in "xX":
+                j += 2
+                while j < n and (expr[j].isdigit() or expr[j].lower() in "abcdef"):
+                    j += 1
+                tokens.append(_Token("int", int(expr[i:j], 16)))
+            else:
+                while j < n and expr[j].isdigit():
+                    j += 1
+                tokens.append(_Token("int", int(expr[i:j], 10)))
+            i = j
+            continue
+        if c == "-" and i + 1 < n and expr[i + 1] == ">":
+            tokens.append(_Token("op", "->"))
+            i += 2
+            continue
+        if c in ".[]*&()":
+            tokens.append(_Token("op", c))
+            i += 1
+            continue
+        return None
+    return tokens
+
+
+class _Var:
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
+
+
+class _Const:
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _Member:
+    __slots__ = ("operand", "name")
+
+    def __init__(self, operand, name):
+        self.operand = operand
+        self.name = name
+
+
+class _Index:
+    __slots__ = ("operand", "index")
+
+    def __init__(self, operand, index):
+        self.operand = operand
+        self.index = index
+
+
+class _Deref:
+    __slots__ = ("operand",)
+
+    def __init__(self, operand):
+        self.operand = operand
+
+
+class _Addr:
+    __slots__ = ("operand",)
+
+    def __init__(self, operand):
+        self.operand = operand
+
+
+class _ExprParser:
+    """递归下降解析器：expr := unary；unary := ('*'|'&') unary | postfix；
+    postfix := primary ('.' ident | '->' ident | '[' int ']')*；primary := ident | int | '(' expr ')'。"""
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.pos = 0
+
+    def _peek(self):
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+
+    def _next(self):
+        t = self.tokens[self.pos] if self.pos < len(self.tokens) else None
+        if t is not None:
+            self.pos += 1
+        return t
+
+    def _expect_op(self, op):
+        t = self._next()
+        if t is None or t.kind != "op" or t.value != op:
+            raise ValueError(f"expected {op}")
+
+    def parse(self):
+        node = self._parse_expr()
+        if self.pos != len(self.tokens):
+            raise ValueError("trailing tokens")
+        return node
+
+    def _parse_expr(self):
+        return self._parse_unary()
+
+    def _parse_unary(self):
+        t = self._peek()
+        if t is not None and t.kind == "op":
+            if t.value == "*":
+                self._next()
+                return _Deref(self._parse_unary())
+            if t.value == "&":
+                self._next()
+                return _Addr(self._parse_unary())
+        return self._parse_postfix()
+
+    def _parse_postfix(self):
+        node = self._parse_primary()
+        while True:
+            t = self._peek()
+            if t is None or t.kind != "op":
+                break
+            if t.value == ".":
+                self._next()
+                name = self._next()
+                if name is None or name.kind != "ident":
+                    raise ValueError("expected member name")
+                node = _Member(node, name.value)
+            elif t.value == "->":
+                self._next()
+                name = self._next()
+                if name is None or name.kind != "ident":
+                    raise ValueError("expected member name")
+                node = _Member(_Deref(node), name.value)
+            elif t.value == "[":
+                self._next()
+                idx = self._next()
+                if idx is None or idx.kind != "int":
+                    raise ValueError("expected index")
+                self._expect_op("]")
+                node = _Index(node, idx.value)
+            else:
+                break
+        return node
+
+    def _parse_primary(self):
+        t = self._next()
+        if t is None:
+            raise ValueError("unexpected end")
+        if t.kind == "ident":
+            return _Var(t.value)
+        if t.kind == "int":
+            return _Const(t.value)
+        if t.kind == "op" and t.value == "(":
+            node = self._parse_expr()
+            self._expect_op(")")
+            return node
+        raise ValueError("unexpected token")
+
+
 class DwarfLocals:
     """按 ELF 构建 函数地址 → 变量/签名 索引，并提供位置表达式求值。"""
 
@@ -582,6 +766,227 @@ class DwarfLocals:
         cfa = regs.get("sp") or 0
         return self._eval_var(var, 0, regs, 0, cfa)
 
+    # ── C 表达式求值（Watch 面板） ──────────────
+
+    def _find_var(self, address, name, regs, pc):
+        """在当前函数找局部变量/形参，找不到再找全局变量。返回 VarInfo 或 None。"""
+        func = self._funcs.get(address)
+        if func is None:
+            func = self._nearest_func(address)
+        if func is not None:
+            for var in list(func.args) + list(func.locals):
+                if var.name == name:
+                    return var
+        return self._globals.get(name)
+
+    def _var_location(self, var, pc, regs, cfa):
+        """求值变量位置表达式，返回变量所在内存地址；寄存器/常量定位返回 None。"""
+        try:
+            if var.location[0] == "loclist":
+                expr = self._loc_expr_for_pc(var.location[1], pc, regs)
+            else:
+                expr = var.location[1]
+            if not expr:
+                return None
+            kind_val, val = self._eval_expr(expr, regs, cfa, cfa)
+            if kind_val == "addr":
+                return val
+        except Exception:
+            pass
+        return None
+
+    def _peel_type(self, die, depth=0):
+        """穿透 typedef/const/volatile/restrict 返回实际类型 DIE。"""
+        while die is not None and die.tag in (_TAG_CONST, _TAG_VOLATILE, _TAG_RESTRICT, _TAG_TYPEDEF):
+            if "DW_AT_type" not in die.attributes or depth > 12:
+                break
+            die = die.get_DIE_from_attribute("DW_AT_type")
+            depth += 1
+        return die
+
+    def _member_info(self, type_die, name):
+        """在 struct/union 类型 DIE 中按成员名找 (offset, member_type_die)；非结构体/未找到返回 None。"""
+        die = self._peel_type(type_die)
+        if die is None or die.tag not in (_TAG_STRUCT, _TAG_UNION):
+            return None
+        for child in die.iter_children():
+            if child.tag != _TAG_MEMBER:
+                continue
+            mname = (_to_str(child.attributes["DW_AT_name"].value)
+                     if "DW_AT_name" in child.attributes else "")
+            if mname != name:
+                continue
+            if "DW_AT_type" not in child.attributes:
+                return None
+            off = self._member_offset(child)
+            if off is None:
+                return None
+            return (off, child.get_DIE_from_attribute("DW_AT_type"))
+        return None
+
+    def _array_elem(self, type_die):
+        """返回数组元素类型 DIE；非数组返回 None。"""
+        die = self._peel_type(type_die)
+        if die is None or die.tag != _TAG_ARRAY:
+            return None
+        if "DW_AT_type" in die.attributes:
+            return die.get_DIE_from_attribute("DW_AT_type")
+        return None
+
+    def _eval_loc(self, node, address, regs, pc, cfa):
+        """求值表达式节点为 location。
+
+        Returns:
+            ('value', int) 纯值（寄存器/常量/取址）
+            ('addr', int, type_die, name) 内存地址 + 类型 DIE
+            None 无法求值
+        """
+        if isinstance(node, _Const):
+            return ("value", node.value)
+        if isinstance(node, _Var):
+            name = node.name
+            if name.lower() in _REG_NAMES.values():
+                v = regs.get(name.lower())
+                if isinstance(v, int):
+                    return ("value", int(v))
+                return None
+            var = self._find_var(address, name, regs, pc)
+            if var is None:
+                return None
+            addr = self._var_location(var, pc, regs, cfa)
+            if addr is None:
+                return None
+            return ("addr", addr, var.type_die, name)
+        if isinstance(node, _Addr):
+            inner = self._eval_loc(node.operand, address, regs, pc, cfa)
+            if inner is None:
+                return None
+            if inner[0] == "addr":
+                return ("value", inner[1])
+            return None
+        if isinstance(node, _Deref):
+            inner = self._eval_loc(node.operand, address, regs, pc, cfa)
+            if inner is None:
+                return None
+            if inner[0] == "value":
+                # 解引用裸值：从地址读 4 字节，无类型信息
+                ptr = inner[1]
+                if ptr is None or ptr == 0:
+                    return None
+                return ("addr", ptr, None, "??")
+            addr, type_die, name = inner[1], inner[2], inner[3]
+            pdie = self._peel_type(type_die)
+            if pdie is None or pdie.tag != _TAG_POINTER:
+                return None
+            ptr = self._read_word(addr, 4, regs)
+            if "DW_AT_type" not in pdie.attributes:
+                return ("addr", ptr, None, name)
+            pointee = pdie.get_DIE_from_attribute("DW_AT_type")
+            return ("addr", ptr, pointee, name)
+        if isinstance(node, _Member):
+            inner = self._eval_loc(node.operand, address, regs, pc, cfa)
+            if inner is None or inner[0] != "addr":
+                return None
+            addr, type_die, name = inner[1], inner[2], inner[3]
+            # 自动解引用指针（C 中 pointer.field 等价于 (*pointer).field）
+            pdie = self._peel_type(type_die)
+            if pdie is not None and pdie.tag == _TAG_POINTER:
+                if "DW_AT_type" not in pdie.attributes:
+                    return None
+                ptr = self._read_word(addr, 4, regs)
+                if ptr is None or ptr == 0:
+                    return None
+                pointee = pdie.get_DIE_from_attribute("DW_AT_type")
+                addr = ptr
+                type_die = pointee
+            info = self._member_info(type_die, node.name)
+            if info is None:
+                return None
+            off, mdie = info
+            return ("addr", addr + off, mdie, node.name)
+        if isinstance(node, _Index):
+            inner = self._eval_loc(node.operand, address, regs, pc, cfa)
+            if inner is None or inner[0] != "addr":
+                return None
+            addr, type_die, name = inner[1], inner[2], inner[3]
+            edie = self._array_elem(type_die)
+            if edie is None:
+                return None
+            elem_size = (self._resolve_type(edie)[1] or 1)
+            return ("addr", addr + node.index * elem_size, edie, name)
+        return None
+
+    def resolve_expr(self, address, expr, regs, read_mem, pc=None):
+        """解析 C 表达式（var.field / arr[i] / *ptr / &x / ptr->field）并读取当前值。
+
+        Args:
+            address: 帧内地址（函数入口或函数内任意 PC）
+            expr: 表达式字符串
+            regs: 当前寄存器
+            read_mem: callable(addr, length) -> bytes
+            pc: 位置列表 PC 匹配用（默认 address）
+
+        Returns:
+            {name, type, value, address, available, is_param, bit_size, kind, children} 或 None
+        """
+        tokens = _tokenize(expr)
+        if not tokens:
+            return None
+        try:
+            node = _ExprParser(tokens).parse()
+        except Exception:
+            return None
+        self._read_mem = read_mem
+        pc = pc if pc is not None else address
+        cfa = regs.get("sp") or 0
+
+        try:
+            loc = self._eval_loc(node, address, regs, pc, cfa)
+        except Exception:
+            return None
+        if loc is None:
+            return None
+        if loc[0] == "value":
+            return {
+                "name": expr,
+                "type": "",
+                "value": loc[1],
+                "available": True,
+                "bit_size": 32,
+                "kind": "scalar",
+                "children": None,
+                "address": None,
+            }
+        addr, type_die, name = loc[1], loc[2], loc[3]
+        if type_die is None:
+            try:
+                raw = self._read_word(addr, 4, regs)
+                return {
+                    "name": expr, "type": "", "value": raw, "available": True,
+                    "bit_size": 32, "kind": "scalar", "children": None, "address": addr,
+                }
+            except Exception:
+                return {
+                    "name": expr, "type": "", "available": False,
+                    "bit_size": 32, "kind": "scalar", "children": None, "address": addr,
+                }
+        try:
+            node_dict = self._build_value_node(type_die, addr, regs, name)
+        except Exception:
+            node_dict = None
+        if node_dict:
+            node_dict["name"] = expr
+            return node_dict
+        # 构建失败（如目标运行中禁止读取）：返回地址 + 不可用
+        try:
+            type_name = self._resolve_type(type_die)[0]
+        except Exception:
+            type_name = ""
+        return {
+            "name": expr, "type": type_name, "available": False,
+            "bit_size": 32, "kind": "scalar", "children": None, "address": addr,
+        }
+
     def _eval_var(self, var, pc, regs, frame_base, cfa):
         size = var.type_size or 4
         kind = "scalar"
@@ -615,6 +1020,11 @@ class DwarfLocals:
                         base["children"] = sub["children"]
                         base["kind"] = sub["kind"] or kind
                         base["available"] = True
+                        # 透传字符串/浮点显示值（char 数组 / 结构体含浮点成员等）
+                        if sub.get("str_value") is not None:
+                            base["str_value"] = sub["str_value"]
+                        if sub.get("float_value") is not None:
+                            base["float_value"] = sub["float_value"]
                     return base
                 raw = self._read_word(val, size, regs)
             elif kind_val == "reg":
@@ -623,9 +1033,24 @@ class DwarfLocals:
                 raw = val
             base["value"] = raw
             base["available"] = True
+            # 浮点标量：按 IEEE754 解析显示值（仅内存定位时）
+            if kind == "scalar" and kind_val == "addr" and var.type_die is not None:
+                try:
+                    tn = self._resolve_type(var.type_die)[0]
+                    if tn in ("float", "double"):
+                        base["float_value"] = self._read_float(val, size)
+                except Exception:
+                    pass
             # 指针：若指向 struct/array 且指针值有效，解引用展开目标成员/元素
             if kind == "pointer":
                 self._attach_pointer_children(base, var.type_die, raw, regs)
+            # char* 指针：读取指向的字符串
+            if kind == "pointer" and raw and var.type_die is not None:
+                try:
+                    if self._is_char_type(self._pointee_die(var.type_die)):
+                        base["str_value"] = self._read_string(raw, regs)
+                except Exception:
+                    pass
         except Exception:
             pass
         return base
@@ -738,6 +1163,12 @@ class DwarfLocals:
                 elem_die = die.get_DIE_from_attribute("DW_AT_type")
             count = self._array_count(die)
             elem_size = (self._resolve_type(elem_die)[1] if elem_die else 1) or 1
+            # char 数组：读取为字符串（str_value），同时保留数组展开能力
+            if self._is_char_type(elem_die):
+                try:
+                    node["str_value"] = self._read_string(addr, regs)
+                except Exception:
+                    pass
             children = []
             for i in range(count):
                 sub = self._build_value_node(elem_die, addr + i * elem_size, regs, f"[{i}]", depth + 1)
@@ -749,10 +1180,92 @@ class DwarfLocals:
             node["kind"] = "pointer"
             ptr = self._read_word(addr, 4, regs)
             node["value"] = ptr
+            # char*：读取指向的字符串
+            if ptr and self._is_char_type(self._pointee_die(die)):
+                try:
+                    node["str_value"] = self._read_string(ptr, regs)
+                except Exception:
+                    pass
             self._attach_pointer_children(node, die, ptr, regs, depth + 1)
         else:
-            node["value"] = self._read_word(addr, size or 4, regs)
+            if type_name in ("float", "double"):
+                # 浮点：按 IEEE754 解析，value 保留原始位模式（供 hex 显示）
+                node["value"] = self._read_word(addr, size or 4, regs)
+                try:
+                    node["float_value"] = self._read_float(addr, size or 4)
+                except Exception:
+                    pass
+            else:
+                node["value"] = self._read_word(addr, size or 4, regs)
         return node
+
+    def _pointee_die(self, die):
+        """穿透 typedef/const/volatile/restrict 返回指针指向的类型 DIE；非指针返回 None。"""
+        d = die
+        depth = 0
+        while d.tag in (_TAG_CONST, _TAG_VOLATILE, _TAG_RESTRICT, _TAG_TYPEDEF):
+            if "DW_AT_type" not in d.attributes or depth > 12:
+                return None
+            d = d.get_DIE_from_attribute("DW_AT_type")
+            depth += 1
+        if d.tag != _TAG_POINTER:
+            return None
+        if "DW_AT_type" not in d.attributes:
+            return None
+        return d.get_DIE_from_attribute("DW_AT_type")
+
+    def _is_char_type(self, die):
+        """判断类型是否为 char（穿透 typedef/const/volatile/restrict）。"""
+        if die is None:
+            return False
+        d = die
+        depth = 0
+        while d.tag in (_TAG_CONST, _TAG_VOLATILE, _TAG_RESTRICT, _TAG_TYPEDEF):
+            if "DW_AT_type" not in d.attributes or depth > 12:
+                return False
+            d = d.get_DIE_from_attribute("DW_AT_type")
+            depth += 1
+        if d.tag != _TAG_BASE_TYPE:
+            return False
+        nm = _to_str(d.attributes.get("DW_AT_name").value) if "DW_AT_name" in d.attributes else ""
+        return nm in ("char", "signed char", "unsigned char")
+
+    def _read_string(self, addr, regs, max_len=128):
+        """从 addr 读取以 \\0 结尾的字符串（最多 max_len 字节）。"""
+        _ = regs
+        if self._read_mem is None or not addr:
+            raise RuntimeError("memory read unavailable")
+        data = self._read_mem(addr, max_len)
+        if not data:
+            raise RuntimeError("short memory read")
+        end = data.find(b"\x00")
+        if end < 0:
+            end = len(data)
+        raw = data[:end]
+        # 可打印字符才作为字符串显示，否则抛错回退到十六进制
+        if not raw:
+            raise RuntimeError("empty string")
+        try:
+            s = raw.decode("utf-8", "replace")
+        except Exception:
+            raise RuntimeError("not utf-8")
+        if any(ord(c) < 0x20 and c not in "\t" for c in s):
+            raise RuntimeError("not printable")
+        return s
+
+    def _read_float(self, addr, size):
+        """按 IEEE754 解析内存为浮点数（float=4 字节 / double=8 字节）。"""
+        import struct
+        if self._read_mem is None:
+            raise RuntimeError("memory read unavailable")
+        data = self._read_mem(addr, size)
+        if not data or len(data) < size:
+            raise RuntimeError("short memory read")
+        if size == 4:
+            return struct.unpack("<f", data[:4])[0]
+        if size == 8:
+            return struct.unpack("<d", data[:8])[0]
+        raise RuntimeError("unsupported float size")
 
     @staticmethod
     def _member_offset(child):

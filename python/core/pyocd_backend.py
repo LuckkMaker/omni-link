@@ -1608,6 +1608,26 @@ class PyOCDBackend(BackendInterface):
         core = session.target.selected_core_or_raise
         return bytes(core.read_memory_block8(address, size))
 
+    def write_memory_direct(self, probe_uid: str, address: int, data: bytes) -> None:
+        """直接写内存（不 halt、不经过缓存层），仅适用于目标已暂停场景。
+
+        与 read_memory_direct 对称：通过 core 的 AP 直接写入，绕过 MemoryCache 缓存层，
+        避免写入后缓存仍返回旧值导致回显不一致。
+        """
+        session = self._get_session(probe_uid)
+        if not session:
+            raise RuntimeError("Not connected")
+        core = session.target.selected_core_or_raise
+        core.write_memory_block8(address, data)
+
+    def write_core_register(self, probe_uid: str, name: str, value: int) -> None:
+        """写核心寄存器（仅目标暂停时有效）。"""
+        session = self._get_session(probe_uid)
+        if not session:
+            raise RuntimeError("Not connected")
+        core = session.target.selected_core_or_raise
+        core.write_core_register(name.lower(), value)
+
     # ── 清理 ──────────────────────────────────────────────
 
     def cleanup(self):

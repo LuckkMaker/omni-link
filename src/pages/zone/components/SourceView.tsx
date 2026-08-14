@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
+import { useNotificationStore } from '@/stores/notification.store'
 import * as zoneService from '@/services/zone.service'
 import type { HoverInfo, SourceSymbol } from '@/services/zone.service'
 import { monaco, monacoLangFor, applyOmniTheme, isDarkTheme, type MonacoThemeName } from '@/lib/monaco-setup'
@@ -229,6 +230,8 @@ export function SourceView({ uid }: SourceViewProps) {
   const navGoto = useZoneStore((s) => s.navGoto)
   const clearGoto = useZoneStore((s) => s.clearGoto)
   const gotoSource = useZoneStore((s) => s.gotoSource)
+  const addWatchItemToTab = useZoneStore((s) => s.addWatchItemToTab)
+  const watchTabs = useZoneStore((s) => s.watchTabs)
 
   // ── 渲染 / 交互状态 ──────────────────────────────
   const [loading, setLoading] = useState(false)
@@ -502,6 +505,23 @@ export function SourceView({ uid }: SourceViewProps) {
     setCodeMenu(null)
     void goToReferencesWord(word, x, y)
   }, [codeMenu, goToReferencesWord])
+
+  // 添加到 Watch：将悬停/右键的标识符加入 Watch 列表（默认添加到 Watch1）
+  const addToWatch = useCallback(() => {
+    const word = codeMenu?.word ?? ''
+    setCodeMenu(null)
+    if (!word) return
+    // 多 tab 时默认添加到 Watch1（首个页签），与 Watch 面板 Enter 行为一致
+    const targetTabId = watchTabs[0]?.id ?? ''
+    const added = targetTabId ? addWatchItemToTab(targetTabId, word) : false
+    useNotificationStore.getState().push({
+      type: added ? 'success' : 'warning',
+      title: added ? '已添加到 Watch1' : '已在 Watch 列表中',
+      message: word,
+      autoClose: true,
+      autoCloseDelay: 2000,
+    })
+  }, [codeMenu, addWatchItemToTab, watchTabs])
 
   // Peek 定义：将光标移到触发词后触发 Monaco 原生 peek（依赖上面注册的 DefinitionProvider）
   const peekDefinitionAt = useCallback((pos: { lineNumber: number; column: number } | null) => {
@@ -1575,6 +1595,8 @@ export function SourceView({ uid }: SourceViewProps) {
             onClick={() => void goToReferences()}
             disabled={!codeMenu.word}
           />
+          <MenuSeparator />
+          <MenuItem label="添加到 Watch" onClick={addToWatch} disabled={!codeMenu.word} />
           <MenuSeparator />
           <MenuItem label="全选" shortcut="Ctrl+A" onClick={selectAll} />
         </div>

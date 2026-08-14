@@ -350,6 +350,89 @@ export async function zoneHoverInfo(
   return data
 }
 
+// ── Watch 观察项求值 ──────────────────────────
+
+/** Watch 观察项求值结果（与 HoverInfo 一致，额外携带 children 供展开显示） */
+export interface WatchEvalInfo {
+  /** 类别：register 寄存器 / function 函数 / variable 变量 */
+  kind: 'register' | 'function' | 'variable'
+  name: string
+  /** 函数地址 / 变量所在地址 */
+  address?: number
+  /** 变量当前值（available 为 true 时有效） */
+  value?: number | null
+  /** 变量类型名 */
+  type?: string
+  /** 变量值是否成功读取 */
+  available?: boolean
+  /** 变量位宽（字节数 × 8），用于按位宽补齐显示 */
+  bit_size?: number
+  /** 符号大小（字节数） */
+  size?: number
+  /** 变量类别：scalar 标量 / struct 结构体 / array 数组 / pointer 指针 */
+  var_kind?: 'scalar' | 'struct' | 'array' | 'pointer'
+  /** 函数符号的 DWARF 签名（返回类型 f(参数类型...)，kind=function 时有效） */
+  signature?: string | null
+  /** 结构体成员 / 数组元素（var_kind 为 struct/array 时非空） */
+  children?: CallStackLocal[]
+  /** char 数组/指针的字符串值（如 "hello"） */
+  str_value?: string
+  /** float/double 浮点值 */
+  float_value?: number
+}
+
+/** Watch 观察项求值：按表达式解析 函数/局部变量/全局变量/寄存器 当前值 */
+export async function zoneWatchEval(
+  uid: string,
+  name: string
+): Promise<{ success: boolean; state?: 'disconnected' | 'running' | 'halted'; info?: WatchEvalInfo | null }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/watch/eval`, { name })
+  return data
+}
+
+/** Locals 页签：当前函数局部变量/形参结果 */
+export interface LocalsResult {
+  success: boolean
+  state?: 'disconnected' | 'running' | 'halted'
+  locals?: {
+    signature?: string
+    ret?: string
+    variables?: CallStackLocal[]
+  } | null
+}
+
+/** 当前函数局部变量/形参（随 PC 变化自动切换） */
+export async function zoneLocals(uid: string): Promise<LocalsResult> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/locals`)
+  return data
+}
+
+/** Watch 值编辑请求：按地址写内存或按名写寄存器 */
+export interface WatchSetRequest {
+  /** 目标：address 内存地址 / register 寄存器名 */
+  target: 'address' | 'register'
+  /** 内存地址（target=address 时必填） */
+  address?: number
+  /** 位宽字节数（target=address 时，默认 4） */
+  size?: number
+  /** 寄存器名（target=register 时必填） */
+  name?: string
+  /** 要写入的值 */
+  value: number
+}
+
+/** Watch 值编辑：写内存/寄存器，写后立即重读回显 */
+export async function zoneWatchSet(
+  uid: string,
+  req: WatchSetRequest
+): Promise<{ success: boolean; error?: string; value?: number }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/watch/set`, req)
+  return data
+}
+
 /** 源文件搜索结果（转到引用） */
 export interface SourceSearchHit {
   file: string
@@ -423,6 +506,10 @@ export interface CallStackLocal {
   kind?: 'scalar' | 'struct' | 'array' | 'pointer'
   /** 结构体成员 / 数组元素（kind 为 struct/array 时非空） */
   children?: CallStackLocal[]
+  /** char 数组/指针的字符串值（如 "hello"） */
+  str_value?: string
+  /** float/double 浮点值 */
+  float_value?: number
 }
 
 /** 调用栈帧 */

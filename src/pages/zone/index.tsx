@@ -309,7 +309,11 @@ export default function ZonePage() {
                 <CallStackPanel uid={uid} connected={isConnected} />
               </div>
               <div className={cn('min-h-0 flex-1', bottomTab !== 'watch' && 'hidden')}>
-                <WatchPanel uid={uid} connected={isConnected} />
+                <WatchPanel
+                  uid={uid}
+                  connected={isConnected}
+                  onShowMemory={() => setBottomTab('memory')}
+                />
               </div>
               <div className={cn('min-h-0 flex-1', bottomTab !== 'memory' && 'hidden')}>
                 <MemoryPanel uid={uid} connected={isConnected} />

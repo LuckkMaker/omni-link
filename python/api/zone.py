@@ -88,6 +88,15 @@ class HoverRequest(BaseModel):
     name: str
 
 
+class WatchSetRequest(BaseModel):
+    """Watch 值编辑：按地址写内存或按名写寄存器"""
+    target: str  # 'address' | 'register'
+    address: Optional[int] = None  # target=address 时必填
+    size: int = 4  # 位宽字节数（target=address 时，默认 4）
+    name: Optional[str] = None  # target=register 时必填
+    value: int
+
+
 # ── 调试控制 ──────────────────────────────
 
 @router.post("/probes/{uid}/zone/debug/halt")
@@ -505,6 +514,144 @@ async def zone_hover(uid: str, req: HoverRequest):
         elf_backend.resolve_hover_info, uid, req.name, pc, regs, read_mem
     )
     return {"success": True, "state": state, "info": info}
+
+
+@router.post("/probes/{uid}/zone/watch/eval")
+async def zone_watch_eval(uid: str, req: HoverRequest):
+    """Watch 观察项求值：按表达式解析 函数/局部变量/全局变量/寄存器 当前值。
+
+    支持 C 表达式（var.field / arr[i] / *ptr / &x / ptr->field）。
+    返回结构携带 children（struct/array 子节点树），供 Watch 面板展开显示；
+    DWARF 中找到但读取失败（如目标运行中）的变量仍返回 available=False 条目，
+    便于前端显示「运行中/不可用」。
+    """
+    if not elf_backend.is_loaded(uid):
+        return {"success": True, "state": "disconnected", "info": None}
+
+    # 读取当前寄存器（目标暂停时才有意义；运行中/未连接 regs 为空，变量解析会失败）
+    regs: dict = {}
+    pc = None
+    state = "disconnected"
+    session = backend._get_session(uid)
+    if session is not None:
+        try:
+            core = session.target.selected_core_or_raise
+            if session.target.is_halted():
+                state = "halted"
+                for name in _HOVER_REG_NAMES:
+                    try:
+                        value = core.read_core_register(name)
+                        regs[name] = int(value) if isinstance(value, float) else value
+                    except Exception:
+                        pass
+                pc = regs.get("pc")
+            else:
+                state = "running"
+        except Exception:
+            state = "disconnected"
+
+    def read_mem(addr: int, length: int) -> bytes:
+        # 目标未暂停时禁止内存读取（避免 read_memory 内部 halt 的副作用）：
+        # 抛出异常让变量解析失败 → available=False，前端显示"暂停后才能读取"提示。
+        if state != "halted":
+            raise RuntimeError("target not halted")
+        # 已暂停：直接读物理内存，绕过缓存层，确保返回当前值
+        return backend.read_memory_direct(uid, addr, length)
+
+    info = await asyncio.to_thread(
+        elf_backend.resolve_watch_expr, uid, req.name, pc, regs, read_mem
+    )
+    return {"success": True, "state": state, "info": info}
+
+
+@router.post("/probes/{uid}/zone/locals")
+async def zone_locals(uid: str):
+    """当前函数局部变量/形参（Locals 页签数据源）。
+
+    返回当前 PC 所在函数的全部局部变量/形参（含 struct/array children），
+    随 PC 变化自动切换。目标运行中/未暂停时返回 state=running，locals=None。
+    """
+    if not elf_backend.is_loaded(uid):
+        return {"success": True, "state": "disconnected", "locals": None}
+
+    regs: dict = {}
+    pc = None
+    state = "disconnected"
+    session = backend._get_session(uid)
+    if session is not None:
+        try:
+            core = session.target.selected_core_or_raise
+            if session.target.is_halted():
+                state = "halted"
+                for name in _HOVER_REG_NAMES:
+                    try:
+                        value = core.read_core_register(name)
+                        regs[name] = int(value) if isinstance(value, float) else value
+                    except Exception:
+                        pass
+                pc = regs.get("pc")
+            else:
+                state = "running"
+        except Exception:
+            state = "disconnected"
+
+    def read_mem(addr: int, length: int) -> bytes:
+        if state != "halted":
+            raise RuntimeError("target not halted")
+        return backend.read_memory_direct(uid, addr, length)
+
+    locals_data = None
+    if pc is not None and pc != 0:
+        locals_data = await asyncio.to_thread(
+            elf_backend.frame_locals, uid, pc & ~1, regs, read_mem
+        )
+    return {"success": True, "state": state, "locals": locals_data}
+
+
+@router.post("/probes/{uid}/zone/watch/set")
+async def zone_watch_set(uid: str, req: WatchSetRequest):
+    """Watch 值编辑：按地址写内存或按名写寄存器。
+
+    仅目标暂停时允许写；写后立即重读回显（内存读回 / 寄存器读回），
+    避免缓存不一致导致前端显示旧值。
+    """
+    if not elf_backend.is_loaded(uid):
+        raise HTTPException(status_code=400, detail="No ELF loaded")
+    session = backend._get_session(uid)
+    if session is None:
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    try:
+        if not session.target.is_halted():
+            raise HTTPException(status_code=400, detail="Target not halted")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Target not available")
+
+    try:
+        if req.target == "address":
+            if req.address is None:
+                raise HTTPException(status_code=400, detail="address required")
+            size = max(1, min(8, req.size or 4))
+            data = int(req.value).to_bytes(size, "little", signed=False)
+            await asyncio.to_thread(backend.write_memory_direct, uid, req.address, data)
+            # 写后立即重读回显
+            raw = await asyncio.to_thread(backend.read_memory_direct, uid, req.address, size)
+            value = int.from_bytes(raw, "little")
+            return {"success": True, "value": value}
+        elif req.target == "register":
+            if not req.name:
+                raise HTTPException(status_code=400, detail="register name required")
+            await asyncio.to_thread(backend.write_core_register, uid, req.name, int(req.value))
+            # 写后立即重读回显
+            core = session.target.selected_core_or_raise
+            value = await asyncio.to_thread(core.read_core_register, req.name.lower())
+            return {"success": True, "value": int(value) if isinstance(value, float) else value}
+        else:
+            raise HTTPException(status_code=400, detail="invalid target")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("watch set failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/probes/{uid}/zone/source/search")

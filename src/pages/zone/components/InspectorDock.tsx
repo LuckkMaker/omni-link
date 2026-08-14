@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Loader2, AlertCircle, Cpu, Blocks, Binary, ChevronRight, ChevronDown, X, Plus } from 'lucide-react'
+import { Loader2, AlertCircle, Cpu, Blocks, Binary, ChevronRight, ChevronDown, X, Plus, Columns2 } from 'lucide-react'
 import { useZoneStore, type InspectorTabId } from '../store'
 import { useSessionReady } from '../hooks'
 import * as zoneService from '@/services/zone.service'
@@ -516,23 +516,29 @@ function ChevronDownGlyph({ open }: { open: boolean }) {
     : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
 }
 
-// ── 内存面板（底部 tab 使用；导出以便被 Zone 底部 tab 复用） ──
-export function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
+// ── 内存窗口视图（单窗口：工具栏 + Hex 内容，供单栏/分栏复用） ──
+interface MemoryWindowViewProps {
+  uid: string | null
+  connected: boolean
+  windowId: string
+  /** 分栏模式：顶部显示窗口选择器 */
+  showSelector?: boolean
+  onSelectWindow?: (id: string) => void
+}
+
+function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWindow }: MemoryWindowViewProps) {
   const { ready } = useSessionReady(uid, connected)
   const memoryWindows = useZoneStore((s) => s.memoryWindows)
-  const activeMemoryWindow = useZoneStore((s) => s.activeMemoryWindow)
-  const addMemoryWindow = useZoneStore((s) => s.addMemoryWindow)
-  const closeMemoryWindow = useZoneStore((s) => s.closeMemoryWindow)
-  const selectMemoryWindow = useZoneStore((s) => s.selectMemoryWindow)
   const updateMemoryWindow = useZoneStore((s) => s.updateMemoryWindow)
+  const win = memoryWindows.find((w) => w.id === windowId)
 
-  // 激活窗口（数据源：宽度/端序/格式/地址均来自窗口）
-  const active = memoryWindows.find((w) => w.id === activeMemoryWindow) ?? memoryWindows[0]
-  const byteWidth = active?.byteWidth ?? 1
-  const bigEndian = active?.bigEndian ?? false
+  const byteWidth = win?.byteWidth ?? 1
+  const bigEndian = win?.bigEndian ?? false
 
-  // 地址输入框（本地编辑，回车提交；允许 hex / 符号 / &var / var[下标]）
-  const [addrInput, setAddrInput] = useState(active?.address ?? '0x20000000')
+  // 地址输入框（纯 hex，本地编辑，回车提交）
+  const [addrInput, setAddrInput] = useState(win?.address ?? '0x20000000')
+  // 变量输入框（符号 / &var / var[下标]，回车解析并跳转）
+  const [varInput, setVarInput] = useState('')
   const [rows, setRows] = useState<{ address: number; bytes: number[]; ascii: string }[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -547,12 +553,12 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
 
   // 切换窗口时同步输入框
   useEffect(() => {
-    setAddrInput(active?.address ?? '0x20000000')
+    setAddrInput(win?.address ?? '0x20000000')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMemoryWindow])
+  }, [windowId])
 
   const refresh = useCallback(async () => {
-    if (!ready || !uid) {
+    if (!ready || !uid || !win) {
       setRows([])
       setError(null)
       return
@@ -560,7 +566,7 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
     const seq = ++refreshSeqRef.current
     setLoading(true)
     try {
-      const addr = parseInt(active.address, 16)
+      const addr = parseInt(win.address, 16)
       if (isNaN(addr)) throw new Error('无效地址')
       const res = await zoneService.zoneReadMemory(uid, addr & ~0xf, 256)
       // 已发起更新的刷新（res 过期）：丢弃本次结果，避免旧数据覆盖新数据
@@ -603,7 +609,7 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
     } finally {
       if (seq === refreshSeqRef.current) setLoading(false)
     }
-  }, [ready, uid, active.address])
+  }, [ready, uid, win])
 
   useAutoRefresh(uid, connected, ready, refresh)
 
@@ -612,84 +618,72 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
     if (ready) void refresh()
   }, [ready, refresh])
 
-  // 回车解析地址表达式（纯 hex 直接提交；符号/&var/var[下标] 走后端解析）
-  const handleAddrEnter = useCallback(async () => {
-    if (!uid) return
+  // 地址输入：仅接受纯 hex
+  const handleAddrEnter = useCallback(() => {
+    if (!uid || !win) return
     const expr = addrInput.trim()
     if (!expr) return
     if (/^(?:0x)?[0-9a-fA-F]{1,8}$/.test(expr)) {
       const hex = expr.startsWith('0x') ? expr : '0x' + expr
-      updateMemoryWindow(active.id, { address: hex })
+      updateMemoryWindow(win.id, { address: hex })
       setAddrInput(hex)
-      return
+    } else {
+      setError('地址仅支持十六进制（如 20000000 / 0x20000000）')
     }
+  }, [uid, addrInput, win, updateMemoryWindow])
+
+  // 变量输入：解析符号/表达式并跳转到其地址
+  const handleVarEnter = useCallback(async () => {
+    if (!uid || !win) return
+    const expr = varInput.trim()
+    if (!expr) return
     try {
       const res = await zoneService.zoneResolveMemoryAddress(uid, expr)
       if (res.address != null) {
         const hex = '0x' + res.address.toString(16).toUpperCase()
-        updateMemoryWindow(active.id, { address: hex })
+        updateMemoryWindow(win.id, { address: hex })
         setAddrInput(hex)
+        setVarInput('')
+        setError(null)
       } else {
-        setError(res.error || '无法解析地址')
+        setError(res.error || '无法解析变量地址')
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : '解析地址失败')
+      setError(e instanceof Error ? e.message : '解析变量地址失败')
     }
-  }, [uid, addrInput, active.id, updateMemoryWindow])
+  }, [uid, varInput, win, updateMemoryWindow])
 
   const readLength = rows.length * 16
   const startAddr = rows.length > 0 ? rows[0].address : NaN
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* 窗口 tab 栏：多窗口切换 + 新建 + 关闭（至少保留一个） */}
-      <div className="flex shrink-0 items-center border-b border-border">
-        {memoryWindows.map((w) => {
-          const isActive = w.id === active.id
-          return (
-            <div
-              key={w.id}
-              className={cn(
-                'group/tab flex items-center gap-1 border-r border-border px-2 py-1 text-xs',
-                isActive ? 'bg-muted/40 text-foreground' : 'text-muted-foreground hover:bg-muted/20'
-              )}
-            >
-              <button
-                onClick={() => selectMemoryWindow(w.id)}
-                className="font-mono"
-                title={w.address}
-              >
+      {/* 分栏模式：窗口选择器 */}
+      {showSelector && onSelectWindow && (
+        <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1">
+          <Columns2 className="size-3 shrink-0 text-muted-foreground" />
+          <select
+            value={windowId}
+            onChange={(e) => onSelectWindow(e.target.value)}
+            className="h-6 min-w-0 flex-1 rounded border border-border bg-background px-1 font-mono text-xs"
+          >
+            {memoryWindows.map((w) => (
+              <option key={w.id} value={w.id}>
                 {w.address}
-              </button>
-              {memoryWindows.length > 1 && (
-                <button
-                  onClick={() => closeMemoryWindow(w.id)}
-                  className="flex opacity-0 transition-opacity group-hover/tab:opacity-100 hover:text-red-500"
-                  title="关闭窗口"
-                >
-                  <X className="size-3" />
-                </button>
-              )}
-            </div>
-          )
-        })}
-        <button
-          onClick={() => addMemoryWindow()}
-          className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:bg-muted/20 hover:text-foreground"
-          title="新建窗口（复制当前设置）"
-        >
-          <Plus className="size-3.5" />
-        </button>
-      </div>
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
-      {/* 工具栏（参考 Flash FilePanel：字节宽度分段 + 端序 + 格式 + 地址跳转 + 右侧信息） */}
+      {/* 工具栏（字节宽度 + 端序 + 地址跳转 + 变量跳转 + 刷新 + 右侧信息） */}
       <div className="shrink-0 flex flex-wrap items-center gap-2 border-b border-border px-2 py-1.5">
         {/* 字节宽度切换 */}
         <div className="flex items-center rounded border border-border">
           {([1, 2, 4] as const).map((w) => (
             <button
               key={w}
-              onClick={() => updateMemoryWindow(active.id, { byteWidth: w })}
+              onClick={() => updateMemoryWindow(win?.id ?? '', { byteWidth: w })}
               className={cn(
                 'px-1.5 py-0.5 text-[11px] font-medium transition-colors',
                 byteWidth === w
@@ -707,7 +701,7 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
           {[{ v: false, l: 'LE' }, { v: true, l: 'BE' }].map((o) => (
             <button
               key={o.l}
-              onClick={() => updateMemoryWindow(active.id, { bigEndian: o.v })}
+              onClick={() => updateMemoryWindow(win?.id ?? '', { bigEndian: o.v })}
               className={cn(
                 'px-2 py-0.5 text-[11px] font-medium transition-colors',
                 bigEndian === o.v
@@ -720,23 +714,36 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
           ))}
         </div>
 
-        
-
         <div className="h-5 w-px bg-border mx-0.5" />
 
-        {/* 地址跳转 — 支持 hex / 符号 / &var / var[下标] */}
+        {/* 地址跳转（纯 hex） */}
         <div className="flex items-center h-6 rounded-md border border-border overflow-hidden">
           <span className="flex items-center px-1.5 h-full text-xs font-mono text-muted-foreground bg-muted/50 border-r border-border">0x</span>
           <input
             value={addrInput.startsWith('0x') ? addrInput.slice(2) : addrInput}
             onChange={(e) => setAddrInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void handleAddrEnter() }}
-            placeholder="20000000 / buf[0]"
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAddrEnter() }}
+            placeholder="20000000"
+            spellCheck={false}
+            autoComplete="off"
+            className="h-6 w-24 bg-transparent px-1.5 font-mono text-xs outline-none"
+          />
+        </div>
+
+        {/* 变量跳转（解析符号/表达式） */}
+        <div className="flex items-center h-6 rounded-md border border-border overflow-hidden">
+          <span className="flex items-center px-1.5 h-full text-xs text-muted-foreground bg-muted/50 border-r border-border">变量</span>
+          <input
+            value={varInput}
+            onChange={(e) => setVarInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void handleVarEnter() }}
+            placeholder="buf[0] / &var"
             spellCheck={false}
             autoComplete="off"
             className="h-6 w-28 bg-transparent px-1.5 font-mono text-xs outline-none"
           />
         </div>
+
         <button
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={() => void refresh()}
@@ -754,7 +761,7 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
         </div>
       </div>
 
-      {/* Hex 内容区（参考 Flash HexViewer：地址 0xXXXX_XXXX | 按字分组 Hex | ASCII） */}
+      {/* Hex 内容区（地址 0xXXXX_XXXX | 按字分组 Hex | ASCII） */}
       <div className="min-h-0 flex-1 overflow-auto bg-background font-mono text-xs leading-5">
         {!ready ? (
           <div className="min-h-0 flex-1" />
@@ -792,6 +799,144 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
               </div>
             )
           })
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── 内存面板（底部 tab 使用；导出以便被 Zone 底部 tab 复用） ──
+const MAX_MEMORY_WINDOWS = 8
+
+export function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
+  const memoryWindows = useZoneStore((s) => s.memoryWindows)
+  const activeMemoryWindow = useZoneStore((s) => s.activeMemoryWindow)
+  const addMemoryWindow = useZoneStore((s) => s.addMemoryWindow)
+  const closeMemoryWindow = useZoneStore((s) => s.closeMemoryWindow)
+  const selectMemoryWindow = useZoneStore((s) => s.selectMemoryWindow)
+
+  // ── 分栏对比 ──
+  const [split, setSplit] = useState(false)
+  const [leftWinId, setLeftWinId] = useState(activeMemoryWindow)
+  const [rightWinId, setRightWinId] = useState<string | null>(null)
+
+  // 分栏有效 id（窗口被关闭时自动回退）
+  const validLeftId = memoryWindows.some((w) => w.id === leftWinId) ? leftWinId : activeMemoryWindow
+  const validRightId =
+    rightWinId && memoryWindows.some((w) => w.id === rightWinId) && rightWinId !== validLeftId
+      ? rightWinId
+      : (memoryWindows.find((w) => w.id !== validLeftId)?.id ?? null)
+
+  const toggleSplit = useCallback(() => {
+    if (split) {
+      setSplit(false)
+    } else {
+      setLeftWinId(activeMemoryWindow)
+      const others = memoryWindows.filter((w) => w.id !== activeMemoryWindow)
+      setRightWinId(others[0]?.id ?? null)
+      setSplit(true)
+    }
+  }, [split, activeMemoryWindow, memoryWindows])
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {/* 窗口 tab 栏：多窗口切换 + 新建 + 关闭 + 分栏开关（单栏模式显示） */}
+      {!split && (
+        <div className="flex shrink-0 items-center border-b border-border">
+          {memoryWindows.map((w) => {
+            const isActive = w.id === activeMemoryWindow
+            return (
+              <div
+                key={w.id}
+                className={cn(
+                  'group/tab flex items-center gap-1 border-r border-border px-2 py-1 text-xs',
+                  isActive ? 'bg-muted/40 text-foreground' : 'text-muted-foreground hover:bg-muted/20'
+                )}
+              >
+                <button
+                  onClick={() => selectMemoryWindow(w.id)}
+                  className="font-mono"
+                  title={w.address}
+                >
+                  {w.address}
+                </button>
+                {memoryWindows.length > 1 && (
+                  <button
+                    onClick={() => closeMemoryWindow(w.id)}
+                    className="flex opacity-0 transition-opacity group-hover/tab:opacity-100 hover:text-red-500"
+                    title="关闭窗口"
+                  >
+                    <X className="size-3" />
+                  </button>
+                )}
+              </div>
+            )
+          })}
+          {memoryWindows.length < MAX_MEMORY_WINDOWS && (
+            <button
+              onClick={() => addMemoryWindow()}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:bg-muted/20 hover:text-foreground"
+              title={`新建窗口（上限 ${MAX_MEMORY_WINDOWS}）`}
+            >
+              <Plus className="size-3.5" />
+            </button>
+          )}
+          <button
+            className={cn(
+              'ml-auto flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted/20 hover:text-foreground',
+              memoryWindows.length < 2 && 'cursor-not-allowed opacity-40'
+            )}
+            onClick={toggleSplit}
+            disabled={memoryWindows.length < 2}
+            title={memoryWindows.length < 2 ? '需要至少 2 个窗口才能分栏对比' : '分栏对比查看'}
+          >
+            <Columns2 className="size-3.5" />
+            分栏
+          </button>
+        </div>
+      )}
+
+      {/* 分栏模式：顶部栏 + 退出分栏 */}
+      {split && (
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-2 py-1">
+          <span className="text-[11px] text-muted-foreground">分栏对比</span>
+          <button
+            className="rounded p-1 text-muted-foreground hover:bg-accent"
+            onClick={toggleSplit}
+            title="退出分栏"
+          >
+            <Columns2 className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* 内容区：单栏或分栏 */}
+      <div className="min-h-0 flex-1">
+        {split ? (
+          <div className="flex h-full min-h-0">
+            <div className="flex min-w-0 flex-1 flex-col border-r border-border">
+              <MemoryWindowView
+                uid={uid}
+                connected={connected}
+                windowId={validLeftId}
+                showSelector
+                onSelectWindow={setLeftWinId}
+              />
+            </div>
+            {validRightId && (
+              <div className="flex min-w-0 flex-1 flex-col">
+                <MemoryWindowView
+                  uid={uid}
+                  connected={connected}
+                  windowId={validRightId}
+                  showSelector
+                  onSelectWindow={setRightWinId}
+                />
+              </div>
+            )}
+          </div>
+        ) : (
+          <MemoryWindowView uid={uid} connected={connected} windowId={activeMemoryWindow} />
         )}
       </div>
     </div>

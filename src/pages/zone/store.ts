@@ -3,5 +3,7 @@ export { useZoneStore } from '@/stores/zone.store'
 export type {
   InspectorTabId,
   RefreshMode,
+  WatchItem,
+  WatchTab,
   ZoneStartMode,
 } from '@/stores/zone.store'

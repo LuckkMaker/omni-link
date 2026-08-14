@@ -829,6 +829,194 @@ class ElfBackend:
 
         return None
 
+    def resolve_watch(self, uid: str, name: str, pc: int, regs: dict, read_mem: callable) -> Optional[dict]:
+        """根据名字解析 Watch 观察项（函数/局部变量/全局变量/寄存器）。
+
+        与 resolve_hover_info 逻辑一致，区别在于返回结构额外携带 children
+        （struct/array 子节点树，供 Watch 面板展开显示），且对 DWARF 中
+        找到但读取失败（如目标运行中）的变量仍返回 available=False 的条目，
+        便于前端显示「运行中/不可用」而非静默消失。
+
+        返回结构：
+          {
+            "kind": "register" | "function" | "variable",
+            "name": str,
+            "address": int (可选),
+            "value": int (可选，若 available),
+            "type": str (可选),
+            "available": bool,
+            "bit_size": int (可选),
+            "var_kind": "scalar" | "struct" | "array" | "pointer" (可选),
+            "children": list (可选，struct/array 子节点)
+          }
+        """
+        entry = self._get(uid)
+        if not entry:
+            return None
+        sd = entry.get("symbol_decoder")
+        if not sd:
+            return None
+
+        # 0. 寄存器名匹配（r0-r12/sp/lr/pc 等）→ 返回寄存器当前值（目标需暂停）
+        reg_name = name.lower()
+        if reg_name in HOVER_REG_NAMES:
+            value = regs.get(reg_name)
+            if value is not None:
+                return {
+                    "kind": "register",
+                    "name": reg_name,
+                    "value": int(value),
+                    "available": True,
+                }
+            return {
+                "kind": "register",
+                "name": reg_name,
+                "available": False,
+            }
+
+        # 1. 优先匹配函数符号 → 返回函数类型的观察项（附加 DWARF 签名，供 Type 列显示）
+        sym = sd.symbol_dict.get(name)
+        if sym and sym.type == "STT_FUNC":
+            result = {
+                "kind": "function",
+                "name": sym.name,
+                "address": sym.address,
+                "size": sym.size,
+            }
+            dl = entry.get("dwarf_locals")
+            if dl is not None:
+                try:
+                    sig = dl.get_func_signature(sym.address)
+                except Exception:
+                    logger.exception("get_func_signature failed")
+                    sig = None
+                if sig:
+                    result["signature"] = sig.get("signature", "")
+                    result["ret"] = sig.get("ret", "")
+                    result["params"] = sig.get("params", [])
+            return result
+
+        dl = entry.get("dwarf_locals")
+
+        # 2. 当前 PC 所在函数内查找局部变量/形参（局部可遮蔽全局，优先于全局）
+        if dl is not None and pc is not None and pc != 0:
+            fn = self._find_func(uid, pc & ~1)
+            if fn:
+                try:
+                    local_var = dl.get_local_var(fn[3], name, regs, read_mem, pc & ~1)
+                except Exception:
+                    local_var = None
+                if local_var is not None:
+                    return {
+                        "kind": "variable",
+                        "name": local_var["name"],
+                        "type": local_var["type"],
+                        "address": local_var["address"],
+                        "value": local_var["value"],
+                        "available": local_var["available"],
+                        "bit_size": local_var["bit_size"],
+                        "var_kind": local_var.get("kind", "scalar"),
+                        "children": local_var.get("children"),
+                        "str_value": local_var.get("str_value"),
+                        "float_value": local_var.get("float_value"),
+                    }
+
+        # 3. 全局变量（DWARF 索引按名匹配，更准确含值与类型）
+        # 符号表未命中（静态/优化变量）也尝试 DWARF 全局索引
+        if dl is not None and (sym is None or sym.type == "STT_OBJECT"):
+            try:
+                glob_var = dl.get_global_var(name, regs, read_mem)
+            except Exception:
+                glob_var = None
+            if glob_var is not None:
+                return {
+                    "kind": "variable",
+                    "name": glob_var["name"],
+                    "type": glob_var["type"],
+                    "address": glob_var["address"],
+                    "value": glob_var["value"],
+                    "available": glob_var["available"],
+                    "bit_size": glob_var["bit_size"],
+                    "var_kind": glob_var.get("kind", "scalar"),
+                    "children": glob_var.get("children"),
+                    "str_value": glob_var.get("str_value"),
+                    "float_value": glob_var.get("float_value"),
+                }
+
+        # 4. 符号表中找到了 OBJECT 但 DWARF 未解析成功：降级显示地址
+        if sym and sym.type == "STT_OBJECT":
+            return {
+                "kind": "variable",
+                "name": sym.name,
+                "address": sym.address,
+                "available": False,
+                "size": sym.size,
+            }
+
+        return None
+
+    def resolve_watch_expr(self, uid: str, expr: str, pc: int, regs: dict, read_mem: callable) -> Optional[dict]:
+        """根据表达式解析 Watch 观察项（支持 var.field / arr[i] / *ptr / &x / ptr->field）。
+
+        简单标识符直接走 resolve_watch（寄存器/函数/局部/全局变量）；
+        复杂表达式走 DWARF 表达式求值（dwarf_locals.resolve_expr）。
+        返回结构与 resolve_watch 一致（含 children 供展开）。
+        """
+        entry = self._get(uid)
+        if not entry:
+            return None
+        sd = entry.get("symbol_decoder")
+        if not sd:
+            return None
+        dl = entry.get("dwarf_locals")
+
+        expr = (expr or "").strip()
+        if not expr:
+            return None
+
+        # 简单标识符 → 走既有 resolve_watch
+        if re.fullmatch(r"[A-Za-z_]\w*", expr):
+            return self.resolve_watch(uid, expr, pc, regs, read_mem)
+
+        # &name：取地址（函数或全局对象），无需 DWARF
+        if re.fullmatch(r"&[A-Za-z_]\w*", expr):
+            inner = expr[1:]
+            info = self.resolve_watch(uid, inner, pc, regs, read_mem)
+            if info and info.get("address") is not None:
+                return {
+                    "kind": "variable",
+                    "name": expr,
+                    "type": info.get("type") or "",
+                    "address": info["address"],
+                    "value": info["address"],
+                    "available": True,
+                    "bit_size": 32,
+                    "var_kind": "scalar",
+                    "children": None,
+                }
+
+        # 复杂表达式：需要 DWARF + 当前 PC 所在函数
+        if dl is None:
+            return None
+        if pc is None or pc == 0:
+            return None
+        faddr = None
+        fn = self._find_func(uid, pc & ~1)
+        if fn:
+            faddr = fn[3]
+        else:
+            # 符号表未命中（如 PC 恰在 Thumb 地址间隙）：回退 DWARF 函数索引
+            func = dl._nearest_func(pc & ~1)
+            if func is not None:
+                faddr = func.address
+        if faddr is None:
+            return None
+        try:
+            return dl.resolve_expr(faddr, expr, regs, read_mem, pc & ~1)
+        except Exception:
+            logger.exception("resolve_watch_expr failed")
+            return None
+
     def get_callees(self, uid: str, address: int) -> dict:
         entry = self._get(uid)
         if not entry:

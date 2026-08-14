@@ -65,6 +65,23 @@ export interface MemoryWindow {
   bigEndian: boolean
 }
 
+/** Watch 观察项：持久化定义（expr/format），运行时值由面板求值刷新 */
+export interface WatchItem {
+  id: number
+  /** 观察表达式：寄存器名 / 0x 地址 / 符号名 */
+  expr: string
+  /** 值显示格式 */
+  format: 'hex' | 'dec' | 'bin' | 'char' | 'str' | 'float'
+}
+
+/** Watch 页签：一组观察项（多 tab 对比，上限 8 个） */
+export interface WatchTab {
+  id: string
+  /** 页签名（如 Watch 1） */
+  name: string
+  items: WatchItem[]
+}
+
 interface ZoneStore {
   // ── 调试状态 ──────────────────────────────
   /** 目标状态 */
@@ -103,6 +120,10 @@ interface ZoneStore {
   memoryWindows: MemoryWindow[]
   /** 激活的内存窗口 id */
   activeMemoryWindow: string
+  /** Watch 页签列表（多 tab，至少保留一个，上限 8） */
+  watchTabs: WatchTab[]
+  /** 激活的 Watch 页签 id */
+  activeWatchTab: string
 
   // ── 刷新策略 ──────────────────────────────
   refreshMode: RefreshMode
@@ -156,6 +177,26 @@ interface ZoneStore {
   selectMemoryWindow: (id: string) => void
   /** 更新内存窗口的局部设置（地址/宽度/端序/格式），并同步 memoryAddress */
   updateMemoryWindow: (id: string, patch: Partial<MemoryWindow>) => void
+  /** 添加 Watch 观察项到激活页签（按表达式去重，返回是否新增） */
+  addWatchItem: (expr: string) => boolean
+  /** 添加 Watch 观察项到指定页签（按表达式去重，返回是否新增） */
+  addWatchItemToTab: (tabId: string, expr: string) => boolean
+  /** 从指定页签移除 Watch 观察项 */
+  removeWatchItem: (tabId: string, id: number) => void
+  /** 设置指定页签内 Watch 观察项显示格式 */
+  setWatchItemFormat: (tabId: string, id: number, format: WatchItem['format']) => void
+  /** 清空指定页签（缺省为激活页签）全部 Watch 观察项 */
+  clearWatchItems: (tabId?: string) => void
+  /** 新建 Watch 页签（上限 8，自动命名 Watch N） */
+  addWatchTab: () => void
+  /** 关闭 Watch 页签（至少保留一个，关闭激活项时切换到相邻页签） */
+  closeWatchTab: (id: string) => void
+  /** 切换激活的 Watch 页签 */
+  selectWatchTab: (id: string) => void
+  /** 重命名 Watch 页签 */
+  renameWatchTab: (id: string, name: string) => void
+  /** 将观察项从激活页签移动到目标页签 */
+  moveWatchItemToTab: (itemId: number, toTabId: string) => void
   setRefreshMode: (mode: RefreshMode) => void
   setBreakpoints: (bps: SourceBreakpoint[]) => void
   /** 设置源码视图当前光标所在行 */
@@ -204,6 +245,8 @@ function collectSessionData(get: () => ZoneStore): Record<string, unknown> {
     activeInspectorTab: s.activeInspectorTab,
     memoryAddress: s.memoryAddress,
     refreshMode: s.refreshMode,
+    watchTabs: s.watchTabs,
+    activeWatchTab: s.activeWatchTab,
   }
 }
 
@@ -231,6 +274,8 @@ export const useZoneStore = create<ZoneStore>()(
       memoryAddress: '0x20000000',
       memoryWindows: [{ id: 'mem-1', address: '0x20000000', byteWidth: 1, bigEndian: false }],
       activeMemoryWindow: 'mem-1',
+      watchTabs: [{ id: 'watch-1', name: 'Watch 1', items: [] }],
+      activeWatchTab: 'watch-1',
 
       refreshMode: 'on_stop',
       refreshTick: 0,
@@ -305,6 +350,7 @@ export const useZoneStore = create<ZoneStore>()(
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
       addMemoryWindow: (preset) =>
         set((s) => {
+          if (s.memoryWindows.length >= 8) return {} // 内存窗口上限 8
           const active = s.memoryWindows.find((w) => w.id === s.activeMemoryWindow)
           const base = active ?? s.memoryWindows[0] ?? { address: '0x20000000', byteWidth: 1, bigEndian: false }
           const id = 'mem-' + Math.random().toString(36).slice(2, 8)
@@ -343,6 +389,82 @@ export const useZoneStore = create<ZoneStore>()(
           return addrChanged ? { memoryWindows: windows, memoryAddress: activeWin.address } : { memoryWindows: windows }
         }),
       setRefreshMode: (refreshMode) => set({ refreshMode }),
+      addWatchItem: (expr) => get().addWatchItemToTab(get().activeWatchTab, expr),
+      addWatchItemToTab: (tabId, expr) => {
+        const trimmed = expr.trim()
+        if (!trimmed) return false
+        const s = get()
+        const tab = s.watchTabs.find((t) => t.id === tabId)
+        if (!tab) return false
+        if (tab.items.some((i) => i.expr.toLowerCase() === trimmed.toLowerCase())) return false
+        const nextId = s.watchTabs.reduce((m, t) => t.items.reduce((mm, i) => Math.max(mm, i.id), m), 0) + 1
+        set({
+          watchTabs: s.watchTabs.map((t) =>
+            t.id === tabId ? { ...t, items: [...t.items, { id: nextId, expr: trimmed, format: 'hex' }] } : t
+          ),
+        })
+        return true
+      },
+      removeWatchItem: (tabId, id) =>
+        set((s) => ({
+          watchTabs: s.watchTabs.map((t) => (t.id === tabId ? { ...t, items: t.items.filter((i) => i.id !== id) } : t)),
+        })),
+      setWatchItemFormat: (tabId, id, format) =>
+        set((s) => ({
+          watchTabs: s.watchTabs.map((t) =>
+            t.id === tabId ? { ...t, items: t.items.map((i) => (i.id === id ? { ...i, format } : i)) } : t
+          ),
+        })),
+      clearWatchItems: (tabId) =>
+        set((s) => {
+          const target = tabId ?? s.activeWatchTab
+          return { watchTabs: s.watchTabs.map((t) => (t.id === target ? { ...t, items: [] } : t)) }
+        }),
+      addWatchTab: () =>
+        set((s) => {
+          if (s.watchTabs.length >= 8) return {}
+          const n = s.watchTabs.length + 1
+          const id = 'watch-' + Math.random().toString(36).slice(2, 8)
+          const tab: WatchTab = { id, name: `Watch ${n}`, items: [] }
+          return { watchTabs: [...s.watchTabs, tab], activeWatchTab: id }
+        }),
+      closeWatchTab: (id) =>
+        set((s) => {
+          if (s.watchTabs.length <= 1) return {}
+          // Watch1（首个页签）不可删除
+          if (s.watchTabs.findIndex((t) => t.id === id) === 0) return {}
+          const tabs = s.watchTabs.filter((t) => t.id !== id)
+          let active = s.activeWatchTab
+          if (active === id) {
+            const idx = s.watchTabs.findIndex((t) => t.id === id)
+            active = (tabs[idx] ?? tabs[idx - 1] ?? tabs[0]).id
+          }
+          return { watchTabs: tabs, activeWatchTab: active }
+        }),
+      selectWatchTab: (id) =>
+        set((s) => (s.watchTabs.some((t) => t.id === id) ? { activeWatchTab: id } : {})),
+      renameWatchTab: (id, name) =>
+        set((s) => ({
+          watchTabs: s.watchTabs.map((t) => (t.id === id ? { ...t, name: name.trim() || t.name } : t)),
+        })),
+      moveWatchItemToTab: (itemId, toTabId) =>
+        set((s) => {
+          let moved: WatchItem | null = null
+          let fromTabId: string | null = null
+          const tabs = s.watchTabs.map((t) => {
+            const idx = t.items.findIndex((i) => i.id === itemId)
+            if (idx >= 0) {
+              moved = t.items[idx]
+              fromTabId = t.id
+              return { ...t, items: t.items.filter((i) => i.id !== itemId) }
+            }
+            return t
+          })
+          if (!moved || !fromTabId || fromTabId === toTabId) return {}
+          return {
+            watchTabs: tabs.map((t) => (t.id === toTabId ? { ...t, items: [...t.items, moved!] } : t)),
+          }
+        }),
       setBreakpoints: (breakpoints) => set({ breakpoints }),
       setCursorLine: (cursorLine) => set({ cursorLine }),
       gotoSource: (file, line) => {
@@ -738,6 +860,8 @@ export const useZoneStore = create<ZoneStore>()(
           memoryWindows: [{ id: 'mem-1', address: loadedAddr, byteWidth: 1, bigEndian: false }],
           activeMemoryWindow: 'mem-1',
           refreshMode: (d.refreshMode as RefreshMode) ?? 'on_stop',
+          watchTabs: (d.watchTabs as WatchTab[]) ?? [{ id: 'watch-1', name: 'Watch 1', items: [] }],
+          activeWatchTab: (d.activeWatchTab as string) ?? 'watch-1',
         })
         useNotificationStore.getState().push({
           type: 'success',
@@ -767,6 +891,8 @@ export const useZoneStore = create<ZoneStore>()(
         activeInspectorTab: state.activeInspectorTab,
         memoryAddress: state.memoryAddress,
         refreshMode: state.refreshMode,
+        watchTabs: state.watchTabs,
+        activeWatchTab: state.activeWatchTab,
       }),
     }
   )

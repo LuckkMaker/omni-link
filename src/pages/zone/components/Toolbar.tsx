@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, Trash2, Pause } from 'lucide-react'
+import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, Trash2, Pause, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -70,6 +70,8 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const sessionStatus = useZoneStore((s) => s.sessionStatus)
   const currentFunction = useZoneStore((s) => s.currentFunction)
   const clearBreakpoints = useZoneStore((s) => s.clearBreakpoints)
+  const refreshMode = useZoneStore((s) => s.refreshMode)
+  const setRefreshMode = useZoneStore((s) => s.setRefreshMode)
 
   const disabled = !connected || !uid || busy
   // 会话进行中 = 真正启动过调试会话（sessionStatus === 'active'）→ 图标红色；未启动 → 绿色。
@@ -79,6 +81,12 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const sessionConnecting = sessionStatus === 'connecting'
   // Step Out 仅在目标暂停且当前行落在函数内时可用（非函数行无法出栈）
   const stepOutDisabled = disabled || state !== 'halted' || !currentFunction
+
+  // 周期刷新开关：激活后所有面板按固定间隔自动刷新（默认 on_stop 暂停时刷新）
+  const periodicActive = refreshMode === 'periodic_always' || refreshMode === 'periodic_running'
+  const togglePeriodicRefresh = useCallback(() => {
+    setRefreshMode(periodicActive ? 'on_stop' : 'periodic_always')
+  }, [periodicActive, setRefreshMode])
 
   // 仿真器未选择或设备未连接时，弹出「连接配置」弹窗（start 模式，含 ELF 选择区）
   const [configOpen, setConfigOpen] = useState(false)
@@ -252,6 +260,34 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         <Trash2 className="size-4" />
         Kill All Breakpoints
       </Button>
+
+      <Separator orientation="vertical" className="mx-1 h-5" />
+
+      {/* 自动刷新：激活后所有面板按固定间隔周期刷新 */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn('h-8 gap-1.5', periodicActive && 'text-primary')}
+            title="刷新设置：激活后所有面板周期自动刷新"
+          >
+            <RefreshCw className="size-4" />
+            <ChevronDown className="size-3 opacity-60" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" onCloseAutoFocus={(e) => e.preventDefault()}>
+          <DropdownMenuItem onClick={togglePeriodicRefresh} className="text-xs">
+            <span className="flex w-full items-center justify-between gap-6">
+              <span>自动刷新</span>
+              {periodicActive && <span className="text-primary">✓</span>}
+            </span>
+          </DropdownMenuItem>
+          <div className="px-2 py-1 text-[10px] leading-tight text-muted-foreground/60">
+            开启后所有面板每 2 秒周期刷新
+          </div>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       {/* 连接配置弹窗（start 模式，含 ELF 选择区）——仅仿真器未选择/设备未连接时由 Start Session 触发 */}
       <ConnectionConfigDialog
