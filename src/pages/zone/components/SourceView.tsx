@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
@@ -152,6 +152,42 @@ function MenuItem({
 
 function MenuSeparator() {
   return <div className="-mx-1 my-1 h-px bg-muted/60" />
+}
+
+/** 二级展开菜单：父项 + 右侧子菜单（hover 展开，子项点击触发） */
+function MenuSub({
+  label,
+  disabled,
+  children,
+}: {
+  label: string
+  disabled?: boolean
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <div
+        className={cn(
+          'flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors',
+          open ? 'bg-accent text-accent-foreground' : 'hover:bg-accent hover:text-accent-foreground',
+          disabled && 'pointer-events-none opacity-50'
+        )}
+      >
+        <span className="flex-1 text-left">{label}</span>
+        <ChevronRight className="size-3.5 text-muted-foreground" />
+      </div>
+      {open && !disabled && (
+        <div className="absolute left-full top-0 z-50 min-w-[10rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
+          {children}
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** 计算当前内容相对原始内容的修改/新增行号（用于 minimap 修改行高亮，对齐 VS Code） */
@@ -506,22 +542,29 @@ export function SourceView({ uid }: SourceViewProps) {
     void goToReferencesWord(word, x, y)
   }, [codeMenu, goToReferencesWord])
 
-  // 添加到 Watch：将悬停/右键的标识符加入 Watch 列表（默认添加到 Watch1）
+  // 添加到 Watch 指定页签：将右键的标识符加入对应 Watch 页签
+  const addToWatchTab = useCallback(
+    (tabId: string) => {
+      const word = codeMenu?.word ?? ''
+      setCodeMenu(null)
+      if (!word) return
+      const tab = watchTabs.find((t) => t.id === tabId)
+      const added = tab ? addWatchItemToTab(tabId, word) : false
+      useNotificationStore.getState().push({
+        type: added ? 'success' : 'warning',
+        title: added ? `已添加到 ${tab?.name ?? 'Watch'}` : '已在 Watch 列表中',
+        message: word,
+        autoClose: true,
+        autoCloseDelay: 2000,
+      })
+    },
+    [codeMenu, addWatchItemToTab, watchTabs]
+  )
+
+  // 添加到 Watch：默认添加到 Watch1（首个页签），与 Watch 面板 Enter 行为一致
   const addToWatch = useCallback(() => {
-    const word = codeMenu?.word ?? ''
-    setCodeMenu(null)
-    if (!word) return
-    // 多 tab 时默认添加到 Watch1（首个页签），与 Watch 面板 Enter 行为一致
-    const targetTabId = watchTabs[0]?.id ?? ''
-    const added = targetTabId ? addWatchItemToTab(targetTabId, word) : false
-    useNotificationStore.getState().push({
-      type: added ? 'success' : 'warning',
-      title: added ? '已添加到 Watch1' : '已在 Watch 列表中',
-      message: word,
-      autoClose: true,
-      autoCloseDelay: 2000,
-    })
-  }, [codeMenu, addWatchItemToTab, watchTabs])
+    addToWatchTab(watchTabs[0]?.id ?? '')
+  }, [addToWatchTab, watchTabs])
 
   // Peek 定义：将光标移到触发词后触发 Monaco 原生 peek（依赖上面注册的 DefinitionProvider）
   const peekDefinitionAt = useCallback((pos: { lineNumber: number; column: number } | null) => {
@@ -1596,7 +1639,15 @@ export function SourceView({ uid }: SourceViewProps) {
             disabled={!codeMenu.word}
           />
           <MenuSeparator />
-          <MenuItem label="添加到 Watch" onClick={addToWatch} disabled={!codeMenu.word} />
+          {watchTabs.length <= 1 ? (
+            <MenuItem label="添加到 Watch" onClick={addToWatch} disabled={!codeMenu.word} />
+          ) : (
+            <MenuSub label="添加到 Watch" disabled={!codeMenu.word}>
+              {watchTabs.map((t) => (
+                <MenuItem key={t.id} label={t.name} onClick={() => addToWatchTab(t.id)} />
+              ))}
+            </MenuSub>
+          )}
           <MenuSeparator />
           <MenuItem label="全选" shortcut="Ctrl+A" onClick={selectAll} />
         </div>

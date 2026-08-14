@@ -669,7 +669,7 @@ function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWind
           >
             {memoryWindows.map((w) => (
               <option key={w.id} value={w.id}>
-                {w.address}
+                {w.name}
               </option>
             ))}
           </select>
@@ -806,7 +806,7 @@ function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWind
 }
 
 // ── 内存面板（底部 tab 使用；导出以便被 Zone 底部 tab 复用） ──
-const MAX_MEMORY_WINDOWS = 8
+const MAX_MEMORY_WINDOWS = 4
 
 export function MemoryPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const memoryWindows = useZoneStore((s) => s.memoryWindows)
@@ -856,9 +856,9 @@ export function MemoryPanel({ uid, connected }: { uid: string | null; connected:
                 <button
                   onClick={() => selectMemoryWindow(w.id)}
                   className="font-mono"
-                  title={w.address}
+                  title={`${w.name} · ${w.address}`}
                 >
-                  {w.address}
+                  {w.name}
                 </button>
                 {memoryWindows.length > 1 && (
                   <button

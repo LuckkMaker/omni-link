@@ -47,7 +47,7 @@ type WatchFormat = 'hex' | 'dec' | 'bin' | 'char' | 'str' | 'float'
 /** 四列列宽（px），表头拖拽调节 */
 type ColKey = 'address' | 'name' | 'value' | 'type'
 const COL_MIN = 80
-const MAX_TABS = 8
+const MAX_TABS = 4
 
 // ── 工具函数 ──────────────────────────────
 
@@ -929,7 +929,7 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
     setExpanded(new Set())
   }, [])
 
-  // ── 添加 Watch 项：Enter 默认添加到 Watch1，+ 按钮展开页签选择 ──
+  // ── 添加 Watch 项：Enter 添加到当前页签，+ 按钮展开页签选择 ──
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
@@ -945,8 +945,6 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
     return () => window.removeEventListener('mousedown', close)
   }, [addMenuOpen])
 
-  const watch1Id = watchTabs[0]?.id ?? activeWatchTab
-
   const addToTab = useCallback(
     (tabId: string) => {
       const trimmed = input.trim()
@@ -960,9 +958,9 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter') addToTab(watch1Id)
+      if (e.key === 'Enter') addToTab(activeWatchTab)
     },
-    [addToTab, watch1Id]
+    [addToTab, activeWatchTab]
   )
 
   // ── 值编辑提交（父级：写入 + 刷新；失败抛错由 WatchList 展示） ──
@@ -1058,13 +1056,13 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* 输入行 + 操作按钮（Enter 默认添加 Watch1，+ 按钮展开页签选择） */}
+      {/* 输入行 + 操作按钮（Enter 添加到当前页签，+ 按钮展开页签选择） */}
       <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1.5">
         <Input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="变量、寄存器或表达式，Enter 添加到 Watch1"
+          placeholder="变量、寄存器或表达式，Enter 添加到当前页签"
           className="h-7 min-w-0 flex-1 text-xs"
         />
         <div ref={addMenuRef} className="relative shrink-0">
@@ -1086,7 +1084,7 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
                   onClick={() => addToTab(t.id)}
                 >
                   <span>{t.name}</span>
-                  {t.id === watch1Id && <span className="text-[10px] text-muted-foreground">默认</span>}
+                  {t.id === activeWatchTab && <span className="text-[10px] text-muted-foreground">当前</span>}
                 </button>
               ))}
             </div>
@@ -1157,14 +1155,17 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
                 <button onClick={() => selectWatchTab(t.id)} className="font-medium" title="切换页签">
                   {t.name}
                 </button>
-                {watchTabs.length > 1 && watchTabs[0].id !== t.id && (
+                {watchTabs.length > 1 && watchTabs[0].id !== t.id ? (
                   <button
                     onClick={() => closeWatchTab(t.id)}
-                    className="flex opacity-0 transition-opacity group-hover/tab:opacity-100 hover:text-red-500"
+                    className="flex size-3 shrink-0 items-center justify-center opacity-0 transition-opacity group-hover/tab:opacity-100 hover:text-red-500"
                     title="关闭页签"
                   >
                     <X className="size-3" />
                   </button>
+                ) : (
+                  // 首个页签不可关闭，用等宽占位保持与其余页签宽度一致
+                  <span className="flex size-3 shrink-0" aria-hidden />
                 )}
               </div>
             )

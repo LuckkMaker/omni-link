@@ -58,6 +58,8 @@ export type ZoneStartMode = 'download_reset' | 'attach_running' | 'attach_halt'
 /** 内存窗口：独立锚点地址 + 分组宽度 + 端序 */
 export interface MemoryWindow {
   id: string
+  /** 窗口名（如 Memory 1） */
+  name: string
   /** 地址（hex 字符串，支持 0x 前缀） */
   address: string
   /** 分组字节宽度 */
@@ -74,7 +76,7 @@ export interface WatchItem {
   format: 'hex' | 'dec' | 'bin' | 'char' | 'str' | 'float'
 }
 
-/** Watch 页签：一组观察项（多 tab 对比，上限 8 个） */
+/** Watch 页签：一组观察项（多 tab 对比，上限 4 个） */
 export interface WatchTab {
   id: string
   /** 页签名（如 Watch 1） */
@@ -120,7 +122,7 @@ interface ZoneStore {
   memoryWindows: MemoryWindow[]
   /** 激活的内存窗口 id */
   activeMemoryWindow: string
-  /** Watch 页签列表（多 tab，至少保留一个，上限 8） */
+  /** Watch 页签列表（多 tab，至少保留一个，上限 4） */
   watchTabs: WatchTab[]
   /** 激活的 Watch 页签 id */
   activeWatchTab: string
@@ -187,7 +189,7 @@ interface ZoneStore {
   setWatchItemFormat: (tabId: string, id: number, format: WatchItem['format']) => void
   /** 清空指定页签（缺省为激活页签）全部 Watch 观察项 */
   clearWatchItems: (tabId?: string) => void
-  /** 新建 Watch 页签（上限 8，自动命名 Watch N） */
+  /** 新建 Watch 页签（上限 4，自动命名 Watch N） */
   addWatchTab: () => void
   /** 关闭 Watch 页签（至少保留一个，关闭激活项时切换到相邻页签） */
   closeWatchTab: (id: string) => void
@@ -272,7 +274,7 @@ export const useZoneStore = create<ZoneStore>()(
 
       activeInspectorTab: 'registers',
       memoryAddress: '0x20000000',
-      memoryWindows: [{ id: 'mem-1', address: '0x20000000', byteWidth: 1, bigEndian: false }],
+      memoryWindows: [{ id: 'mem-1', name: 'Memory 1', address: '0x20000000', byteWidth: 1, bigEndian: false }],
       activeMemoryWindow: 'mem-1',
       watchTabs: [{ id: 'watch-1', name: 'Watch 1', items: [] }],
       activeWatchTab: 'watch-1',
@@ -350,12 +352,13 @@ export const useZoneStore = create<ZoneStore>()(
       setMemoryAddress: (memoryAddress) => set({ memoryAddress }),
       addMemoryWindow: (preset) =>
         set((s) => {
-          if (s.memoryWindows.length >= 8) return {} // 内存窗口上限 8
+          if (s.memoryWindows.length >= 4) return {} // 内存窗口上限 4
           const active = s.memoryWindows.find((w) => w.id === s.activeMemoryWindow)
           const base = active ?? s.memoryWindows[0] ?? { address: '0x20000000', byteWidth: 1, bigEndian: false }
           const id = 'mem-' + Math.random().toString(36).slice(2, 8)
           const win: MemoryWindow = {
             id,
+            name: `Memory ${s.memoryWindows.length + 1}`,
             address: preset?.address ?? base.address,
             byteWidth: preset?.byteWidth ?? base.byteWidth,
             bigEndian: preset?.bigEndian ?? base.bigEndian,
@@ -422,7 +425,7 @@ export const useZoneStore = create<ZoneStore>()(
         }),
       addWatchTab: () =>
         set((s) => {
-          if (s.watchTabs.length >= 8) return {}
+          if (s.watchTabs.length >= 4) return {}
           const n = s.watchTabs.length + 1
           const id = 'watch-' + Math.random().toString(36).slice(2, 8)
           const tab: WatchTab = { id, name: `Watch ${n}`, items: [] }
@@ -857,7 +860,7 @@ export const useZoneStore = create<ZoneStore>()(
           activeInspectorTab: (d.activeInspectorTab as InspectorTabId) ?? 'registers',
           memoryAddress: loadedAddr,
           // 加载会话时重置为单个窗口（锚点取会话地址）
-          memoryWindows: [{ id: 'mem-1', address: loadedAddr, byteWidth: 1, bigEndian: false }],
+          memoryWindows: [{ id: 'mem-1', name: 'Memory 1', address: loadedAddr, byteWidth: 1, bigEndian: false }],
           activeMemoryWindow: 'mem-1',
           refreshMode: (d.refreshMode as RefreshMode) ?? 'on_stop',
           watchTabs: (d.watchTabs as WatchTab[]) ?? [{ id: 'watch-1', name: 'Watch 1', items: [] }],
