@@ -307,7 +307,17 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
 
 @router.post("/probes/{uid}/zone/debug/status")
 async def zone_status(uid: str):
-    """查询目标状态（halted/running）与 PC"""
+    """查询目标状态（halted/running）与 PC
+
+    使用 to_thread 避免同步 SWD 事务阻塞事件循环：每 250ms 轮询一次，若直接在事件循环上
+    执行 session.target.is_halted()（需要 SWD 握手），探针争用时会阻塞整个事件循环数秒，
+    导致所有请求（含汇编加载、调试操作）都被延迟。
+    """
+    return await asyncio.to_thread(_sync_status, uid)
+
+
+def _sync_status(uid: str) -> dict:
+    """同步状态读取（在 to_thread 中执行）"""
     if not backend.is_connected(uid):
         return {"success": True, "connected": False, "state": "disconnected", "pc": None}
     session = backend._get_session(uid)

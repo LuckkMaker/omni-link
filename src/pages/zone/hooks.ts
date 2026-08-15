@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useZoneStore } from './store'
 
 /**
@@ -60,9 +60,24 @@ export function useAutoRefresh(
   const lastPc = useRef(pc)
   const lastTick = useRef(refreshTick)
   const lastBusy = useRef(busy)
+  // pc 最新值用 ref 持有：pc 变化不应触发 effect 重跑——否则 250ms 状态轮询更新 pc 时
+  // 会反复清除重建周期 interval，导致周期刷新（setInterval）永远不触发（运行中变量不刷新）
+  const pcRef = useRef(pc)
+  pcRef.current = pc
   // 门控函数用 ref 持有：避免调用方传内联箭头函数时因函数引用变化导致 effect 每帧重跑
   const canRefreshRef = useRef(opts?.canRefresh)
   canRefreshRef.current = opts?.canRefresh
+  // in-flight 守卫：上一次刷新未完成时跳过本轮。周期刷新 100ms 触发一次，若后端处理慢
+  // （断点命中后汇编/寄存器读取争用），无守卫会导致请求堆积压垮后端、busy 卡死、工具栏灰置。
+  // 有守卫后刷新频率自动随后端处理速度调节：后端快则快刷，后端慢则自动降频不堆积。
+  const inFlightRef = useRef(false)
+  const guardedRefresh = useCallback(() => {
+    if (inFlightRef.current) return
+    inFlightRef.current = true
+    Promise.resolve(refresh()).finally(() => {
+      inFlightRef.current = false
+    })
+  }, [refresh])
 
   useEffect(() => {
     // 会话未就绪（未连接 / 未加载 ELF / 未启动调试会话）时不自动轮询
@@ -73,14 +88,14 @@ export function useAutoRefresh(
     if (refreshMode === 'on_stop') {
       if (state === 'halted') {
         const stateChanged = lastState.current !== 'halted'
-        const pcChanged = lastPc.current !== pc
+        const pcChanged = lastPc.current !== pcRef.current
         const tickChanged = lastTick.current !== refreshTick
         if (stateChanged || pcChanged || tickChanged) {
-          refresh()
+          guardedRefresh()
         }
       }
       lastState.current = state
-      lastPc.current = pc
+      lastPc.current = pcRef.current
       lastTick.current = refreshTick
       return
     }
@@ -89,17 +104,18 @@ export function useAutoRefresh(
       // 用户调试操作进行中：跳过本轮，100ms 后重试一次（操作间隙立即补上刷新），
       // 避免与 halt/step/continue/reset 争抢后端资源
       if (busy) {
-        const retry = setTimeout(() => refresh(), 100)
+        const retry = setTimeout(() => guardedRefresh(), 100)
         return () => clearTimeout(retry)
       }
-      // 周期刷新：每 500ms（后端 AHB-AP 非侵入式读取，运行中不打断程序）
-      const timer = setInterval(refresh, 500)
+      // 周期刷新：每 100ms（后端 AHB-AP 非侵入式读取，运行中不打断程序）。
+      // 100ms 可感知 ms_cnt（10ms 变化）的实时更新；s_cnt（1s 变化）每 10 次刷新跳 1
+      const timer = setInterval(guardedRefresh, 100)
       // 立即刷新：busy 刚结束（操作间隙补上）或 halt 跳变（断点命中/用户 Stop 瞬间），
       // 不等下一个周期，立即拿到最新值
       const busyEnded = lastBusy.current && !busy
       const haltHit = state === 'halted' && (lastState.current !== 'halted' || lastTick.current !== refreshTick)
       if (busyEnded || haltHit) {
-        refresh()
+        guardedRefresh()
       }
       lastBusy.current = busy
       lastState.current = state
@@ -108,5 +124,5 @@ export function useAutoRefresh(
     }
     // off：不自动刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, ready, state, pc, refreshMode, refreshTick, refresh, busy])
+  }, [uid, connected, ready, state, refreshMode, refreshTick, guardedRefresh, busy])
 }

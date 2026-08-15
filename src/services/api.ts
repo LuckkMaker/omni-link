@@ -33,7 +33,9 @@ export async function api(): Promise<AxiosInstance> {
   const url = await getBaseURL()
   client = axios.create({
     baseURL: url,
-    timeout: 0,
+    // 默认 10s 超时：防止后端被刷新请求淹没时，store 的调试操作（continue/status 等）
+    // HTTP 请求无限挂起导致 busy 永久卡死、工具栏灰置。Flash 等长操作在 service 层覆盖为 0。
+    timeout: 10000,
     headers: { 'Content-Type': 'application/json' }
   })
   return client

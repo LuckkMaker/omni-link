@@ -178,12 +178,10 @@ function hasChildren(info: WatchEvalInfo | null): boolean {
 
 // ── 递归子节点渲染（四列：Name / Value / Type / Address） ──
 
-/** 变化级别 → 高亮样式（黄色系深浅分级，对齐 Ozone Change-Level Highlighting） */
+/** 变化高亮：本次刷新中值发生变化的变量高亮显示，未变化的不高亮 */
 function changeClass(level: number | undefined): string {
   if (!level) return ''
-  if (level === 1) return 'bg-yellow-400/40 text-foreground'
-  if (level === 2) return 'bg-yellow-400/25 text-foreground'
-  return 'bg-yellow-400/15 text-foreground'
+  return 'bg-yellow-400/40 text-foreground'
 }
 
 interface VarNodeProps {
@@ -312,19 +310,16 @@ function collectChildrenTexts(children: CallStackLocal[] | undefined, prefix: st
   }
 }
 
-/** 计算多级变化：返回 key → level(1/2/3)。level 越小越新（1=最近一步变化，3=三步前）。 */
-function computeChangeLevels(current: Map<string, string>, history: Map<string, string>[]): Map<string, number> {
-  const levels = new Map<string, number>()
+/** 与上一帧快照对比，返回本次刷新中值发生变化的 key → 1（未变化的不在结果中） */
+function computeChangedKeys(current: Map<string, string>, prev: Map<string, string>): Map<string, number> {
+  const changed = new Map<string, number>()
   current.forEach((val, key) => {
-    for (let i = 0; i < history.length; i++) {
-      const prev = history[i].get(key)
-      if (prev !== undefined && prev !== val) {
-        levels.set(key, i + 1)
-        break
-      }
+    const before = prev.get(key)
+    if (before !== undefined && before !== val) {
+      changed.set(key, 1)
     }
   })
-  return levels
+  return changed
 }
 
 const FORMAT_OPTIONS: [WatchFormat, string][] = [
@@ -786,9 +781,8 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [changed, setChanged] = useState<Map<string, number>>(new Map())
-  /** 历史快照（最新在前），用于多级变化高亮 */
-  const history = useRef<Map<string, string>[]>([])
-  const HISTORY_DEPTH = 3
+  /** 上一帧值快照：与当前值对比检测变化 */
+  const prevSnapshotRef = useRef<Map<string, string>>(new Map())
 
   // ── 搜索过滤 ──
   const [showSearch, setShowSearch] = useState(false)
@@ -856,8 +850,9 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
       )
       const current = new Map<string, string>()
       collectValueTexts(updated, current)
-      const changedKeys = computeChangeLevels(current, history.current)
-      history.current = [current, ...history.current].slice(0, HISTORY_DEPTH)
+      // 与上一帧对比：值变化的变量高亮，未变化的立即取消高亮
+      const changedKeys = computeChangedKeys(current, prevSnapshotRef.current)
+      prevSnapshotRef.current = current
       setChanged(changedKeys)
       setValues(updated)
       setError(null)
