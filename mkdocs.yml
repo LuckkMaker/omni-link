@@ -61,7 +61,6 @@ markdown_extensions:
 
 nav:
   - 主页: index.md
-  - 功能介绍: features.md
 
 exclude_docs: |
   getting-started.md

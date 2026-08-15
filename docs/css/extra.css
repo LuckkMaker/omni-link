@@ -14,7 +14,7 @@
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-soft: rgba(37, 99, 235, .08);
-  --bg: #f5f6f7;
+  --bg: #ffffff;
   --card: #ffffff;
   --border: #e5e5e5;
   --text: #1b1b1b;
@@ -50,72 +50,77 @@
   padding: 0 24px;
 }
 
-/* ── 首页 Hero（全局背景图，全宽） ── */
+/* ── 首页 Hero（白色背景，无主图） ── */
 .omni-hero {
   position: relative;
   margin-left: calc(50% - 50vw);
   margin-right: calc(50% - 50vw);
   width: 100vw;
-  padding: 176px 0 150px;
-  background:
-    linear-gradient(90deg, rgba(30, 64, 175, .62) 0%, rgba(37, 99, 235, .32) 48%, rgba(37, 99, 235, .06) 78%),
-    url('../assets/images/hero_illustration.jpg') center/cover no-repeat;
-  color: #fff;
+  padding: 120px 0 96px;
+  background: #ffffff;
+  color: var(--text);
 }
 .omni-hero-inner {
   max-width: 1080px;
   margin: 0 auto;
   padding: 0 24px;
-  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 56px;
+}
+.hero-text {
+  flex: 1 1 46%;
+  min-width: 0;
+}
+.hero-shot {
+  flex: 1 1 54%;
+  min-width: 0;
+}
+.hero-shot .win-window img {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 .hero-badge {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   padding: 6px 16px;
-  background: rgba(255, 255, 255, .2);
-  border: 1px solid rgba(255, 255, 255, .35);
+  background: var(--accent-soft);
+  border: 1px solid rgba(37, 99, 235, .2);
   border-radius: 100px;
   font-size: 13px;
   font-weight: 500;
-  color: #fff;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, .15);
+  color: var(--accent);
   margin-bottom: 26px;
 }
 .hero-badge .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #4ade80;
-  animation: omni-pulse 2s ease-in-out infinite;
-}
-@keyframes omni-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: .6; transform: scale(1.25); }
+  background: #22c55e;
 }
 .omni-hero h1 {
   font-size: 48px;
   font-weight: 700;
   letter-spacing: -.8px;
   line-height: 1.22;
-  color: #fff;
+  color: var(--text);
   margin: 0 0 18px;
-  text-shadow: 0 2px 16px rgba(0, 0, 0, .25);
 }
-.omni-hero h1 .accent { color: #fff; }
+.omni-hero h1 .accent { color: var(--accent); }
 .omni-hero .hero-sub {
   max-width: 560px;
   margin: 0 0 34px;
   font-size: 16.5px;
-  color: rgba(255, 255, 255, .92);
-  text-shadow: 0 1px 8px rgba(0, 0, 0, .2);
+  color: var(--text-secondary);
 }
 .hero-cta {
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
 }
-.btn {
+.md-typeset .btn {
   display: inline-flex;
   align-items: center;
   gap: 9px;
@@ -123,28 +128,17 @@
   border-radius: 6px;
   font-size: 15px;
   font-weight: 600;
-  transition: all .18s ease;
+  transition: background .18s ease, transform .18s ease;
   cursor: pointer;
   text-decoration: none;
 }
-.btn svg { width: 17px; height: 17px; }
-.btn-primary {
-  background: #fff;
-  color: var(--accent);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, .28);
-}
-.btn-primary:hover {
-  background: #eef4ff;
-  color: var(--accent-hover);
-  transform: translateY(-1px);
-}
-.btn-secondary {
-  background: rgba(255, 255, 255, .15);
+.md-typeset .btn svg { width: 17px; height: 17px; }
+.md-typeset .btn-primary {
+  background: var(--accent);
   color: #fff;
-  border: 1px solid rgba(255, 255, 255, .45);
 }
-.btn-secondary:hover {
-  background: rgba(255, 255, 255, .22);
+.md-typeset .btn-primary:hover {
+  background: var(--accent-hover);
   color: #fff;
   transform: translateY(-1px);
 }
@@ -223,91 +217,6 @@
   margin: 0;
 }
 
-/* ── 特性网格（3 列） ── */
-.feature-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
-}
-.feature-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 26px 24px;
-  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
-}
-.feature-card:hover {
-  transform: translateY(-3px);
-  box-shadow: var(--shadow-hover);
-  border-color: rgba(37, 99, 235, .35);
-}
-.feature-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent-soft);
-  color: var(--accent);
-  margin-bottom: 16px;
-}
-.feature-icon svg { width: 22px; height: 22px; }
-.feature-card h3 {
-  font-size: 16.5px;
-  font-weight: 650;
-  margin: 0 0 8px;
-  color: var(--text);
-}
-.feature-card p {
-  font-size: 13.5px;
-  color: var(--text-secondary);
-  margin: 0 0 12px;
-}
-.feature-card .more {
-  display: inline-block;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-/* ── 功能介绍网格（2 列，窗口截图） ── */
-.intro-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 24px;
-}
-.intro-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  box-shadow: var(--shadow);
-  transition: transform .2s ease, box-shadow .2s ease;
-}
-.intro-card:hover {
-  transform: translateY(-3px);
-  box-shadow: var(--shadow-hover);
-}
-.intro-card .win-window {
-  border: none;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  box-shadow: none;
-}
-.intro-body { padding: 20px 22px 24px; }
-.intro-body h3 {
-  font-size: 17px;
-  font-weight: 650;
-  margin: 0 0 8px;
-  color: var(--text);
-}
-.intro-body p {
-  font-size: 13.5px;
-  color: var(--text-secondary);
-  margin: 0 0 10px;
-}
-.intro-body .more { font-size: 13px; font-weight: 600; }
-
 /* ── Windows 窗口框架 ── */
 .win-window {
   background: var(--card);
@@ -379,12 +288,11 @@
   height: 60px;
   margin: 0 auto 18px;
   border-radius: 16px;
-  background: linear-gradient(135deg, var(--accent), #3b82f6);
+  background: var(--accent);
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  box-shadow: 0 8px 24px rgba(37, 99, 235, .35);
 }
 .dl-icon svg { width: 30px; height: 30px; }
 .dl-main h3 {
@@ -398,7 +306,7 @@
   color: var(--text-secondary);
   margin: 0 0 22px;
 }
-.dl-btn {
+.md-typeset .dl-btn {
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -408,17 +316,16 @@
   border-radius: 6px;
   font-size: 15px;
   font-weight: 600;
-  box-shadow: 0 6px 20px rgba(37, 99, 235, .35);
-  transition: all .18s ease;
+  transition: background .18s ease, transform .18s ease;
   margin-bottom: 14px;
   text-decoration: none;
 }
-.dl-btn:hover {
+.md-typeset .dl-btn:hover {
   background: var(--accent-hover);
   color: #fff;
   transform: translateY(-2px);
 }
-.dl-btn svg { width: 19px; height: 19px; }
+.md-typeset .dl-btn svg { width: 19px; height: 19px; }
 .dl-meta { font-size: 13px; color: var(--text-secondary); }
 .dl-meta a { font-weight: 600; }
 .dl-list { list-style: none; margin: 0; padding: 0; }
@@ -437,8 +344,8 @@
   width: 20px;
   height: 20px;
   border-radius: 6px;
-  background: rgba(34, 197, 94, .12);
-  color: #16a34a;
+  background: #16a34a;
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -500,8 +407,8 @@
   height: 20px;
   margin-top: 2px;
   border-radius: 6px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--accent);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -540,8 +447,8 @@
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--accent);
+  color: #fff;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -567,10 +474,11 @@ html.js .reveal.visible {
 
 /* ── 响应式 ── */
 @media (max-width: 900px) {
-  .omni-hero { padding: 120px 0 100px; }
+  .omni-hero { padding: 80px 0 64px; }
+  .omni-hero-inner { flex-direction: column; gap: 40px; }
+  .hero-text { flex: 1 1 auto; max-width: 100%; }
+  .hero-shot { flex: 1 1 auto; width: 100%; }
   .omni-hero h1 { font-size: 34px; }
-  .feature-grid { grid-template-columns: repeat(2, 1fr); }
-  .intro-grid { grid-template-columns: 1fr; }
   .download-grid { grid-template-columns: 1fr; }
   .page-block { grid-template-columns: 1fr; gap: 28px; }
   .page-block.flip .page-shot { order: 0; }
@@ -579,6 +487,5 @@ html.js .reveal.visible {
   .omni-hero--pages h1 { font-size: 30px; }
 }
 @media (max-width: 620px) {
-  .feature-grid { grid-template-columns: 1fr; }
   .omni-hero h1 { font-size: 28px; }
 }

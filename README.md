@@ -24,6 +24,12 @@ OMNI Link 是一站式嵌入式开发工作台，提供 Flash 烧录、Commander
 
 ![Chip Import Page](assets/images/chip_import_page.png)
 
+## Zone 调试和性能分析
+
+支持源码调试、汇编窗口、寄存器、外设、调用栈、Watch 变量监视与内存查看整合于一个视图，全链路可视化调试。
+
+![Zone 调试工作台](assets/images/zone_page.png)
+
 ## Flash 烧录工具
 
 支持 bin/hex/elf 格式固件烧录，提供整片擦除与扇区擦除两种模式，烧录后可自动校验。Hex 查看器支持 1B/2B/4B 分组显示，配合 Fill Memory 与 Compare 功能完成数据级别的比对与填充操作。左侧设备面板实时显示探针连接状态与目标芯片信息，底部状态栏展示 SWD 接口、通信速率等连接参数。

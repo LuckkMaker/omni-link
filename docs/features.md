@@ -25,10 +25,10 @@ hide:
     <div class="page-shot reveal">
       <div class="win-window">
         <div class="win-titlebar">
-          <span class="wt"><img src="assets/images/icon_rounded.png" alt="">OMNI Link — Zone 调试工作台</span>
+          <span class="wt"><img src="../assets/images/icon_rounded.png" alt="">OMNI Link — Zone 调试工作台</span>
           <div class="win-controls"><span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span></div>
         </div>
-        <img src="assets/images/zone_page.png" alt="Zone 调试工作台界面">
+        <img src="../assets/images/zone_page.png" alt="Zone 调试工作台界面">
       </div>
     </div>
     <div class="page-info reveal">
@@ -49,10 +49,10 @@ hide:
     <div class="page-shot reveal">
       <div class="win-window">
         <div class="win-titlebar">
-          <span class="wt"><img src="assets/images/icon_rounded.png" alt="">OMNI Link — Flash 烧录</span>
+          <span class="wt"><img src="../assets/images/icon_rounded.png" alt="">OMNI Link — Flash 烧录</span>
           <div class="win-controls"><span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span></div>
         </div>
-        <img src="assets/images/flash_page.png" alt="Flash 烧录工具界面">
+        <img src="../assets/images/flash_page.png" alt="Flash 烧录工具界面">
       </div>
     </div>
     <div class="page-info reveal">
@@ -72,10 +72,10 @@ hide:
     <div class="page-shot reveal">
       <div class="win-window">
         <div class="win-titlebar">
-          <span class="wt"><img src="assets/images/icon_rounded.png" alt="">OMNI Link — Commander</span>
+          <span class="wt"><img src="../assets/images/icon_rounded.png" alt="">OMNI Link — Commander</span>
           <div class="win-controls"><span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span></div>
         </div>
-        <img src="assets/images/commander_page.png" alt="Commander 命令行界面">
+        <img src="../assets/images/commander_page.png" alt="Commander 命令行界面">
       </div>
     </div>
     <div class="page-info reveal">
@@ -95,10 +95,10 @@ hide:
     <div class="page-shot reveal">
       <div class="win-window">
         <div class="win-titlebar">
-          <span class="wt"><img src="assets/images/icon_rounded.png" alt="">OMNI Link — RTT Viewer</span>
+          <span class="wt"><img src="../assets/images/icon_rounded.png" alt="">OMNI Link — RTT Viewer</span>
           <div class="win-controls"><span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span></div>
         </div>
-        <img src="assets/images/rtt_viewer_page.png" alt="RTT Viewer 界面">
+        <img src="../assets/images/rtt_viewer_page.png" alt="RTT Viewer 界面">
       </div>
     </div>
     <div class="page-info reveal">
@@ -118,10 +118,10 @@ hide:
     <div class="page-shot reveal">
       <div class="win-window">
         <div class="win-titlebar">
-          <span class="wt"><img src="assets/images/icon_rounded.png" alt="">OMNI Link — Monitor</span>
+          <span class="wt"><img src="../assets/images/icon_rounded.png" alt="">OMNI Link — Monitor</span>
           <div class="win-controls"><span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span></div>
         </div>
-        <img src="assets/images/monitor_page.png" alt="Monitor 变量监控界面">
+        <img src="../assets/images/monitor_page.png" alt="Monitor 变量监控界面">
       </div>
     </div>
     <div class="page-info reveal">
@@ -147,7 +147,7 @@ hide:
 
       <div class="tool-card reveal">
         <div class="win-window" style="border:none;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none">
-          <img src="assets/images/fault_analyzer_page.png" alt="Fault Analyzer">
+          <img src="../assets/images/fault_analyzer_page.png" alt="Fault Analyzer">
         </div>
         <div class="tc-body">
           <h4><span class="tci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>Fault Analyzer</h4>
@@ -157,7 +157,7 @@ hide:
 
       <div class="tool-card reveal">
         <div class="win-window" style="border:none;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none">
-          <img src="assets/images/map_analyzer_page.png" alt="Map Analyzer">
+          <img src="../assets/images/map_analyzer_page.png" alt="Map Analyzer">
         </div>
         <div class="tc-body">
           <h4><span class="tci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>Map Analyzer</h4>
@@ -167,7 +167,7 @@ hide:
 
       <div class="tool-card reveal">
         <div class="win-window" style="border:none;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none">
-          <img src="assets/images/number_converter_page.png" alt="Number Converter">
+          <img src="../assets/images/number_converter_page.png" alt="Number Converter">
         </div>
         <div class="tc-body">
           <h4><span class="tci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01"/></svg></span>Number Converter</h4>
@@ -177,7 +177,7 @@ hide:
 
       <div class="tool-card reveal">
         <div class="win-window" style="border:none;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none">
-          <img src="assets/images/chip_import_page.png" alt="File Checksum / 芯片管理">
+          <img src="../assets/images/chip_import_page.png" alt="File Checksum / 芯片管理">
         </div>
         <div class="tc-body">
           <h4><span class="tci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>File Checksum</h4>
@@ -193,10 +193,10 @@ hide:
     <div class="page-shot reveal">
       <div class="win-window">
         <div class="win-titlebar">
-          <span class="wt"><img src="assets/images/icon_rounded.png" alt="">OMNI Link — 设置</span>
+          <span class="wt"><img src="../assets/images/icon_rounded.png" alt="">OMNI Link — 设置</span>
           <div class="win-controls"><span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span></div>
         </div>
-        <img src="assets/images/chip_import_page.png" alt="设置 — 芯片管理界面">
+        <img src="../assets/images/chip_import_page.png" alt="设置 — 芯片管理界面">
       </div>
     </div>
     <div class="page-info reveal">
