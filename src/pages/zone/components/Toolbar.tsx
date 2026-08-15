@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, Trash2, Pause, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -85,6 +85,31 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   // 周期刷新激活（用于开关按钮高亮 + 图标旋转提示）。
   // 仅会话 active 时有效：未启动会话按钮禁用，且不显示激活态（避免旧持久化残留高亮）
   const periodicActive = sessionActive && refreshMode === 'periodic_always'
+  // 转动仅表示周期刷新正在实际运行（目标运行中）；目标暂停时模式仍开启（保持颜色）但不轮询
+  const periodicRunning = periodicActive && state === 'running'
+
+  // 自适应紧凑模式：工具栏内容溢出时隐藏文字标签（仅图标 + 悬停提示），
+  // 窗口足够宽时自动恢复完整标签。用 ResizeObserver 实测容器宽度，
+  // 不依赖固定断点，避免不同语言/字体宽度下误判。
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [compact, setCompact] = useState(false)
+  const fullWidthRef = useRef(0)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      if (compact) {
+        // 紧凑模式：容器宽度 ≥ 完整内容宽度 + 余量才恢复完整标签（滞回避免抖动）
+        if (el.clientWidth >= fullWidthRef.current + 48) setCompact(false)
+      } else {
+        // 完整模式：记录完整内容宽度，溢出则切换紧凑
+        fullWidthRef.current = el.scrollWidth
+        if (el.scrollWidth > el.clientWidth + 1) setCompact(true)
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [compact])
 
   // 仿真器未选择或设备未连接时，弹出「连接配置」弹窗（start 模式，含 ELF 选择区）
   const [configOpen, setConfigOpen] = useState(false)
@@ -126,12 +151,18 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   }, [uid, sessionActive, stopSession, handleStart])
 
   return (
-    <div className="flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-2">
+    <div
+      ref={containerRef}
+      className={cn(
+        'flex shrink-0 items-center gap-1 border-b border-border bg-card px-3 py-2',
+        compact && 'toolbar-compact'
+      )}
+    >
       <SplitButton
         main={
           <>
             <Power className={sessionActive ? 'size-3.5 text-red-500' : 'size-3.5 text-green-500'} />
-            {sessionActive ? 'Stop Session' : 'Start Session'}
+            <span data-toolbar-label>{sessionActive ? 'Stop Session' : 'Start Session'}</span>
           </>
         }
         disabled={busy || sessionConnecting}
@@ -172,7 +203,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title="Reset the CPU"
       >
         <RotateCcw className="size-4" />
-        Reset
+        <span data-toolbar-label>Reset</span>
       </Button>
       {/* Run：Start code execution。目标非暂停态（running/unknown）时禁用——
           运行中再按 Run 是冗余 no-op，禁用可避免"点得动但不执行"的误导，
@@ -186,7 +217,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title={state !== 'halted' ? '目标未暂停，无法启动执行' : 'Start code execution'}
       >
         <Play className="size-4" />
-        Run
+        <span data-toolbar-label>Run</span>
       </Button>
       {/* Stop：Stop code execution。目标非运行态（halted/unknown）时禁用——
           已暂停再按 Stop 是冗余 no-op，禁用避免"点得动但不执行"的误导，
@@ -200,7 +231,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title={state !== 'running' ? '目标未在运行，无需停止' : 'Stop code execution'}
       >
         <Square className="size-4" />
-        Stop
+        <span data-toolbar-label>Stop</span>
       </Button>
 
       <Separator orientation="vertical" className="mx-1 h-5" />
@@ -215,7 +246,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title="Step one line"
       >
         <ArrowDown className="size-4" />
-        Step Into
+        <span data-toolbar-label>Step Into</span>
       </Button>
       {/* Step Over：Step over the current line */}
       <Button
@@ -227,7 +258,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title="Step over the current line"
       >
         <CornerDownRight className="size-4" />
-        Step Over
+        <span data-toolbar-label>Step Over</span>
       </Button>
       {/* Step Out：Step out of the current function（非函数行禁用） */}
       <Button
@@ -243,7 +274,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         }
       >
         <CornerUpRight className="size-4" />
-        Step Out
+        <span data-toolbar-label>Step Out</span>
       </Button>
 
       <Separator orientation="vertical" className="mx-1 h-5" />
@@ -258,7 +289,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title="Kill all breakpoints in current target"
       >
         <Trash2 className="size-4" />
-        Kill All Breakpoints
+        <span data-toolbar-label>Kill All Breakpoints</span>
       </Button>
 
       <Separator orientation="vertical" className="mx-1 h-5" />
@@ -275,12 +306,14 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
           !sessionActive
             ? '启动调试会话后可用'
             : periodicActive
-              ? '周期刷新已开启（每 1 秒，运行中不打断程序）'
-              : '开启周期刷新（每 1 秒，运行中不打断程序）'
+              ? periodicRunning
+                ? 'Refreshing...'
+                : 'Periodic refresh (target paused)'
+              : 'Periodic refresh'
         }
       >
-        <RefreshCw className={cn('size-4', periodicActive && 'animate-spin')} />
-        周期刷新
+        <RefreshCw className={cn('size-4', periodicRunning && 'animate-spin')} />
+        <span data-toolbar-label>Periodic Refresh</span>
       </Button>
 
       {/* 连接配置弹窗（start 模式，含 ELF 选择区）——仅仿真器未选择/设备未连接时由 Start Session 触发 */}

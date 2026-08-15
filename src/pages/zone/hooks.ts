@@ -101,26 +101,40 @@ export function useAutoRefresh(
     }
 
     if (refreshMode === 'periodic_always') {
-      // 用户调试操作进行中：跳过本轮，100ms 后重试一次（操作间隙立即补上刷新），
-      // 避免与 halt/step/continue/reset 争抢后端资源
-      if (busy) {
-        const retry = setTimeout(() => guardedRefresh(), 100)
-        return () => clearTimeout(retry)
-      }
-      // 周期刷新：每 100ms（后端 AHB-AP 非侵入式读取，运行中不打断程序）。
-      // 100ms 可感知 ms_cnt（10ms 变化）的实时更新；s_cnt（1s 变化）每 10 次刷新跳 1
-      const timer = setInterval(guardedRefresh, 100)
-      // 立即刷新：busy 刚结束（操作间隙补上）或 halt 跳变（断点命中/用户 Stop 瞬间），
-      // 不等下一个周期，立即拿到最新值
-      const busyEnded = lastBusy.current && !busy
+      // 周期刷新仅目标运行中执行（后端 AHB-AP 非侵入式读取，观察运行中变量）。
+      // 目标暂停时不周期轮询——暂停时面板由 halt 事件/on_stop 驱动刷新，
+      // 但 halt 跳变（断点命中/用户 Stop 瞬间）仍需立即刷新一次，让面板立刻反映暂停后的值。
       const haltHit = state === 'halted' && (lastState.current !== 'halted' || lastTick.current !== refreshTick)
-      if (busyEnded || haltHit) {
+      if (state === 'running') {
+        // 用户调试操作进行中：跳过本轮，100ms 后重试一次（操作间隙立即补上刷新），
+        // 避免与 halt/step/continue/reset 争抢后端资源
+        if (busy) {
+          const retry = setTimeout(() => guardedRefresh(), 100)
+          return () => clearTimeout(retry)
+        }
+        // 周期刷新：每 100ms（后端 AHB-AP 非侵入式读取，运行中不打断程序）。
+        // 100ms 可感知 ms_cnt（10ms 变化）的实时更新；s_cnt（1s 变化）每 10 次刷新跳 1
+        const timer = setInterval(guardedRefresh, 100)
+        // 立即刷新：busy 刚结束（操作间隙补上）或 halt 跳变（断点命中/用户 Stop 瞬间），
+        // 不等下一个周期，立即拿到最新值
+        const busyEnded = lastBusy.current && !busy
+        if (busyEnded || haltHit) {
+          guardedRefresh()
+        }
+        lastBusy.current = busy
+        lastState.current = state
+        lastTick.current = refreshTick
+        return () => clearInterval(timer)
+      }
+      // 目标暂停：仅 halt 跳变时立即刷新一次，不周期轮询（调试操作进行中跳过）
+      if (haltHit && !busy) {
         guardedRefresh()
       }
-      lastBusy.current = busy
       lastState.current = state
+      lastPc.current = pcRef.current
       lastTick.current = refreshTick
-      return () => clearInterval(timer)
+      lastBusy.current = busy
+      return
     }
     // off：不自动刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps

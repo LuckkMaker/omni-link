@@ -43,6 +43,13 @@
   }
 }
 
+/* ── Zone 工具栏紧凑模式 ────────────── */
+/* 工具栏内容溢出时（窗口过窄）隐藏文字标签、仅保留图标，悬停 title 提示仍可用。
+   compact 状态由 Toolbar.tsx 的 ResizeObserver 实测容器宽度自动切换。 */
+.toolbar-compact [data-toolbar-label] {
+  display: none;
+}
+
 /* ── xterm.js 终端样式修正 ────────────── */
 /* 确保终端容器完全填充父级，消除底部间隙 */
 .xterm {
