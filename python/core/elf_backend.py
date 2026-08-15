@@ -550,6 +550,19 @@ class ElfBackend:
             return (start, end, name, faddr, fsize)
         return None
 
+    def _next_code_address(self, uid: str, address: int) -> Optional[int]:
+        """返回 address 之后的下一个函数起点（用于跳过数据间隙，如 .rodata 常量表），无则 None"""
+        entry = self._get(uid)
+        if not entry:
+            return None
+        ranges = self._function_ranges(uid)
+        if not ranges:
+            return None
+        for start, end, name, faddr, fsize in ranges:
+            if start > address:
+                return start & ~1
+        return None
+
     def is_function_address(self, uid: str, address: int) -> bool:
         """判断地址是否落在某个已知函数内（用于栈回溯的返回地址过滤）"""
         return self._find_func(uid, address) is not None
@@ -1304,6 +1317,15 @@ class ElfBackend:
             instructions.append(ins)
             if len(instructions) >= max_instructions:
                 break
+
+        # 数据间隙：请求地址处为常量表等非代码数据（如 .rodata 浮点常量表），
+        # capstone 解码不出任何指令。跳到下一个函数起点继续反汇编，否则前端
+        # 从该地址继续分页会一直拿到空结果，导致 PC 指示丢失。
+        if not instructions:
+            next_addr = self._next_code_address(uid, address)
+            if next_addr is not None and next_addr != address:
+                return self.disassemble(uid, next_addr, length, max_instructions)
+
         return {
             "success": True,
             "address": address,
@@ -1334,16 +1356,20 @@ class ElfBackend:
         """从 ELF program segments 读取代码（兼容无 read 方法的 ELFFile）
 
         按运行时虚拟地址（p_vaddr）匹配，兼容 LMA(VMA) 不同的链接方式。
+        请求窗口超出段末尾时按段边界截断返回剩余字节，而不是返回空——
+        否则段尾的最后几条指令（PC 可能停在那里）因窗口越界读不到，
+        反汇编会回退到入口点区域，导致 PC 指示丢失。
         """
         for segment in elf.iter_segments():
             if segment["p_type"] != "PT_LOAD":
                 continue
             seg_addr = segment["p_vaddr"]
             seg_size = segment["p_filesz"]
-            if address >= seg_addr and address + length <= seg_addr + seg_size:
+            if address >= seg_addr and address < seg_addr + seg_size:
                 data = segment.data()
                 start = address - seg_addr
-                return data[start:start + length]
+                avail = seg_addr + seg_size - address
+                return data[start:start + min(length, avail)]
         return b""
 
     # ── 清理 ──────────────────────────────────────

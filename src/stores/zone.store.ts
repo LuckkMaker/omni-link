@@ -602,6 +602,8 @@ export const useZoneStore = create<ZoneStore>()(
             activeSourceFile: null,
             closedByUser: [],
             followSource: true,
+            // 停止会话时自动停止周期刷新（按钮仅在会话 active 时可切换，此处复位避免残留高亮）
+            refreshMode: 'on_stop',
           })
           zoneLog('info', 'Zone Stop debug session')
           useNotificationStore.getState().push({

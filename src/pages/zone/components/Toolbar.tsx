@@ -82,8 +82,9 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   // Step Out 仅在目标暂停且当前行落在函数内时可用（非函数行无法出栈）
   const stepOutDisabled = disabled || state !== 'halted' || !currentFunction
 
-  // 周期刷新激活（用于开关按钮高亮 + 图标旋转提示）
-  const periodicActive = refreshMode === 'periodic_always'
+  // 周期刷新激活（用于开关按钮高亮 + 图标旋转提示）。
+  // 仅会话 active 时有效：未启动会话按钮禁用，且不显示激活态（避免旧持久化残留高亮）
+  const periodicActive = sessionActive && refreshMode === 'periodic_always'
 
   // 仿真器未选择或设备未连接时，弹出「连接配置」弹窗（start 模式，含 ELF 选择区）
   const [configOpen, setConfigOpen] = useState(false)
@@ -187,14 +188,16 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         <Play className="size-4" />
         Run
       </Button>
-      {/* Stop：Stop code execution */}
+      {/* Stop：Stop code execution。目标非运行态（halted/unknown）时禁用——
+          已暂停再按 Stop 是冗余 no-op，禁用避免"点得动但不执行"的误导，
+          同时阻断连点产生的重复 halt 请求堆积到 SWD 链路。 */}
       <Button
         variant="ghost"
         size="sm"
         onClick={() => uid && halt(uid)}
-        disabled={disabled}
+        disabled={disabled || state !== 'running'}
         className="h-8 gap-1.5"
-        title="Stop code execution"
+        title={state !== 'running' ? '目标未在运行，无需停止' : 'Stop code execution'}
       >
         <Square className="size-4" />
         Stop
@@ -260,16 +263,20 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
 
       <Separator orientation="vertical" className="mx-1 h-5" />
 
-      {/* 周期刷新：一级开关，点击激活/关闭周期刷新（每 1 秒，运行中不打断程序） */}
+      {/* 周期刷新：一级开关，点击激活/关闭周期刷新（每 1 秒，运行中不打断程序）。
+          仅调试会话启动后可用；停止会话时由 stopSession 自动复位为 on_stop */}
       <Button
         variant="ghost"
         size="sm"
         onClick={() => setRefreshMode(periodicActive ? 'on_stop' : 'periodic_always')}
+        disabled={!sessionActive}
         className={cn('h-8 gap-1.5', periodicActive && 'text-primary')}
         title={
-          periodicActive
-            ? '周期刷新已开启（每 1 秒，运行中不打断程序）'
-            : '开启周期刷新（每 1 秒，运行中不打断程序）'
+          !sessionActive
+            ? '启动调试会话后可用'
+            : periodicActive
+              ? '周期刷新已开启（每 1 秒，运行中不打断程序）'
+              : '开启周期刷新（每 1 秒，运行中不打断程序）'
         }
       >
         <RefreshCw className={cn('size-4', periodicActive && 'animate-spin')} />

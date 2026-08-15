@@ -134,7 +134,12 @@ export default function ZonePage() {
       setState('disconnected')
       // 断开/重连后清除调试会话状态与断点，避免 UI 残留；并递增版本号，
       // 使发起于旧会话的僵尸异步回调（如仍在烧录/刷新的 startSession）失效
-      useZoneStore.setState((s) => ({ sessionStatus: 'idle', sessionNonce: s.sessionNonce + 1 }))
+      useZoneStore.setState((s) => ({
+        sessionStatus: 'idle',
+        sessionNonce: s.sessionNonce + 1,
+        // 断开即停止会话：周期刷新一并复位，避免按钮残留高亮
+        refreshMode: 'on_stop',
+      }))
       useZoneStore.getState().breakpoints.length > 0 && setBreakpoints([])
     }
   }, [isConnected, uid, refreshStatus, setState, setBreakpoints])

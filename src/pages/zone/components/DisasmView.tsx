@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo, useLayoutEffect } fr
 import { Loader2, AlertCircle } from 'lucide-react'
 import { useZoneStore } from '../store'
 import { useSessionReady } from '../hooks'
+import { useLogStore } from '@/stores/log.store'
 import * as zoneService from '@/services/zone.service'
 import type { DisasmRow } from '@/services/zone.service'
 
@@ -15,6 +16,21 @@ const WINDOW_LEN = 64
 const WINDOW_MAX = 32
 // 初始加载时向目标地址之前预加载的窗口数，避免一向上滚动就触发 prepend 加载
 const PRELOAD_WINDOWS = 4
+
+// 反汇编诊断日志：写入全局日志区（来源 zone），便于分析 PC 指示丢失 / 源码对应汇编未加载问题
+function zoneDbg(level: 'info' | 'warning' | 'error', message: string) {
+  useLogStore.getState().addLog({
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    source: 'zone',
+  })
+}
+
+/** 十六进制地址格式化（null 显示 '-'） */
+function hx(n: number | null | undefined): string {
+  return n == null ? '-' : `0x${n.toString(16).toUpperCase()}`
+}
 
 // 分支 / 跳转指令：点击操作数中的目标地址可导航到该地址的反汇编
 const BRANCH_MNEMONICS = new Set(['b', 'bl', 'bx', 'blx', 'cbz', 'cbnz', 'tbb', 'tbh'])
@@ -183,6 +199,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
       if (!uid || loadingRef.current) return
       const epoch = loadEpochRef.current
       loadingRef.current = true
+      zoneDbg('info', `[Disasm] 分页加载 addr=${hx(addr)} dir=${direction} epoch=${epoch}`)
       if (direction === 'replace') setLoading(true)
       else {
         setLoadingMore(true)
@@ -194,7 +211,10 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
       try {
         const res = await zoneService.zoneDisasm(uid, addr, WINDOW_LEN, WINDOW_MAX)
         // 期间发生了新的 loadInitial（epoch 变化），本次增量结果已过期，丢弃
-        if (epoch !== loadEpochRef.current) return
+        if (epoch !== loadEpochRef.current) {
+          zoneDbg('info', `[Disasm] 分页加载过期丢弃 addr=${hx(addr)} dir=${direction} epoch=${epoch} != ${loadEpochRef.current}`)
+          return
+        }
         if (!res.success) {
           // 窗口两端已到代码边界或无代码：停止该方向继续加载
           if (direction === 'append') setCanNext(false)
@@ -220,7 +240,10 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
           setCanPrev(nextCount >= WINDOW_MAX)
         }
       } catch (e) {
-        if (epoch === loadEpochRef.current) setError(e instanceof Error ? e.message : '反汇编失败')
+        if (epoch === loadEpochRef.current) {
+          zoneDbg('error', `[Disasm] 分页加载出错 addr=${hx(addr)} dir=${direction} epoch=${epoch}: ${e instanceof Error ? e.message : String(e)}`)
+          setError(e instanceof Error ? e.message : '反汇编失败')
+        }
       } finally {
         if (epoch === loadEpochRef.current) {
           loadingRef.current = false
@@ -254,6 +277,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
       loadingRef.current = true
       setLoading(true)
       setError(null)
+      zoneDbg('info', `[Disasm] 初始加载 target=${hx(targetAddr)} epoch=${epoch}`)
       try {
         // 1. 向前预加载若干窗口（从 targetAddr - PRELOAD_WINDOWS*WINDOW_LEN 起）
         const frontStart = Math.max(0, targetAddr - PRELOAD_WINDOWS * WINDOW_LEN)
@@ -288,13 +312,22 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
           acc = dedupeAppend(acc, res.rows ?? [])
         }
         // 加载期间发生了更新的加载，丢弃本次结果
-        if (epoch !== loadEpochRef.current) return
+        if (epoch !== loadEpochRef.current) {
+          zoneDbg('info', `[Disasm] 初始加载过期丢弃 target=${hx(targetAddr)} epoch=${epoch} != ${loadEpochRef.current}`)
+          return
+        }
+        const covered = acc.some((r) => r.type === 'ins' && r.address === targetAddr)
+        zoneDbg(
+          'info',
+          `[Disasm] 初始加载完成 target=${hx(targetAddr)} epoch=${epoch} rows=${acc.length} ins=${acc.filter((r) => r.type === 'ins').length} pc覆盖=${covered} end=${hx(loadedEnd(acc))}`
+        )
         setBaseAddress(frontStart)
         setRows(acc)
         setCanPrev(frontCount >= WINDOW_MAX * PRELOAD_WINDOWS)
         setCanNext(!maybeEnd(acc))
       } catch (e) {
         if (epoch === loadEpochRef.current) {
+          zoneDbg('error', `[Disasm] 初始加载出错 target=${hx(targetAddr)} epoch=${epoch}: ${e instanceof Error ? e.message : String(e)}`)
           setError(e instanceof Error ? e.message : '反汇编失败')
         }
       } finally {
@@ -310,6 +343,7 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
   // 初始：ELF 未加载时清空；加载后从 PC 或默认地址反汇编（PC 就绪后自动重定位）
   useEffect(() => {
     if (!elfLoaded) {
+      zoneDbg('info', '[Disasm] ELF 未加载，清空视图')
       setRows([])
       setBaseAddress(null)
       setError(null)
@@ -322,6 +356,20 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
           ? pc >= loadedRange.start && pc < loadedRange.end
           : false
       if (!inRange) {
+        zoneDbg(
+          'info',
+          `[Disasm] PC=${hx(pc)} 超出已加载范围 [${hx(loadedRange.start)}-${hx(loadedRange.end)}] base=${hx(baseAddress)} → 重新加载`
+        )
+        void loadInitial(pc)
+        return
+      }
+      // PC 在已加载范围内，但无对应指令行（如反汇编跳过/地址间隙）→ 指示丢失，强制重新加载
+      const covered = rows.some((r) => r.type === 'ins' && r.address === pc)
+      if (!covered) {
+        zoneDbg(
+          'warning',
+          `[Disasm] ⚠ PC=${hx(pc)} 在范围内但无指令行 range=[${hx(loadedRange.start)}-${hx(loadedRange.end)}] base=${hx(baseAddress)} rows=${rows.length} → 强制重新加载`
+        )
         void loadInitial(pc)
         return
       }
@@ -333,12 +381,17 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
       // 同时复位加载标志：旧 loadInitial/loadWindow 的 finally 因 epoch 不匹配不会复位
       // loadingRef/setLoading/setLoadingMore，若不在此复位，后续加载会被永久阻塞、
       // 界面停留在「加载中...」。
+      const hadInflight = loadingRef.current
       loadEpochRef.current++
       loadingRef.current = false
       setLoading(false)
       setLoadingMore(false)
+      if (hadInflight) {
+        zoneDbg('info', `[Disasm] PC=${hx(pc)} 回到范围内，作废 in-flight 加载（epoch=${loadEpochRef.current}）`)
+      }
     }
     if (baseAddress === null) {
+      zoneDbg('info', `[Disasm] 起始地址为空 → 初始加载(${hx(startAddr)})`)
       void loadInitial(startAddr)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -367,21 +420,30 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
   // 若首次布局尚未就绪（如面板刚切换/隐藏态），下一帧重试一次。
   useLayoutEffect(() => {
     if (pc === null || pc === undefined) return
-    const doScroll = () => {
+    const doScroll = (retried = false) => {
+      // 加载进行中：等待结果应用后再定位，避免误报"行不存在"（PC 刚跳变、旧 rows 尚未更新）
+      if (loadingRef.current || loading) return
       const container = containerRef.current
       const el = lineRefs.current.get(pc)
-      if (!container || !el) return false
+      if (!container || !el) {
+        if (retried) {
+          zoneDbg(
+            'warning',
+            `[Disasm] ⚠ 滚动定位失败：PC=${hx(pc)} 行不存在 rows=${rows.length} range=[${hx(loadedRange.start)}-${hx(loadedRange.end)}]`
+          )
+        } else {
+          requestAnimationFrame(() => doScroll(true))
+        }
+        return
+      }
       const cRect = container.getBoundingClientRect()
       const eRect = el.getBoundingClientRect()
       const lineH = eRect.height || 16
       const target = container.scrollTop + (eRect.top - cRect.top) - cRect.height / 2 + lineH / 2
       container.scrollTo({ top: Math.max(0, target), behavior: 'auto' })
-      return true
     }
-    if (!doScroll()) {
-      requestAnimationFrame(doScroll)
-    }
-  }, [rows, pc])
+    doScroll()
+  }, [rows, pc, loadedRange, loading])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
