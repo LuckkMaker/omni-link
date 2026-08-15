@@ -325,6 +325,18 @@ export function DisasmView({ uid, connected }: DisasmViewProps) {
         void loadInitial(pc)
         return
       }
+      // PC 在已加载范围内。递增纪元丢弃可能仍在 in-flight 的旧 loadInitial
+      // （例如：用户 Run 后 PC 跳变触发 loadInitial(newPc)，尚未完成时用户又 Stop，
+      // PC 回到旧范围，此时 effect 走进来发现 PC in range 不重新加载，但旧 loadInitial
+      // 完成时会用 newPc 附近的数据覆盖 rows，导致 PC 行丢失）。每次 state 变化也递
+      // 增纪元，确保 state 关联的 loadWindow 增量加载不会被旧请求污染。
+      // 同时复位加载标志：旧 loadInitial/loadWindow 的 finally 因 epoch 不匹配不会复位
+      // loadingRef/setLoading/setLoadingMore，若不在此复位，后续加载会被永久阻塞、
+      // 界面停留在「加载中...」。
+      loadEpochRef.current++
+      loadingRef.current = false
+      setLoading(false)
+      setLoadingMore(false)
     }
     if (baseAddress === null) {
       void loadInitial(startAddr)

@@ -85,6 +85,20 @@ type ZoneFunc = { name: string; address: number; size: number; file?: string | n
 const functionsCache = new Map<string, { funcs: ZoneFunc[]; ts: number }>()
 const FUNCTIONS_CACHE_TTL = 60_000
 
+/** PC → 源码位置缓存（按 uid:pc）：同一地址（如循环停在同一条指令 / 反复 Run-Stop 停同点）直接命中，
+ *  避免每次 PC 变化都打后端。仅缓存 halt 时解析的结果（运行中 PC 无意义）。 */
+const pcLineCache = new Map<string, { file: string; line: number } | null>()
+const PC_LINE_CACHE_MAX = 512
+
+/** 行号是否在模型有效范围内。Monaco 对非法行号（<1 或 > lineCount）抛
+ *  Illegal value for lineNumber。model 未就绪时仅校验下限，上限由 pcLine 吸附
+ *  effect 在模型加载后兜底。 */
+function validLine(model: monaco.editor.ITextModel | null | undefined, line: number): boolean {
+  if (line < 1) return false
+  if (!model) return true
+  return line <= model.getLineCount()
+}
+
 /** 获取（并缓存）函数列表；缓存失效时重新拉取 */
 async function getCachedFunctions(uid: string): Promise<ZoneFunc[]> {
   const hit = functionsCache.get(uid)
@@ -1127,10 +1141,12 @@ export function SourceView({ uid }: SourceViewProps) {
               setPcLine(null)
               setCursorLine({ file: activeSourceFile, line: nav.line })
               // setModel 后编辑器尚未完成新模型布局，立即 reveal 无法正确居中；延后到下一帧再居中
-              requestAnimationFrame(() => {
-                if (cancelled) return
-                editor.revealLineInCenter(nav.line)
-              })
+              if (validLine(editor.getModel(), nav.line)) {
+                requestAnimationFrame(() => {
+                  if (cancelled) return
+                  editor.revealLineInCenter(nav.line)
+                })
+              }
             } else if (followSourceRef.current === false && vs) {
               // 用户手动切换回已打开并滚动过的文件：恢复视口（优先于 PC 定位滚动）
               editor.restoreViewState(vs)
@@ -1141,14 +1157,22 @@ export function SourceView({ uid }: SourceViewProps) {
               const pending = pendingPcRef.current
               if (pending && norm(pending.file) === key) {
                 pendingPcRef.current = null
-                setPcLine(pending.line)
-                editor.revealLineInCenter(pending.line)
+                if (validLine(editor.getModel(), pending.line)) {
+                  setPcLine(pending.line)
+                  editor.revealLineInCenter(pending.line)
+                } else {
+                  setPcLine(null)
+                }
               } else {
                 // 用户手动切换到含 PC 的文件：pending 未命中，改用最近一次解析到的 PC 位置居中
                 const pLoc = pcLocationRef.current
                 if (pLoc && norm(pLoc.file) === key) {
-                  setPcLine(pLoc.line)
-                  editor.revealLineInCenter(pLoc.line)
+                  if (validLine(editor.getModel(), pLoc.line)) {
+                    setPcLine(pLoc.line)
+                    editor.revealLineInCenter(pLoc.line)
+                  } else {
+                    setPcLine(null)
+                  }
                 } else {
                   // 兜底：实时查询当前 PC 在该文件对应的行（覆盖 pcLocationRef 尚未就绪的时序）
                   const curPc = pcRef.current
@@ -1162,8 +1186,14 @@ export function SourceView({ uid }: SourceViewProps) {
                           line.file &&
                           (norm(line.file) === key || norm(line.file).endsWith('/' + key))
                         ) {
-                          setPcLine(line.line ?? null)
-                          editor.revealLineInCenter(line.line ?? 1)
+                          const ln = line.line ?? 1
+                          if (validLine(editor.getModel(), ln)) {
+                            setPcLine(ln)
+                            editor.revealLineInCenter(ln)
+                          } else {
+                            setPcLine(null)
+                            editor.setScrollTop(0)
+                          }
                         } else {
                           setPcLine(null)
                           editor.setScrollTop(0)
@@ -1216,16 +1246,79 @@ export function SourceView({ uid }: SourceViewProps) {
       const line = navGoto.line
       clearGoto()
       setCursorLine({ file: activeSourceFile, line })
-      requestAnimationFrame(() => {
-        if (editorRef.current) editorRef.current.revealLineInCenter(line)
-      })
+      if (validLine(model, line)) {
+        requestAnimationFrame(() => {
+          if (editorRef.current) editorRef.current.revealLineInCenter(line)
+        })
+      }
     }
   }, [navGoto, activeSourceFile, clearGoto, setCursorLine])
 
-  // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件
+  // 应用 PC 源码位置：切换文件（跟随）或设置当前文件行高亮并居中
+  const applyPcLocation = useCallback(
+    (loc: { file: string; line: number } | null) => {
+      if (!loc) {
+        setPcLine(null)
+        return
+      }
+      const targetBase = norm(loc.file)
+      const cur = norm(activeSourceFile ?? '')
+      // 在源文件列表中定位完整路径（get_line 返回的可能是 basename）
+      const targetFull =
+        sourceFiles.find((f) => {
+          const fp = norm(f.path)
+          return fp === targetBase || fp.endsWith('/' + targetBase) || fp.endsWith(targetBase)
+        })?.path ?? null
+      if (!targetFull) {
+        setPcLine(null)
+        return
+      }
+      // 始终保证执行文件已作为 tab 打开（不覆盖用户当前选择）
+      ensureSourceFile(targetFull)
+      // 记录最近一次 PC 源码位置，供模型加载完成后滚动居中
+      pcLocationRef.current = { file: targetFull, line: loc.line }
+      if (targetFull !== activeSourceFile) {
+        if (followSource && !closedByUser.includes(targetFull)) {
+          // 跟随：记录待跳转行并切换文件，加载完成后由上面 effect 应用
+          pendingPcRef.current = { file: targetFull, line: loc.line }
+          setActiveSourceFile(targetFull)
+        } else {
+          // 用户主动关闭了该文件或手动选择了其他文件：不强制切换，当前文件无执行位置
+          setPcLine(null)
+        }
+        return
+      }
+      pendingPcRef.current = null
+      // 校验行号：后端可能返回 0 或超出文件行数，Monaco 会抛 Illegal value for lineNumber
+      if (!validLine(editorRef.current?.getModel(), loc.line)) {
+        setPcLine(null)
+        return
+      }
+      setPcLine(loc.line)
+      // 仅自动跟随（单步/运行）时滚动到 PC 行；用户手动切换回文件时保持其记住的滚动位置
+      if (followSourceRef.current) {
+        editorRef.current?.revealLineInCenter(loc.line)
+      }
+    },
+    [activeSourceFile, sourceFiles, ensureSourceFile, followSource, closedByUser]
+  )
+
+  // 根据 PC 定位源码行；若 PC 落在其他文件则自动切换源文件。
+  // 仅目标暂停时解析：运行中 PC 无意义（后端 status 运行态返回 pc=null），
+  // 且避免运行期间 250ms 轮询每次 pc 变化都打一次 zoneSourceLine 造成请求堆积、
+  // 拖慢暂停后的首次定位（「不够跟手」的主要来源）。
   useEffect(() => {
-    if (!uid || !elfPath || pc === null || pc === undefined) {
+    if (!uid || !elfPath || pc === null || pc === undefined || state !== 'halted') {
       setPcLine(null)
+      return
+    }
+    // PC → 行缓存：同一地址（如循环停在同一条指令 / 反复 Run-Stop 停同点）直接命中，
+    // 跳过后端往返，让高亮与滚动在下一帧立即生效。键含 elfPath：不同固件（新会话）
+    // 同一地址可能映射到不同文件/行，避免跨会话复用旧映射。
+    const key = `${elfPath}:${uid}:${pc}`
+    const hit = pcLineCache.get(key)
+    if (hit !== undefined) {
+      applyPcLocation(hit)
       return
     }
     let cancelled = false
@@ -1233,50 +1326,17 @@ export function SourceView({ uid }: SourceViewProps) {
       .zoneSourceLine(uid, pc)
       .then((line) => {
         if (cancelled) return
-        if (line && line.file) {
-          const targetBase = norm(line.file)
-          const cur = norm(activeSourceFile ?? '')
-          // 在源文件列表中定位完整路径（get_line 返回的可能是 basename）
-          const targetFull =
-            sourceFiles.find((f) => {
-              const fp = norm(f.path)
-              return fp === targetBase || fp.endsWith('/' + targetBase) || fp.endsWith(targetBase)
-            })?.path ?? null
-          if (!targetFull) {
-            setPcLine(null)
-            return
-          }
-          // 始终保证执行文件已作为 tab 打开（不覆盖用户当前选择）
-          ensureSourceFile(targetFull)
-          // 记录最近一次 PC 源码位置，供模型加载完成后滚动居中
-          pcLocationRef.current = { file: targetFull, line: line.line ?? 1 }
-          if (targetFull !== activeSourceFile) {
-            if (followSource && !closedByUser.includes(targetFull)) {
-              // 跟随：记录待跳转行并切换文件，加载完成后由上面 effect 应用
-              pendingPcRef.current = { file: targetFull, line: line.line ?? 1 }
-              setActiveSourceFile(targetFull)
-            } else {
-              // 用户主动关闭了该文件或手动选择了其他文件：不强制切换，当前文件无执行位置
-              setPcLine(null)
-            }
-            return
-          }
-          pendingPcRef.current = null
-          setPcLine(line.line ?? null)
-          // 仅自动跟随（单步/运行）时滚动到 PC 行；用户手动切换回文件时保持其记住的滚动位置
-          if (followSourceRef.current) {
-            editorRef.current?.revealLineInCenter(line.line ?? -1)
-          }
-        } else {
-          setPcLine(null)
-        }
+        const loc = line && line.file ? { file: line.file, line: line.line ?? 1 } : null
+        if (pcLineCache.size >= PC_LINE_CACHE_MAX) pcLineCache.clear()
+        pcLineCache.set(key, loc)
+        applyPcLocation(loc)
       })
       .catch(() => setPcLine(null))
     return () => {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, elfPath])
+  }, [uid, pc, activeSourceFile, sourceFiles, setActiveSourceFile, ensureSourceFile, followSource, state, closedByUser, elfPath, applyPcLocation])
 
   // 加载当前文件的可执行行号（仅这些行可打断点）
   useEffect(() => {
@@ -1304,6 +1364,11 @@ export function SourceView({ uid }: SourceViewProps) {
     const editor = editorRef.current
     const model = editor?.getModel()
     if (!editor || !model) return
+    // 非法行号（后端可能返回 0 或超出文件行数）：清除，避免 Monaco getLineContent 抛错
+    if (pcLine < 1 || pcLine > model.getLineCount()) {
+      setPcLine(null)
+      return
+    }
     const content = model.getLineContent(pcLine)
     const isEmpty = !content || content.trim() === ''
     if (!isEmpty) return
