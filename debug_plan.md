@@ -19,3 +19,4 @@
 ## 优化 Monitor 页面功能
 
 ## 优化 Zone 页面功能
+1. 增加一个 Run to main() 的设置，作为session的启动选项

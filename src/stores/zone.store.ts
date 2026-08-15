@@ -489,7 +489,9 @@ export const useZoneStore = create<ZoneStore>()(
           await zoneService.zoneHalt(uid)
           zoneLog('info', 'Zone Halt')
           const st = await zoneService.zoneStatus(uid)
-          set({ state: st.state, pc: st.pc, busy: false })
+          // 递增刷新纪元：与 step/continue/reset 一致，保证 halt 后 on_stop 差值判断
+          // 一定触发（覆盖「连续 halt 时 state 已为 halted 差值不变」导致面板不刷新的场景）
+          set({ state: st.state, pc: st.pc, busy: false, refreshTick: get().refreshTick + 1 })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Halt failed'
           set({ busy: false, error: msg })

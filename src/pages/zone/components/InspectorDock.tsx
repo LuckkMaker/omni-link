@@ -512,6 +512,9 @@ function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWind
   // 刷新序号：latest-wins——快速连点 Run 时多次异步读内存乱序返回，
   // 只有最后一次的响应才允许落地，丢弃过期响应避免旧数据覆盖新数据
   const refreshSeqRef = useRef(0)
+  // skipped 重试计数：halt 后多面板并发刷新竞争后端协调锁，内存读取可能被跳过，
+  // 延迟重试确保最终拿到最新数据（上限 3 次，避免持续争用时无限重试）
+  const retryCountRef = useRef(0)
 
   // 切换窗口时同步输入框
   useEffect(() => {
@@ -534,8 +537,21 @@ function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWind
       // 已发起更新的刷新（res 过期）：丢弃本次结果，避免旧数据覆盖新数据
       if (seq !== refreshSeqRef.current) return
       if (res.success) {
-        // 调试操作进行中（后端协调锁被占用）：跳过本轮，保留现有数据
-        if (res.skipped) return
+        // 调试操作进行中（后端协调锁被占用）：延迟重试，避免 halt 后刷新被跳过
+        // 导致面板保持旧数据"不跟手"；重试上限 3 次，成功或超限即停止
+        if (res.skipped) {
+          if (retryCountRef.current < 3) {
+            retryCountRef.current += 1
+            const retrySeq = seq
+            setTimeout(() => {
+              // 期间已有新刷新发起（地址/窗口变化或手动刷新）：放弃重试，避免旧数据覆盖新数据
+              if (refreshSeqRef.current !== retrySeq) return
+              void refresh()
+            }, 120)
+          }
+          return
+        }
+        retryCountRef.current = 0
         // 浏览器环境无 Buffer，手动解析十六进制字符串为字节数组
         const hex = res.data_hex
         const bytes = new Uint8Array(hex.length / 2)
