@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, Trash2, Pause, RefreshCw } from 'lucide-react'
+import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, CircleSlash, Pause, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -25,12 +25,14 @@ function SplitButton({
   disabled,
   children,
   className,
+  title,
 }: {
   main: React.ReactNode
   onClick?: () => void
   disabled?: boolean
   children: React.ReactNode
   className?: string
+  title?: string
 }) {
   return (
     <div className={cn('flex items-stretch', className)}>
@@ -39,6 +41,7 @@ function SplitButton({
         size="sm"
         onClick={onClick}
         disabled={disabled}
+        title={title}
         className="h-8 gap-1.5 rounded-r-none border-r border-border/60"
       >
         {main}
@@ -167,6 +170,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         }
         disabled={busy || sessionConnecting}
         onClick={handleStartMain}
+        title={sessionActive ? 'Stop debug session' : 'Start debug session'}
       >
         <DropdownMenuItem onClick={() => handleStart('download_reset')}>
           <Download className="size-3.5 mr-1.5" />
@@ -288,7 +292,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         className="h-8 gap-1.5"
         title="Kill all breakpoints in current target"
       >
-        <Trash2 className="size-4" />
+        <CircleSlash className="size-4" />
         <span data-toolbar-label>Kill All Breakpoints</span>
       </Button>
 

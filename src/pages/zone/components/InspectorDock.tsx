@@ -159,7 +159,11 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
     }
   }, [ready, uid])
 
-  useAutoRefresh(uid, connected, ready, refresh, { canRefresh: () => state === 'halted' })
+  // 寄存器仅暂停时可读；periodicEnabled: false —— 不参与周期刷新，仅随调试操作在 halt 状态更新
+  useAutoRefresh(uid, connected, ready, refresh, {
+    canRefresh: () => state === 'halted',
+    periodicEnabled: false,
+  })
 
   useEffect(() => {
     if (ready) void refresh()
@@ -571,7 +575,8 @@ function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWind
     }
   }, [ready, uid, win])
 
-  useAutoRefresh(uid, connected, ready, refresh)
+  // periodicEnabled: false —— 内存不参与周期刷新，仅随调试操作在 halt 状态更新（地址/窗口变化仍手动刷新）
+  useAutoRefresh(uid, connected, ready, refresh, { periodicEnabled: false })
 
   // 手动刷新（含地址变化）
   useEffect(() => {

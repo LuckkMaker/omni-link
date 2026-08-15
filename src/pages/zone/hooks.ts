@@ -29,6 +29,12 @@ export function useSessionReady(uid: string | null, connected: boolean) {
 interface AutoRefreshOptions {
   /** 触发刷新前的额外门控（如 Call Stack 仅暂停时可读栈）。默认无门控。 */
   canRefresh?: () => boolean
+  /**
+   * 是否参与周期刷新（periodic_always 模式）。默认 true。
+   * 设为 false 的面板（寄存器/调用栈/内存）不随周期刷新轮询，
+   * periodic_always 对其降级为 on_stop 行为——仅随用户调试操作在 halt 状态更新。
+   */
+  periodicEnabled?: boolean
 }
 
 /**
@@ -67,6 +73,9 @@ export function useAutoRefresh(
   // 门控函数用 ref 持有：避免调用方传内联箭头函数时因函数引用变化导致 effect 每帧重跑
   const canRefreshRef = useRef(opts?.canRefresh)
   canRefreshRef.current = opts?.canRefresh
+  // 是否参与周期刷新用 ref 持有（同上，避免内联布尔/函数引用变化导致 effect 重跑）
+  const periodicEnabledRef = useRef(opts?.periodicEnabled ?? true)
+  periodicEnabledRef.current = opts?.periodicEnabled ?? true
   // in-flight 守卫：上一次刷新未完成时跳过本轮。周期刷新 100ms 触发一次，若后端处理慢
   // （断点命中后汇编/寄存器读取争用），无守卫会导致请求堆积压垮后端、busy 卡死、工具栏灰置。
   // 有守卫后刷新频率自动随后端处理速度调节：后端快则快刷，后端慢则自动降频不堆积。
@@ -84,8 +93,12 @@ export function useAutoRefresh(
     if (!uid || !connected || !ready) return
     // 面板级门控（如 Call Stack 仅暂停时可读栈）
     if (canRefreshRef.current && !canRefreshRef.current()) return
+    // 不参与周期刷新的面板（寄存器/调用栈/内存）：periodic_always 降级为 on_stop，
+    // 仅随用户调试操作在 halt 状态更新，不做周期性轮询
+    const effectiveMode =
+      refreshMode === 'periodic_always' && !periodicEnabledRef.current ? 'on_stop' : refreshMode
 
-    if (refreshMode === 'on_stop') {
+    if (effectiveMode === 'on_stop') {
       if (state === 'halted') {
         const stateChanged = lastState.current !== 'halted'
         const pcChanged = lastPc.current !== pcRef.current
@@ -100,7 +113,7 @@ export function useAutoRefresh(
       return
     }
 
-    if (refreshMode === 'periodic_always') {
+    if (effectiveMode === 'periodic_always') {
       // 周期刷新仅目标运行中执行（后端 AHB-AP 非侵入式读取，观察运行中变量）。
       // 目标暂停时不周期轮询——暂停时面板由 halt 事件/on_stop 驱动刷新，
       // 但 halt 跳变（断点命中/用户 Stop 瞬间）仍需立即刷新一次，让面板立刻反映暂停后的值。

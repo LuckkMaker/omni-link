@@ -179,7 +179,11 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   }, [ready])
 
   // 自动刷新（由 store refreshMode 驱动；仅目标暂停时可读栈，运行中不轮询）
-  useAutoRefresh(uid, connected, ready, refresh, { canRefresh: () => state === 'halted' })
+  // periodicEnabled: false —— 调用栈不参与周期刷新，仅随调试操作在 halt 状态更新
+  useAutoRefresh(uid, connected, ready, refresh, {
+    canRefresh: () => state === 'halted',
+    periodicEnabled: false,
+  })
 
   // 首次就绪且目标已暂停时读取一次（面板挂载时目标已 halt 的强制刷新，避免空帧）
   useEffect(() => {
