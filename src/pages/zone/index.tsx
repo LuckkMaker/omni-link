@@ -169,9 +169,11 @@ export default function ZonePage() {
   const sessionStatus = useZoneStore((s) => s.sessionStatus)
   useEffect(() => {
     if (!isConnected || !uid || sessionStatus !== 'active') return
+    // 250ms 轮询：断点命中（目标自行 halt）的检测延迟从 ≤1s 降到 ≤250ms，
+    // 命中瞬间即递增 refreshTick 驱动面板立即刷新（事件驱动，不等周期刷新）
     const timer = setInterval(() => {
       void refreshStatus(uid)
-    }, 1000)
+    }, 250)
     return () => clearInterval(timer)
   }, [isConnected, uid, refreshStatus, sessionStatus])
 

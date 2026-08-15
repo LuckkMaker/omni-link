@@ -61,6 +61,11 @@ class PyOCDBackend(BackendInterface):
         self._pending_target: str | None = None  # 连接时使用的目标型号
         self._probe_info_cache: dict[str, ProbeInfo] = {}  # 缓存探针初始信息（避免连接后名称变化）
         self._cancel_flag: threading.Event = threading.Event()
+        # 调试/刷新协调锁（per-UID）：用户调试操作（halt/step/continue/reset）持有
+        # （阻塞获取），周期刷新（read_memory_direct 等）try-acquire，获取不到直接跳过，
+        # 保证调试操作不被周期性刷新并发访问 pyOCD target 影响。
+        self._op_locks: dict[str, threading.Lock] = {}
+        self._op_locks_guard = threading.Lock()
 
     # ── 探针扫描 ──────────────────────────────────────────────
 
@@ -1595,18 +1600,40 @@ class PyOCDBackend(BackendInterface):
         session.target.halt()
         return bytes(session.target.read_memory_block8(address, size))
 
-    def read_memory_direct(self, probe_uid: str, address: int, size: int) -> bytes:
+    def get_op_lock(self, probe_uid: str) -> threading.Lock:
+        """获取该探针的调试/刷新协调锁（per-UID，惰性创建）。
+
+        用户调试操作（halt/step/continue/reset 等，经 commander_backend）持有该锁
+        （阻塞获取）；周期刷新（read_memory_direct / 外设寄存器读取）try-acquire，
+        获取不到直接跳过，保证调试操作不被周期性刷新并发访问 pyOCD target 影响。
+        """
+        with self._op_locks_guard:
+            lock = self._op_locks.get(probe_uid)
+            if lock is None:
+                lock = threading.Lock()
+                self._op_locks[probe_uid] = lock
+            return lock
+
+    def read_memory_direct(self, probe_uid: str, address: int, size: int) -> Optional[bytes]:
         """直接读取内存（不 halt、不经过缓存层），仅适用于目标已暂停场景。
 
         与 read_memory 的区别：
           - 不调用 session.target.halt()：避免在已暂停目标上产生不必要的状态变更
           - 通过 core 的 AP 直接读取，绕过 MemoryCache 缓存层，确保返回最新值
+          - try-acquire 协调锁：用户调试操作（halt/step/continue/reset）执行期间
+            返回 None，调用方跳过本轮刷新，避免与调试操作并发访问 pyOCD target
         """
-        session = self._get_session(probe_uid)
-        if not session:
-            raise RuntimeError("Not connected")
-        core = session.target.selected_core_or_raise
-        return bytes(core.read_memory_block8(address, size))
+        lock = self.get_op_lock(probe_uid)
+        if not lock.acquire(blocking=False):
+            return None
+        try:
+            session = self._get_session(probe_uid)
+            if not session:
+                raise RuntimeError("Not connected")
+            core = session.target.selected_core_or_raise
+            return bytes(core.read_memory_block8(address, size))
+        finally:
+            lock.release()
 
     def write_memory_direct(self, probe_uid: str, address: int, data: bytes) -> None:
         """直接写内存（不 halt、不经过缓存层），仅适用于目标已暂停场景。

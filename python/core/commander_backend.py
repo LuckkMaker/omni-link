@@ -330,15 +330,6 @@ class CommanderBackend:
         if not command:
             return {"success": False, "output": "", "error": "Empty command", "command": command}
 
-        # 拦截 'run <filepath>' 命令：导入并执行 Python 脚本
-        if command.startswith('run ') or command == 'run':
-            return self._execute_script(uid, command[4:].strip() if len(command) > 4 else '')
-
-        # 拦截 'run_batch <filepath>' 命令：从文件批量执行 Commander 命令
-        if command.startswith('run_batch ') or command == 'run_batch':
-            return self._execute_batch(uid, command[10:].strip() if len(command) > 10 else '')
-
-
         # 判断命令是否需要连接探针
         # ! 和 $ 前缀命令：! 是 shell 命令（离线可用），$ 是 Python 表达式（需要连接）
         # list/help/exit/quit 是离线命令
@@ -346,6 +337,28 @@ class CommanderBackend:
             command.startswith('!')
             or command.split()[0].lower() in OFFLINE_COMMANDS if command.split() else False
         )
+
+        # 需要连接的命令：获取调试/刷新协调锁（阻塞等待），执行期间周期刷新
+        # （read_memory_direct / 外设寄存器读取等 try-acquire）会跳过，保证用户
+        # 调试操作不被周期性刷新并发访问 pyOCD target 影响。
+        op_lock = None if is_offline_cmd else backend.get_op_lock(uid)
+        if op_lock is not None:
+            op_lock.acquire()
+        try:
+            return self._execute_locked(uid, command, is_offline_cmd)
+        finally:
+            if op_lock is not None:
+                op_lock.release()
+
+    def _execute_locked(self, uid: str, command: str, is_offline_cmd: bool) -> dict:
+        """execute 的实际执行体（调用方已持有调试/刷新协调锁）"""
+        # 拦截 'run <filepath>'：导入并执行 Python 脚本
+        if command.startswith('run ') or command == 'run':
+            return self._execute_script(uid, command[4:].strip() if len(command) > 4 else '')
+
+        # 拦截 'run_batch <filepath>'：从文件批量执行 Commander 命令
+        if command.startswith('run_batch ') or command == 'run_batch':
+            return self._execute_batch(uid, command[10:].strip() if len(command) > 10 else '')
 
         # 尝试获取已连接的上下文
         result = self._get_or_create_context(uid)

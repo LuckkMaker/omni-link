@@ -506,7 +506,12 @@ async def zone_hover(uid: str, req: HoverRequest):
         # 使用 read_memory_direct（AHB-AP 非侵入式读取，不 halt 目标）：
         # 目标运行中也可读取全局变量/静态地址内存，供周期刷新在 Run 过程中实时更新。
         # 局部变量依赖寄存器（SP/FP）定位地址，运行中 regs 为空自然解析失败 → available=False。
-        return backend.read_memory_direct(uid, addr, length)
+        # 用户调试操作进行中 read_memory_direct 返回 None → 抛异常让变量解析失败
+        # （available=False），前端显示「调试操作进行中/不可用」。
+        data = backend.read_memory_direct(uid, addr, length)
+        if data is None:
+            raise RuntimeError("debug operation in progress")
+        return data
 
     info = await asyncio.to_thread(
         elf_backend.resolve_hover_info, uid, req.name, pc, regs, read_mem
@@ -554,7 +559,12 @@ async def zone_watch_eval(uid: str, req: HoverRequest):
         # 使用 read_memory_direct（AHB-AP 非侵入式读取，不 halt 目标）：
         # 目标运行中也可读取全局变量/静态地址内存，供周期刷新在 Run 过程中实时更新。
         # 局部变量依赖寄存器（SP/FP）定位地址，运行中 regs 为空自然解析失败 → available=False。
-        return backend.read_memory_direct(uid, addr, length)
+        # 用户调试操作进行中 read_memory_direct 返回 None → 抛异常让变量解析失败
+        # （available=False），前端显示「调试操作进行中/不可用」。
+        data = backend.read_memory_direct(uid, addr, length)
+        if data is None:
+            raise RuntimeError("debug operation in progress")
+        return data
 
     info = await asyncio.to_thread(
         elf_backend.resolve_watch_expr, uid, req.name, pc, regs, read_mem
@@ -924,12 +934,15 @@ async def zone_memory_read(uid: str, req: ReadMemoryRequest):
 
     使用 read_memory_direct（AHB-AP 非侵入式读取，不 halt 目标），
     目标运行中也可读取，供周期刷新在 Run 过程中实时更新内存窗口。
+    用户调试操作进行中时返回 skipped=True，前端跳过本轮刷新（不报错）。
     """
     if not backend.is_connected(uid):
         raise HTTPException(status_code=400, detail="Probe not connected")
     length = min(max(req.length, 1), 1024)
     try:
         data = await asyncio.to_thread(backend.read_memory_direct, uid, req.address, length)
+        if data is None:
+            return {"success": True, "skipped": True, "address": req.address, "length": length, "data_hex": ""}
         return {"success": True, "address": req.address, "length": length, "data_hex": data.hex()}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

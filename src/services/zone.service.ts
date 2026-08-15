@@ -609,7 +609,7 @@ export async function zoneReadMemory(
   uid: string,
   address: number,
   length: number
-): Promise<{ success: boolean; address: number; length: number; data_hex: string }> {
+): Promise<{ success: boolean; address: number; length: number; data_hex: string; skipped?: boolean }> {
   const client = await api()
   const { data } = await client.post(`/api/probes/${uid}/zone/memory/read`, { address, length })
   return data

@@ -38,6 +38,8 @@ interface AutoRefreshOptions {
  *   覆盖「循环停在同一断点同 PC」时 state/pc 差值不变导致漏刷新的场景。
  * - periodic_always：每 1 秒周期刷新。通过 AHB-AP 非侵入式读取（read_memory_direct），
  *   目标运行中也可刷新、不打断程序执行（与 Keil 的 Periodic Window Update 一致）。
+ *   同时监听 halt 事件：断点命中/用户 Stop 瞬间立即刷新一次，不等下一个周期。
+ *   用户调试操作进行中（busy）时跳过本轮，避免与 halt/step/continue/reset 争抢资源。
  * - off：不自动刷新。
  *
  * 仅动态数据面板（寄存器 / 外设 / 内存 / Watch / 调用栈）接入；静态面板不调用本 hook。
@@ -53,9 +55,11 @@ export function useAutoRefresh(
   const pc = useZoneStore((s) => s.pc)
   const refreshMode = useZoneStore((s) => s.refreshMode)
   const refreshTick = useZoneStore((s) => s.refreshTick)
+  const busy = useZoneStore((s) => s.busy)
   const lastState = useRef(state)
   const lastPc = useRef(pc)
   const lastTick = useRef(refreshTick)
+  const lastBusy = useRef(busy)
   // 门控函数用 ref 持有：避免调用方传内联箭头函数时因函数引用变化导致 effect 每帧重跑
   const canRefreshRef = useRef(opts?.canRefresh)
   canRefreshRef.current = opts?.canRefresh
@@ -82,12 +86,27 @@ export function useAutoRefresh(
     }
 
     if (refreshMode === 'periodic_always') {
-      // 每 1 秒周期刷新：后端使用 AHB-AP 非侵入式读取（read_memory_direct），
-      // 目标运行中也可读取、不打断程序执行，与 Keil 的 Periodic Window Update 一致。
-      const timer = setInterval(refresh, 1000)
+      // 用户调试操作进行中：跳过本轮，100ms 后重试一次（操作间隙立即补上刷新），
+      // 避免与 halt/step/continue/reset 争抢后端资源
+      if (busy) {
+        const retry = setTimeout(() => refresh(), 100)
+        return () => clearTimeout(retry)
+      }
+      // 周期刷新：每 500ms（后端 AHB-AP 非侵入式读取，运行中不打断程序）
+      const timer = setInterval(refresh, 500)
+      // 立即刷新：busy 刚结束（操作间隙补上）或 halt 跳变（断点命中/用户 Stop 瞬间），
+      // 不等下一个周期，立即拿到最新值
+      const busyEnded = lastBusy.current && !busy
+      const haltHit = state === 'halted' && (lastState.current !== 'halted' || lastTick.current !== refreshTick)
+      if (busyEnded || haltHit) {
+        refresh()
+      }
+      lastBusy.current = busy
+      lastState.current = state
+      lastTick.current = refreshTick
       return () => clearInterval(timer)
     }
     // off：不自动刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, ready, state, pc, refreshMode, refreshTick, refresh])
+  }, [uid, connected, ready, state, pc, refreshMode, refreshTick, refresh, busy])
 }

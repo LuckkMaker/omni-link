@@ -570,9 +570,6 @@ function WatchList({
                 <span className="mr-1.5 inline-block w-3 shrink-0" />
               )}
               <span className="min-w-0 flex-1 truncate text-left">{v.expr}</span>
-              {v.state === 'running' && v.info?.kind === 'register' && (
-                <span className="shrink-0 text-[10px] text-amber-500">运行中</span>
-              )}
             </span>
             {/* Value 列 */}
             <span
@@ -609,7 +606,7 @@ function WatchList({
                   }}
                   title={isEditable(v.info, v.state) ? '点击编辑值' : undefined}
                 >
-                  {v.loading ? '...' : v.state === 'running' && !v.info?.available ? '运行中' : watchValueText(v, fmt)}
+                  {v.loading ? '...' : watchValueText(v, fmt)}
                 </button>
               )}
             </span>
@@ -780,6 +777,11 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
   // ── Watch 输入 ──
   const [input, setInput] = useState('')
   const [values, setValues] = useState<WatchValue[]>([])
+  // 上次求值结果快照：目标运行中局部变量/寄存器不可读时，保留上次值而非显示"运行中"
+  const valuesRef = useRef<WatchValue[]>([])
+  useEffect(() => {
+    valuesRef.current = values
+  }, [values])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -836,7 +838,17 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
         allItems.map(async (item): Promise<WatchValue> => {
           try {
             const res = await zoneWatchEval(uid, item.expr)
-            return { id: item.id, expr: item.expr, info: res.info ?? null, state: (res.state ?? 'unknown') as WatchValue['state'], loading: false }
+            const info = res.info ?? null
+            const st = (res.state ?? 'unknown') as WatchValue['state']
+            // 目标运行中且该项不可读（局部变量/寄存器运行中无法读取）：
+            // 保留上次的值，避免显示"运行中"占位；全局变量运行中可读，正常实时刷新
+            if (st === 'running' && info && !info.available) {
+              const prev = valuesRef.current.find((v) => v.id === item.id)
+              if (prev && prev.info?.available) {
+                return { ...prev, state: st, loading: false }
+              }
+            }
+            return { id: item.id, expr: item.expr, info, state: st, loading: false }
           } catch {
             return { id: item.id, expr: item.expr, info: null, state: 'unknown' as const, loading: false }
           }

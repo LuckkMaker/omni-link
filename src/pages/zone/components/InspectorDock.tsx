@@ -114,6 +114,8 @@ function formatHexAddr(addr: number): string {
 // ── 寄存器面板（CPU Core：Name / Value / Description） ──────────
 function RegistersPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const { ready } = useSessionReady(uid, connected)
+  // 核心寄存器运行中不可读：运行中不刷新（保留上次值），暂停时（halt 事件/周期）才刷新
+  const state = useZoneStore((s) => s.state)
   const [registers, setRegisters] = useState<CoreRegister[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -157,7 +159,7 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
     }
   }, [ready, uid])
 
-  useAutoRefresh(uid, connected, ready, refresh)
+  useAutoRefresh(uid, connected, ready, refresh, { canRefresh: () => state === 'halted' })
 
   useEffect(() => {
     if (ready) void refresh()
@@ -528,6 +530,8 @@ function MemoryWindowView({ uid, connected, windowId, showSelector, onSelectWind
       // 已发起更新的刷新（res 过期）：丢弃本次结果，避免旧数据覆盖新数据
       if (seq !== refreshSeqRef.current) return
       if (res.success) {
+        // 调试操作进行中（后端协调锁被占用）：跳过本轮，保留现有数据
+        if (res.skipped) return
         // 浏览器环境无 Buffer，手动解析十六进制字符串为字节数组
         const hex = res.data_hex
         const bytes = new Uint8Array(hex.length / 2)

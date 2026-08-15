@@ -118,32 +118,41 @@ class PeripheralBackend:
             from core.pyocd_backend import backend
             if not backend.is_connected(uid):
                 return {"success": False, "error": "Probe not connected"}
-            session = backend._get_session(uid)
-            if session is None:
-                return {"success": False, "error": "No session"}
-            target = session.target
 
-            # 去重排序，合并连续地址（间隙 <= 4 字节视为连续，整块读取）
-            addresses = sorted(set(addresses))
-            ranges = merge_and_split(addresses, gap_threshold=4, max_bytes=0)
+            # try-acquire 协调锁：用户调试操作进行中时跳过本轮刷新
+            lock = backend.get_op_lock(uid)
+            if not lock.acquire(blocking=False):
+                return {"success": False, "error": "debug operation in progress"}
 
-            values = []
-            errors = []
-            for rng in ranges:
-                start = rng.base
-                end = rng.end_addr()
-                count = end - start + 1
-                # 只读取该区间内实际请求的地址（切块可能引入未请求地址）
-                wanted = [a for a in addresses if start <= a <= end]
-                try:
-                    data = target.read_memory_block32(start, count)
-                    for i, addr in enumerate(wanted):
-                        values.append({"address": addr, "value": data[addr - start]})
-                except Exception as e:
-                    for addr in wanted:
-                        errors.append({"address": addr, "error": str(e)})
+            try:
+                session = backend._get_session(uid)
+                if session is None:
+                    return {"success": False, "error": "No session"}
+                target = session.target
 
-            return {"success": True, "values": values, "errors": errors}
+                # 去重排序，合并连续地址（间隙 <= 4 字节视为连续，整块读取）
+                addresses = sorted(set(addresses))
+                ranges = merge_and_split(addresses, gap_threshold=4, max_bytes=0)
+
+                values = []
+                errors = []
+                for rng in ranges:
+                    start = rng.base
+                    end = rng.end_addr()
+                    count = end - start + 1
+                    # 只读取该区间内实际请求的地址（切块可能引入未请求地址）
+                    wanted = [a for a in addresses if start <= a <= end]
+                    try:
+                        data = target.read_memory_block32(start, count)
+                        for i, addr in enumerate(wanted):
+                            values.append({"address": addr, "value": data[addr - start]})
+                    except Exception as e:
+                        for addr in wanted:
+                            errors.append({"address": addr, "error": str(e)})
+
+                return {"success": True, "values": values, "errors": errors}
+            finally:
+                lock.release()
         except Exception as e:
             logger.warning(f"Read registers failed: {e}")
             return {"success": False, "error": str(e)}
