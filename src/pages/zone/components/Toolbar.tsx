@@ -82,11 +82,8 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   // Step Out 仅在目标暂停且当前行落在函数内时可用（非函数行无法出栈）
   const stepOutDisabled = disabled || state !== 'halted' || !currentFunction
 
-  // 周期刷新开关：激活后所有面板按固定间隔自动刷新（默认 on_stop 暂停时刷新）
-  const periodicActive = refreshMode === 'periodic_always' || refreshMode === 'periodic_running'
-  const togglePeriodicRefresh = useCallback(() => {
-    setRefreshMode(periodicActive ? 'on_stop' : 'periodic_always')
-  }, [periodicActive, setRefreshMode])
+  // 周期刷新激活（用于开关按钮高亮 + 图标旋转提示）
+  const periodicActive = refreshMode === 'periodic_always'
 
   // 仿真器未选择或设备未连接时，弹出「连接配置」弹窗（start 模式，含 ELF 选择区）
   const [configOpen, setConfigOpen] = useState(false)
@@ -263,31 +260,21 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
 
       <Separator orientation="vertical" className="mx-1 h-5" />
 
-      {/* 自动刷新：激活后所有面板按固定间隔周期刷新 */}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn('h-8 gap-1.5', periodicActive && 'text-primary')}
-            title="刷新设置：激活后所有面板周期自动刷新"
-          >
-            <RefreshCw className="size-4" />
-            <ChevronDown className="size-3 opacity-60" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" onCloseAutoFocus={(e) => e.preventDefault()}>
-          <DropdownMenuItem onClick={togglePeriodicRefresh} className="text-xs">
-            <span className="flex w-full items-center justify-between gap-6">
-              <span>自动刷新</span>
-              {periodicActive && <span className="text-primary">✓</span>}
-            </span>
-          </DropdownMenuItem>
-          <div className="px-2 py-1 text-[10px] leading-tight text-muted-foreground/60">
-            开启后所有面板每 2 秒周期刷新
-          </div>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {/* 周期刷新：一级开关，点击激活/关闭周期刷新（每 1 秒，运行中不打断程序） */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setRefreshMode(periodicActive ? 'on_stop' : 'periodic_always')}
+        className={cn('h-8 gap-1.5', periodicActive && 'text-primary')}
+        title={
+          periodicActive
+            ? '周期刷新已开启（每 1 秒，运行中不打断程序）'
+            : '开启周期刷新（每 1 秒，运行中不打断程序）'
+        }
+      >
+        <RefreshCw className={cn('size-4', periodicActive && 'animate-spin')} />
+        周期刷新
+      </Button>
 
       {/* 连接配置弹窗（start 模式，含 ELF 选择区）——仅仿真器未选择/设备未连接时由 Start Session 触发 */}
       <ConnectionConfigDialog

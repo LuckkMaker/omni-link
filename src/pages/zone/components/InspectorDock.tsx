@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Loader2, AlertCircle, Cpu, Blocks, Binary, ChevronRight, ChevronDown, X, Plus, Columns2 } from 'lucide-react'
 import { useZoneStore, type InspectorTabId } from '../store'
-import { useSessionReady } from '../hooks'
+import { useSessionReady, useAutoRefresh } from '../hooks'
 import * as zoneService from '@/services/zone.service'
 import type { Peripheral, PeripheralRegister, PeripheralField, CoreRegister } from '@/services/zone.service'
 import { cn } from '@/lib/utils'
@@ -92,50 +92,6 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
       })}
     </div>
   )
-}
-
-// ── 通用刷新触发器：根据状态与刷新策略决定是否自动刷新 ──
-function useAutoRefresh(uid: string | null, connected: boolean, ready: boolean, refresh: () => void) {
-  const state = useZoneStore((s) => s.state)
-  const pc = useZoneStore((s) => s.pc)
-  const refreshMode = useZoneStore((s) => s.refreshMode)
-  const refreshTick = useZoneStore((s) => s.refreshTick)
-  const lastState = useRef(state)
-  const lastPc = useRef(pc)
-  const lastTick = useRef(refreshTick)
-
-  useEffect(() => {
-    // 会话未就绪（未连接 / 未加载 ELF / 未启动调试会话）时不自动轮询
-    if (!uid || !connected || !ready) return
-
-    // On Stop：halt/刷新纪元变化时刷新。refreshTick 每次 halt 事件/调试动作都递增，
-    // 覆盖「循环停在同一断点同 PC」时 state/pc 差值不变导致漏刷新的场景
-    if (refreshMode === 'on_stop') {
-      if (state === 'halted') {
-        const stateChanged = lastState.current !== 'halted'
-        const pcChanged = lastPc.current !== pc
-        const tickChanged = lastTick.current !== refreshTick
-        if (stateChanged || pcChanged || tickChanged) {
-          refresh()
-        }
-      }
-      lastState.current = state
-      lastPc.current = pc
-      lastTick.current = refreshTick
-      return
-    }
-
-    // Periodic：定时刷新
-    if (refreshMode === 'periodic_always' || refreshMode === 'periodic_running') {
-      const shouldRun =
-        refreshMode === 'periodic_always' || state === 'running'
-      if (!shouldRun) return
-      const timer = setInterval(refresh, 2000)
-      return () => clearInterval(timer)
-    }
-    // off：不自动刷新
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, ready, state, pc, refreshMode, refreshTick, refresh])
 }
 
 /** 十六进制格式化（32 位） */

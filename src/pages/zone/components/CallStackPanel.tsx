@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, AlertCircle, ChevronRight, ChevronDown } from 'lucide-react'
 import { zoneStack, type CallStackFrame, type CallStackLocal } from '@/services/zone.service'
 import { useZoneStore } from '../store'
-import { useSessionReady } from '../hooks'
+import { useSessionReady, useAutoRefresh } from '../hooks'
 import { cn } from '@/lib/utils'
 
 interface CallStackPanelProps {
@@ -129,7 +129,6 @@ function collectValueTexts(locals: CallStackLocal[] | undefined, prefix: string,
 
 export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
   const state = useZoneStore((s) => s.state)
-  const pc = useZoneStore((s) => s.pc)
   const { ready } = useSessionReady(uid, connected)
 
   const [frames, setFrames] = useState<CallStackFrame[]>([])
@@ -179,30 +178,24 @@ export function CallStackPanel({ uid, connected }: CallStackPanelProps) {
     }
   }, [ready])
 
-  // halt/step 时自动刷新（PC 变化或状态进入 halted）
-  const lastState = useRef(state)
-  const lastPc = useRef(pc)
-  const didInit = useRef(false)
+  // 自动刷新（由 store refreshMode 驱动；仅目标暂停时可读栈，运行中不轮询）
+  useAutoRefresh(uid, connected, ready, refresh, { canRefresh: () => state === 'halted' })
+
+  // 首次就绪且目标已暂停时读取一次（面板挂载时目标已 halt 的强制刷新，避免空帧）
+  useEffect(() => {
+    if (ready && state === 'halted') void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready])
+
+  // 目标运行中/未就绪时清空帧
   useEffect(() => {
     if (!ready) {
       setFrames([])
       setError(null)
       return
     }
-    if (state === 'halted') {
-      // 首次挂载时若目标已 halt（如会话启动后才展开此面板），强制刷新一次，避免空帧
-      const stateChanged = lastState.current !== 'halted'
-      const pcChanged = lastPc.current !== pc
-      const firstMount = !didInit.current
-      didInit.current = true
-      if (stateChanged || pcChanged || firstMount) void refresh()
-    } else {
-      setFrames([])
-    }
-    lastState.current = state
-    lastPc.current = pc
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, state, pc])
+    if (state !== 'halted') setFrames([])
+  }, [ready, state])
 
   // 目标刚复位/暂停时，栈回溯可能瞬时为空（寄存器读取尚未稳定，如 start 后停在 Reset_Handler）。
   // 此时延迟补刷一次，避免误报"无有效调用栈"；step/后续刷新取到有效帧后停止重试。

@@ -49,8 +49,14 @@ function friendlyBreakpointError(detail: string): string {
 /** 右侧检查器 dock 的 section 类型 */
 export type InspectorTabId = 'disasm' | 'callstack' | 'registers' | 'peripherals'
 
-/** 刷新策略模式（参考 vscode-memory-inspector） */
-export type RefreshMode = 'on_stop' | 'periodic_always' | 'periodic_running' | 'off'
+/** 刷新策略模式 */
+export type RefreshMode = 'on_stop' | 'periodic_always' | 'off'
+
+/** 兼容旧持久化数据：periodic_running 已移除，映射为 periodic_always */
+function normalizeRefreshMode(v: unknown): RefreshMode {
+  if (v === 'periodic_running') return 'periodic_always'
+  return v === 'off' || v === 'periodic_always' || v === 'on_stop' ? v : 'on_stop'
+}
 
 /** Zone 会话启动方式（Load ELF 下拉选项） */
 export type ZoneStartMode = 'download_reset' | 'attach_running' | 'attach_halt'
@@ -862,7 +868,7 @@ export const useZoneStore = create<ZoneStore>()(
           // 加载会话时重置为单个窗口（锚点取会话地址）
           memoryWindows: [{ id: 'mem-1', name: 'Memory 1', address: loadedAddr, byteWidth: 1, bigEndian: false }],
           activeMemoryWindow: 'mem-1',
-          refreshMode: (d.refreshMode as RefreshMode) ?? 'on_stop',
+          refreshMode: normalizeRefreshMode(d.refreshMode),
           watchTabs: (d.watchTabs as WatchTab[]) ?? [{ id: 'watch-1', name: 'Watch 1', items: [] }],
           activeWatchTab: (d.activeWatchTab as string) ?? 'watch-1',
         })
@@ -897,6 +903,11 @@ export const useZoneStore = create<ZoneStore>()(
         watchTabs: state.watchTabs,
         activeWatchTab: state.activeWatchTab,
       }),
+      // 兼容旧持久化数据：periodic_running 已移除，合并时归一化
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as { refreshMode?: unknown }
+        return { ...current, ...p, refreshMode: normalizeRefreshMode(p.refreshMode) }
+      },
     }
   )
 )

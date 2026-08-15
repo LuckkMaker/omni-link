@@ -22,7 +22,7 @@ import {
   type CallStackLocal,
 } from '@/services/zone.service'
 import { useZoneStore, type WatchItem, type WatchTab } from '../store'
-import { useSessionReady } from '../hooks'
+import { useSessionReady, useAutoRefresh } from '../hooks'
 import { cn } from '@/lib/utils'
 
 interface WatchPanelProps {
@@ -775,10 +775,6 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
   const setWatchItemFormat = useZoneStore((s) => s.setWatchItemFormat)
   const clearWatchItems = useZoneStore((s) => s.clearWatchItems)
   const addMemoryWindow = useZoneStore((s) => s.addMemoryWindow)
-  const state = useZoneStore((s) => s.state)
-  const pc = useZoneStore((s) => s.pc)
-  const refreshMode = useZoneStore((s) => s.refreshMode)
-  const refreshTick = useZoneStore((s) => s.refreshTick)
   const { ready } = useSessionReady(uid, connected)
 
   // ── Watch 输入 ──
@@ -861,38 +857,7 @@ export function WatchPanel({ uid, connected, onShowMemory }: WatchPanelProps) {
   }, [ready, uid, allItems])
 
   // ── 自动刷新（由 store refreshMode 驱动：on_stop 暂停时刷新 / periodic 周期刷新） ──
-  const lastState = useRef(state)
-  const lastPc = useRef(pc)
-  const lastTick = useRef(refreshTick)
-
-  useEffect(() => {
-    if (!uid || !connected || !ready) return
-
-    if (refreshMode === 'on_stop') {
-      if (state === 'halted') {
-        const stateChanged = lastState.current !== 'halted'
-        const pcChanged = lastPc.current !== pc
-        const tickChanged = lastTick.current !== refreshTick
-        if (stateChanged || pcChanged || tickChanged) {
-          void refresh()
-        }
-      }
-      lastState.current = state
-      lastPc.current = pc
-      lastTick.current = refreshTick
-      return
-    }
-
-    if (refreshMode === 'periodic_always' || refreshMode === 'periodic_running') {
-      const shouldRun = refreshMode === 'periodic_always' || state === 'running'
-      if (!shouldRun) return
-      const timer = setInterval(() => {
-        void refresh()
-      }, 2000)
-      return () => clearInterval(timer)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, connected, ready, state, pc, refreshMode, refreshTick, refresh])
+  useAutoRefresh(uid, connected, ready, refresh)
 
   // ── 展开/折叠 ──
   const toggleExpand = useCallback((path: string) => {

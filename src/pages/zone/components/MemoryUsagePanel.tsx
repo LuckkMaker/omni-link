@@ -120,7 +120,7 @@ function MemoryCard({ usage }: { usage: RegionUsage }) {
  */
 export function MemoryUsagePanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   // 内存占用按 ELF section 近似估算，仅依赖 ELF 符号，用 elfLoaded 提前加载，无需等待目标连接/会话启动
-  const { elfLoaded } = useSessionReady(uid, connected)
+  const { elfLoaded, elfPath } = useSessionReady(uid, connected)
   const [usage, setUsage] = useState<MemoryUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -149,7 +149,8 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
       setError(typeof detail === 'string' ? detail : e instanceof Error ? e.message : 'load failed')
       setUsage(null)
     }
-  }, [elfLoaded, uid])
+    // 依赖 elfPath 而非 elfLoaded：同一会话内重载不同路径 ELF 时也能重拉数据
+  }, [elfPath, uid])
 
   useEffect(() => {
     void load()

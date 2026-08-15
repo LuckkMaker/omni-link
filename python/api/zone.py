@@ -503,11 +503,9 @@ async def zone_hover(uid: str, req: HoverRequest):
             state = "disconnected"
 
     def read_mem(addr: int, length: int) -> bytes:
-        # 目标未暂停时禁止内存读取（避免 read_memory 内部 halt 的副作用）：
-        # 抛出异常让变量解析失败 → available=False，前端显示"暂停后才能读取"提示。
-        if state != "halted":
-            raise RuntimeError("target not halted")
-        # 已暂停：直接读物理内存，绕过缓存层，确保返回当前值
+        # 使用 read_memory_direct（AHB-AP 非侵入式读取，不 halt 目标）：
+        # 目标运行中也可读取全局变量/静态地址内存，供周期刷新在 Run 过程中实时更新。
+        # 局部变量依赖寄存器（SP/FP）定位地址，运行中 regs 为空自然解析失败 → available=False。
         return backend.read_memory_direct(uid, addr, length)
 
     info = await asyncio.to_thread(
@@ -521,9 +519,11 @@ async def zone_watch_eval(uid: str, req: HoverRequest):
     """Watch 观察项求值：按表达式解析 函数/局部变量/全局变量/寄存器 当前值。
 
     支持 C 表达式（var.field / arr[i] / *ptr / &x / ptr->field）。
-    返回结构携带 children（struct/array 子节点树），供 Watch 面板展开显示；
-    DWARF 中找到但读取失败（如目标运行中）的变量仍返回 available=False 条目，
-    便于前端显示「运行中/不可用」。
+    返回结构携带 children（struct/array 子节点树），供 Watch 面板展开显示。
+    内存读取走 read_memory_direct（AHB-AP 非侵入式，不 halt 目标）：
+      - 全局变量/静态地址：目标运行中也可读取，供周期刷新在 Run 过程实时更新；
+      - 局部变量/寄存器：依赖寄存器（SP/FP/PC）定位，运行中 regs 为空解析失败，
+        仍返回 available=False 条目，便于前端显示「运行中/不可用」。
     """
     if not elf_backend.is_loaded(uid):
         return {"success": True, "state": "disconnected", "info": None}
@@ -551,11 +551,9 @@ async def zone_watch_eval(uid: str, req: HoverRequest):
             state = "disconnected"
 
     def read_mem(addr: int, length: int) -> bytes:
-        # 目标未暂停时禁止内存读取（避免 read_memory 内部 halt 的副作用）：
-        # 抛出异常让变量解析失败 → available=False，前端显示"暂停后才能读取"提示。
-        if state != "halted":
-            raise RuntimeError("target not halted")
-        # 已暂停：直接读物理内存，绕过缓存层，确保返回当前值
+        # 使用 read_memory_direct（AHB-AP 非侵入式读取，不 halt 目标）：
+        # 目标运行中也可读取全局变量/静态地址内存，供周期刷新在 Run 过程中实时更新。
+        # 局部变量依赖寄存器（SP/FP）定位地址，运行中 regs 为空自然解析失败 → available=False。
         return backend.read_memory_direct(uid, addr, length)
 
     info = await asyncio.to_thread(
@@ -922,12 +920,16 @@ async def zone_registers_core(uid: str):
 
 @router.post("/probes/{uid}/zone/memory/read")
 async def zone_memory_read(uid: str, req: ReadMemoryRequest):
-    """读取内存（字节）"""
+    """读取内存（字节）
+
+    使用 read_memory_direct（AHB-AP 非侵入式读取，不 halt 目标），
+    目标运行中也可读取，供周期刷新在 Run 过程中实时更新内存窗口。
+    """
     if not backend.is_connected(uid):
         raise HTTPException(status_code=400, detail="Probe not connected")
     length = min(max(req.length, 1), 1024)
     try:
-        data = await asyncio.to_thread(backend.read_memory, uid, req.address, length)
+        data = await asyncio.to_thread(backend.read_memory_direct, uid, req.address, length)
         return {"success": True, "address": req.address, "length": length, "data_hex": data.hex()}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
