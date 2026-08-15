@@ -1,8 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { RefreshCw, ChevronRight } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { AlertTriangle } from 'lucide-react'
 import { zoneMemoryUsage, type MemoryUsage } from '@/services/zone.service'
-import { useZoneStore } from '../store'
 import { useSessionReady } from '../hooks'
 import { useProbeStore } from '@/stores/probe.store'
 import { resolveMemoryRegions, type MemoryRegion } from '../utils/memoryLimits'
@@ -19,112 +17,112 @@ function fmtAddr(addr: number): string {
   return `0x${addr.toString(16).toUpperCase().padStart(8, '0')}`
 }
 
-interface SectionGroup {
-  region: MemoryRegion
-  sections: MemoryUsage['sections']
+/** 语义分类 → 色块颜色 */
+const CATEGORY_COLORS: Record<string, string> = {
+  code: 'bg-sky-500',
+  ro_data: 'bg-cyan-500',
+  rw_data: 'bg-emerald-500',
+  zi_data: 'bg-purple-500',
+  heap: 'bg-orange-500',
+  stack: 'bg-amber-500',
 }
 
-/** 将 ELF sections 按地址归属到各内存区域；未落入任何区域的归入 unmatched */
-function groupSectionsByRegion(
-  sections: MemoryUsage['sections'],
-  regions: MemoryRegion[]
-): { groups: SectionGroup[]; unmatched: MemoryUsage['sections'] } {
-  const groups: SectionGroup[] = regions.map((region) => ({ region, sections: [] }))
-  const unmatched: MemoryUsage['sections'] = []
-  for (const sec of sections) {
-    const group = groups.find(
-      (g) => sec.address >= g.region.start && sec.address < g.region.start + g.region.length
-    )
-    if (group) group.sections.push(sec)
-    else unmatched.push(sec)
-  }
-  return { groups, unmatched }
+/** 语义分类 → 显示名（嵌入式行业术语） */
+const CATEGORY_LABELS: Record<string, string> = {
+  code: 'Code',
+  ro_data: 'RO Data',
+  rw_data: 'RW Data',
+  zi_data: 'ZI Data',
+  heap: 'Heap',
+  stack: 'Stack',
 }
 
-/** 单条内存段横条（可展开/折叠，展开显示段内 sections） */
-function RegionBar({
-  region,
-  sections,
-  expanded,
-  onToggle,
-  color,
-}: {
+/** 区域聚合结果：区域 + 该区域内 section 的总占用与分类 */
+interface RegionUsage {
   region: MemoryRegion
-  sections: MemoryUsage['sections']
-  expanded: boolean
-  onToggle: () => void
-  color: string
-}) {
-  const used = sections.reduce((s, x) => s + x.size, 0)
+  used: number
+  cats: Record<string, number>
+}
+
+/** 把 ELF section 按地址归属到内存区域，聚合每个区域的占用与分类 */
+function groupSectionsByRegion(sections: MemoryUsage['sections'], regions: MemoryRegion[]): RegionUsage[] {
+  return regions.map((region) => {
+    const end = region.start + region.length
+    const inRegion = sections.filter((s) => s.address >= region.start && s.address < end)
+    const used = inRegion.reduce((sum, s) => sum + s.size, 0)
+    const cats: Record<string, number> = {}
+    for (const s of inRegion) {
+      for (const [kind, bytes] of Object.entries(s.categories)) {
+        cats[kind] = (cats[kind] ?? 0) + bytes
+      }
+    }
+    return { region, used, cats }
+  })
+}
+
+/** 单区域内存卡片：标题（区域名+起始地址）+ 进度条 + 使用量/容量 + 分类占比 */
+function MemoryCard({ usage }: { usage: RegionUsage }) {
+  const { region, used, cats } = usage
   const overflow = region.length > 0 && used > region.length
   const pct = region.length > 0 ? Math.min(100, (used / region.length) * 100) : 0
+  const barColor = region.kind === 'flash' ? 'bg-sky-500' : 'bg-amber-500'
+  // 按区域类型过滤分类：Flash 显示 Code/RO Data，RAM 显示 RW/ZI/Heap/Stack
+  const kinds = region.kind === 'flash' ? ['code', 'ro_data'] : ['rw_data', 'zi_data', 'heap', 'stack']
+  const items = kinds.filter((k) => (cats[k] ?? 0) > 0)
 
   return (
     <div className="overflow-hidden rounded border border-border">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-accent"
-        title={`上限来源：${region.source}`}
+      <div
+        className="flex items-center justify-between gap-1 border-b border-border bg-muted/30 px-2 py-1"
+        title={`${region.name} · ${fmtAddr(region.start)} - ${fmtAddr(region.start + region.length)}`}
       >
-        <ChevronRight
-          className={cn('size-3 shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-90')}
-        />
-        <span className="w-10 shrink-0 text-xs font-medium">{region.name}</span>
-        <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-muted">
+        <span className="text-xs font-medium">{region.name}</span>
+        <span className="font-mono text-[10px] text-muted-foreground">{fmtAddr(region.start)}</span>
+        {overflow && <AlertTriangle className="size-3 shrink-0 text-red-500" />}
+      </div>
+      <div className="space-y-1.5 p-2">
+        <div className="h-2.5 overflow-hidden rounded-full bg-muted">
           <div
-            className={cn('h-full rounded-full transition-all', overflow ? 'bg-red-500' : color)}
+            className={cn('h-full rounded-full transition-all', overflow ? 'bg-red-500' : barColor)}
             style={{ width: `${pct}%` }}
           />
         </div>
-        <span
+        <div
           className={cn(
-            'w-44 shrink-0 text-right font-mono text-[10px]',
+            'text-right font-mono text-[10px]',
             overflow ? 'font-semibold text-red-500' : 'text-muted-foreground'
           )}
         >
           {fmtBytes(used)} / {fmtBytes(region.length)} ({Math.round(pct)}%)
-        </span>
-      </button>
-      {expanded && (
-        <div className="border-t border-border">
-          {sections.length === 0 ? (
-            <div className="px-2 py-1 text-[10px] text-muted-foreground">该区域无 section</div>
+        </div>
+        <div className="space-y-1">
+          {items.length === 0 ? (
+            <div className="text-[10px] text-muted-foreground">未使用</div>
           ) : (
-            sections.map((sec) => {
-              const secOverflow = sec.address + sec.size > region.start + region.length
-              return (
-                <div
-                  key={sec.name}
-                  className={cn('flex items-center gap-2 px-2 py-1 text-xs hover:bg-accent', secOverflow && 'text-red-500')}
-                >
-                  <span className="flex-1 truncate font-mono">{sec.name}</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">{fmtAddr(sec.address)}</span>
-                  <span className="w-16 text-right font-mono text-[10px] text-muted-foreground">
-                    {fmtBytes(sec.size)}
-                  </span>
-                </div>
-              )
-            })
+            items.map((k) => (
+              <div key={k} className="flex items-center gap-1.5 text-[10px]">
+                <span className={cn('size-2 shrink-0 rounded-sm', CATEGORY_COLORS[k] ?? 'bg-muted')} />
+                <span className="w-14 shrink-0 text-muted-foreground">{CATEGORY_LABELS[k] ?? k}</span>
+                <span className="font-mono">{fmtBytes(cats[k])}</span>
+              </div>
+            ))
           )}
         </div>
-      )}
+      </div>
     </div>
   )
 }
 
 /**
- * 底部 Memory Usage tab：ELF section 近似估算的内存占用。
- * 内存段（Flash/RAM 区域）来自 DFP pack 导入的设备数据（运行时 TargetInfo → 静态 DeviceInfo → 兜底），
- * 每段一条可展开/折叠的横条，展开显示段内 sections；溢出时变红警示。
+ * Memory Usage 面板：ELF section 语义分类估算 Flash/RAM 占用。
+ * 每个内存区域（Flash/RAM 分区）一张卡片，容量来自 DFP pack 设备数据，
+ * 分类占比（Code/RO Data/RW Data/ZI Data/Heap/Stack）让占用构成一目了然，溢出变红警示。
  */
 export function MemoryUsagePanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   // 内存占用按 ELF section 近似估算，仅依赖 ELF 符号，用 elfLoaded 提前加载，无需等待目标连接/会话启动
   const { elfLoaded } = useSessionReady(uid, connected)
   const [usage, setUsage] = useState<MemoryUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   // 响应式订阅探针目标与设备目录，连接/断开时内存区域实时更新
   const target = useProbeStore((s) => (uid ? s.probes.find((p) => p.uid === uid)?.target ?? null : null))
@@ -142,7 +140,6 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
       setError(null)
       return
     }
-    setLoading(true)
     try {
       setUsage(await zoneMemoryUsage(uid))
       setError(null)
@@ -151,8 +148,6 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
       setError(typeof detail === 'string' ? detail : e instanceof Error ? e.message : 'load failed')
       setUsage(null)
-    } finally {
-      setLoading(false)
     }
   }, [elfLoaded, uid])
 
@@ -160,73 +155,26 @@ export function MemoryUsagePanel({ uid, connected }: { uid: string | null; conne
     void load()
   }, [load])
 
-  const { groups, unmatched } = useMemo(
-    () => groupSectionsByRegion(usage?.sections ?? [], regions),
+  const regionUsages = useMemo(
+    () => (usage ? groupSectionsByRegion(usage.sections, regions) : []),
     [usage, regions]
   )
 
-  const toggle = useCallback((key: string) => {
-    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
-  }, [])
-
   return (
-    <div className="flex h-full min-h-0 flex-col px-3 py-2">
-      <div className="flex shrink-0 items-center justify-end">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => void load()}
-          disabled={loading || !uid}
-          className="h-6 w-6 shrink-0 p-0"
-          title="刷新"
-        >
-          <RefreshCw className={cn('size-3', loading && 'animate-spin')} />
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto pt-1">
-        {error ? (
-          <div className="flex h-full items-center justify-center text-xs text-red-500">{error}</div>
-        ) : !elfLoaded ? (
-          <div className="min-h-0 flex-1" />
-        ) : !usage ? (
-          <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-            加载中...
+    <div className="relative min-h-0 flex-1">
+      {error ? (
+        <div className="absolute inset-0 flex items-center justify-center p-3 text-xs text-red-500">{error}</div>
+      ) : !elfLoaded ? null : !usage ? (
+        <div className="absolute inset-0 flex items-center justify-center p-3 text-xs text-muted-foreground">加载中...</div>
+      ) : (
+        <div className="absolute inset-0 overflow-y-auto">
+          <div className="grid grid-cols-2 content-start gap-2 p-3 pt-2">
+            {regionUsages.map((u) => (
+              <MemoryCard key={`${u.region.kind}-${u.region.start}`} usage={u} />
+            ))}
           </div>
-        ) : (
-          <div className="space-y-2">
-            {groups.map((g, i) => {
-              const key = `${g.region.name}:${g.region.start.toString(16)}`
-              return (
-                <RegionBar
-                  key={key}
-                  region={g.region}
-                  sections={g.sections}
-                  expanded={expanded[key] ?? i === 0}
-                  onToggle={() => toggle(key)}
-                  color={g.region.kind === 'flash' ? 'bg-sky-500' : 'bg-amber-500'}
-                />
-              )
-            })}
-            {unmatched.length > 0 && (
-              <div className="overflow-hidden rounded border border-border">
-                <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  其他
-                </div>
-                {unmatched.map((sec) => (
-                  <div key={sec.name} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-accent">
-                    <span className="flex-1 truncate font-mono">{sec.name}</span>
-                    <span className="font-mono text-[10px] text-muted-foreground">{fmtAddr(sec.address)}</span>
-                    <span className="w-16 text-right font-mono text-[10px] text-muted-foreground">
-                      {fmtBytes(sec.size)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1075,9 +1075,14 @@ class ElfBackend:
 
         - Flash(ROM)：可读且不可写的已分配 section（.text/.rodata 等）
         - RAM：可写的已分配 section（.data/.bss 等）
+        - categories：语义分类（Code/RO Data/RW Data/ZI Data/Heap/Stack），
+          标准 section 名直接映射，ARM 执行区（ER_ROM 等）用符号表细分代码与只读数据；
+          每个 section 内嵌自身分类，供前端按内存区域聚合
 
         Returns:
-            {success, flash_used, ram_used, total, sections: [{name, address, size, writable, flash}]}
+            {success, flash_used, ram_used, total,
+             sections: [{name, address, size, writable, flash, categories: {kind: bytes}}],
+             categories: [{name, kind, rom, ram}]}
         """
         entry = self._get(uid)
         if not entry:
@@ -1086,6 +1091,14 @@ class ElfBackend:
         SHF_WRITE, SHF_ALLOC = 0x1, 0x2
         flash_used, ram_used = 0, 0
         sections = []
+        categories = {
+            "code": {"name": "Code", "kind": "code", "rom": 0, "ram": 0},
+            "ro_data": {"name": "RO Data", "kind": "ro_data", "rom": 0, "ram": 0},
+            "rw_data": {"name": "RW Data", "kind": "rw_data", "rom": 0, "ram": 0},
+            "zi_data": {"name": "ZI Data", "kind": "zi_data", "rom": 0, "ram": 0},
+            "heap": {"name": "Heap", "kind": "heap", "rom": 0, "ram": 0},
+            "stack": {"name": "Stack", "kind": "stack", "rom": 0, "ram": 0},
+        }
         try:
             for sec in elf.iter_sections():
                 hdr = sec.header
@@ -1099,13 +1112,21 @@ class ElfBackend:
                     ram_used += size
                 else:
                     flash_used += size
+                sec_cats = self._classify_section(elf, sec)
                 sections.append({
                     "name": name,
                     "address": hdr['sh_addr'],
                     "size": size,
                     "writable": writable,
                     "flash": not writable,
+                    "categories": sec_cats,
                 })
+                for kind, bytes_ in sec_cats.items():
+                    cat = categories[kind]
+                    if writable:
+                        cat["ram"] += bytes_
+                    else:
+                        cat["rom"] += bytes_
         except Exception as e:
             logger.exception("Memory usage computation failed")
             return {"success": False, "error": str(e)}
@@ -1116,7 +1137,71 @@ class ElfBackend:
             "ram_used": ram_used,
             "total": flash_used + ram_used,
             "sections": sections,
+            "categories": list(categories.values()),
         }
+
+    def _classify_section(self, elf, sec) -> dict:
+        """将单个 ELF section 的占用映射为语义分类（代码/只读数据/已初始化/零初始化/堆/栈）"""
+        name = sec.name
+        n = name.lower()
+        writable = bool(sec.header["sh_flags"] & 0x1)
+        size = sec.header["sh_size"]
+
+        if "heap" in n:
+            return {"heap": size}
+        if "stack" in n:
+            return {"stack": size}
+
+        # ARM 只读执行区（ER_ROM 等混合代码+只读数据）：符号表细分
+        if not writable and ("er_rom" in n or "er_irom" in n or "er_ro" in n or "er_flash" in n):
+            parts = self._split_arm_rom(elf, sec)
+            if parts:
+                return parts
+            return {"code": size}
+
+        if not writable:
+            if "text" in n or "code" in n or "init" in n or "fini" in n or "exidx" in n or "extab" in n:
+                return {"code": size}
+            return {"ro_data": size}
+
+        if "bss" in n or "zi" in n or "sbss" in n or "noinit" in n:
+            return {"zi_data": size}
+        return {"rw_data": size}
+
+    def _split_arm_rom(self, elf, sec) -> dict | None:
+        """按符号表细分 ARM 只读执行区（ER_ROM：代码 + 只读数据），未覆盖部分归入主要类别"""
+        symtab = elf.get_section_by_name(".symtab")
+        if symtab is None:
+            return None
+        start = sec.header["sh_addr"]
+        end = start + sec.header["sh_size"]
+        code = 0
+        ro = 0
+        for sym in symtab.iter_symbols():
+            st = sym.entry["st_info"]["type"]
+            if st not in ("STT_FUNC", "STT_OBJECT"):
+                continue
+            addr = sym.entry["st_value"] & ~1  # 清除 Thumb 位
+            size = sym.entry["st_size"]
+            if size <= 0 or not (start <= addr < end):
+                continue
+            if st == "STT_FUNC":
+                code += size
+            else:
+                ro += size
+        total = code + ro
+        if total <= 0:
+            return None
+        if code >= ro:
+            code += sec.header["sh_size"] - total
+        else:
+            ro += sec.header["sh_size"] - total
+        out = {}
+        if code:
+            out["code"] = code
+        if ro:
+            out["ro_data"] = ro
+        return out
 
     # ── 反汇编 ─────────────────────────────────────
 

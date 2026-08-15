@@ -74,15 +74,15 @@ export function SourceFilesPanel({ uid, connected }: { uid: string | null; conne
   }, [sorted, kw])
 
   if (!elfLoaded) {
-    return <div className="h-full min-h-0" />
+    return <div className="min-h-0 flex-1" />
   }
 
   if (sourceFiles.length === 0) {
-    return <div className="h-full min-h-0" />
+    return <div className="min-h-0 flex-1" />
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* 过滤输入框 */}
       <div className="shrink-0 border-b border-border px-2 py-1.5">
         <div className="relative">

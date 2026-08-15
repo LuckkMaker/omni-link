@@ -231,7 +231,7 @@ export default function ZonePage() {
                 className={isExpanded ? 'flex min-h-0 flex-1 flex-col' : 'flex shrink-0 flex-col'}
               >
                 <RailTab active={isExpanded} onClick={() => toggleLeft(s.id)} icon={s.icon} label={s.label} title={s.label} />
-                <div className={isExpanded ? 'min-h-0 flex-1 overflow-hidden border-t border-border' : 'hidden'}>
+                <div className={isExpanded ? 'flex min-h-0 flex-1 flex-col overflow-hidden border-t border-border' : 'hidden'}>
                   {s.content}
                 </div>
               </div>

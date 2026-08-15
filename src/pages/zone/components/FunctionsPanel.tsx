@@ -156,7 +156,7 @@ export function FunctionsPanel({ uid, connected }: { uid: string | null; connect
   const template = gridColumns(columns, widths)
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* 过滤输入框 */}
       <div className="shrink-0 border-b border-border px-2 py-1.5">
         <div className="relative">
@@ -177,11 +177,11 @@ export function FunctionsPanel({ uid, connected }: { uid: string | null; connect
         ) : !elfLoaded ? (
           <div className="min-h-0 flex-1" />
         ) : loading && functions.length === 0 ? (
-          <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+          <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-xs text-muted-foreground">
             Loading...
           </div>
         ) : functions.length === 0 ? (
-          <div className="flex h-full items-center justify-center p-4 text-center text-xs text-muted-foreground">
+          <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-xs text-muted-foreground">
             {total === 0 ? 'ELF 无符号表' : `无匹配「${filter}」的函数`}
           </div>
         ) : (

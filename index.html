@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OMNI Link — 一站式嵌入式调试工作台</title>
+<meta name="description" content="OMNI Link 是一站式嵌入式开发工作台，提供 Zone 调试、Flash 烧录、Commander 命令行、RTT Viewer、Monitor 变量监控等核心调试功能。">
+<link rel="icon" type="image/png" href="assets/images/icon_rounded.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Noto+Sans+SC:wght@300;400;500;700;900&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-soft: rgba(37, 99, 235, .08);
+    --bg: #f5f6f7;
+    --card: #ffffff;
+    --border: #e5e5e5;
+    --text: #1b1b1b;
+    --text-secondary: #616161;
+    --text-tertiary: #8a8a8a;
+    --radius: 8px;
+    --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.06);
+    --shadow-hover: 0 2px 4px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.12);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Roboto', 'Noto Sans SC', -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ============ 顶部栏 ============ */
+  .win-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: transparent;
+    border-bottom: 1px solid transparent;
+    transition: background .25s ease, border-color .25s ease;
+  }
+  .win-header.scrolled {
+    background: #f5f6f7;
+    border-bottom: 1px solid var(--border);
+  }
+  .win-header-inner {
+    display: flex;
+    align-items: center;
+    height: 56px;
+    gap: 28px;
+  }
+  .win-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    transition: color .25s ease;
+  }
+  .win-brand:hover { text-decoration: none; }
+  .win-brand img { width: 26px; height: 26px; }
+  .win-nav {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    margin-left: auto;
+  }
+  .win-nav a {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: rgba(255,255,255,.85);
+    padding: 6px 2px;
+    transition: color .15s ease;
+  }
+  .win-nav a:hover { color: #fff; text-decoration: none; }
+  .win-nav a.active { color: #fff; }
+  .win-header.scrolled .win-brand { color: var(--text); }
+  .win-header.scrolled .win-nav a { color: var(--text-secondary); }
+  .win-header.scrolled .win-nav a:hover { color: var(--accent); }
+  .win-header.scrolled .win-nav a.active { color: var(--accent); }
+  .win-nav .nav-btn {
+    color: #fff;
+    background: var(--accent);
+    padding: 7px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    transition: background .15s ease;
+  }
+  .win-nav .nav-btn:hover { background: var(--accent-hover); color: #fff; text-decoration: none; }
+
+  /* ============ Hero ============ */
+  .hero {
+    position: relative;
+    padding: 176px 0 150px;
+    background:
+      linear-gradient(90deg, rgba(30, 64, 175, .62) 0%, rgba(37, 99, 235, .32) 48%, rgba(37, 99, 235, .06) 78%),
+      url('assets/images/hero_illustration.jpg') center/cover no-repeat;
+  }
+  .hero-inner { text-align: left; max-width: 720px; }
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: rgba(255,255,255,.2);
+    border: 1px solid rgba(255,255,255,.35);
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    box-shadow: 0 2px 10px rgba(0,0,0,.15);
+    margin-bottom: 26px;
+  }
+  .hero-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .6; transform: scale(1.25); }
+  }
+  .hero h1 {
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: -.8px;
+    line-height: 1.22;
+    color: #fff;
+    margin-bottom: 18px;
+    text-shadow: 0 2px 16px rgba(0,0,0,.25);
+  }
+  .hero h1 .accent { color: #fff; }
+  .hero-sub {
+    max-width: 560px;
+    margin: 0 0 34px;
+    font-size: 16.5px;
+    color: rgba(255,255,255,.92);
+    text-shadow: 0 1px 8px rgba(0,0,0,.2);
+  }
+  .hero-cta {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    padding: 12px 30px;
+    border-radius: 6px;
+    font-size: 15px;
+    font-weight: 600;
+    transition: all .18s ease;
+    cursor: pointer;
+  }
+  .btn svg { width: 17px; height: 17px; }
+  .hero .btn-primary {
+    background: #fff;
+    color: var(--accent);
+    box-shadow: 0 6px 24px rgba(0,0,0,.28);
+  }
+  .hero .btn-primary:hover { background: #eef4ff; color: var(--accent-hover); text-decoration: none; transform: translateY(-1px); }
+  .hero .btn-secondary {
+    background: rgba(255,255,255,.15);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,.45);
+  }
+  .hero .btn-secondary:hover { background: rgba(255,255,255,.22); color: #fff; text-decoration: none; transform: translateY(-1px); }
+
+  /* ============ 特性 ============ */
+  .section { padding: 64px 0; }
+  .section-head { text-align: center; max-width: 640px; margin: 0 auto 44px; }
+  .section-head h2 { font-size: 27px; font-weight: 650; letter-spacing: -.3px; margin-bottom: 10px; }
+  .section-head p { color: var(--text-secondary); font-size: 14.5px; }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+  .feature-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 26px 24px;
+    transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+  }
+  .feature-card:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-hover);
+    border-color: rgba(37,99,235,.35);
+  }
+  .feature-icon {
+    width: 44px; height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-soft);
+    color: var(--accent);
+    margin-bottom: 16px;
+  }
+  .feature-icon svg { width: 22px; height: 22px; }
+  .feature-card h3 { font-size: 16.5px; font-weight: 650; margin-bottom: 8px; }
+  .feature-card p { font-size: 13.5px; color: var(--text-secondary); }
+  .feature-card .more { display: inline-block; margin-top: 12px; font-size: 13px; font-weight: 600; }
+
+  /* ============ 功能介绍 ============ */
+  .intro-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+  }
+  .intro-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    transition: transform .2s ease, box-shadow .2s ease;
+  }
+  .intro-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-hover); }
+  .intro-card .win-window {
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .intro-body { padding: 20px 22px 24px; }
+  .intro-body h3 { font-size: 17px; font-weight: 650; margin-bottom: 8px; }
+  .intro-body p { font-size: 13.5px; color: var(--text-secondary); margin-bottom: 10px; }
+  .intro-body .more { font-size: 13px; font-weight: 600; }
+  .win-window {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow-hover);
+  }
+  .win-titlebar {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    padding: 0 10px 0 14px;
+    background: #fafafa;
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+  }
+  .win-titlebar .wt {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .win-titlebar .wt img { width: 14px; height: 14px; }
+  .win-controls { margin-left: auto; display: flex; gap: 2px; }
+  .win-controls .wc {
+    width: 34px; height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: default;
+    transition: background .12s ease;
+  }
+  .win-controls .wc:hover { background: rgba(0,0,0,.06); }
+  .win-controls .wc.close:hover { background: #e81123; color: #fff; }
+  .win-window img { width: 100%; display: block; }
+
+  /* ============ 下载 ============ */
+  .download-section { background: var(--card); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .download-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px;
+  }
+  .dl-main { text-align: center; }
+  .dl-main .dl-icon {
+    width: 60px; height: 60px;
+    margin: 0 auto 18px;
+    border-radius: 16px;
+    background: linear-gradient(135deg, var(--accent), #3b82f6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    box-shadow: 0 8px 24px rgba(37,99,235,.35);
+  }
+  .dl-main .dl-icon svg { width: 30px; height: 30px; }
+  .dl-main h3 { font-size: 19px; font-weight: 650; margin-bottom: 6px; }
+  .dl-main .dl-version { font-size: 13px; color: var(--text-secondary); margin-bottom: 22px; }
+  .dl-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 13px 34px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 6px;
+    font-size: 15px;
+    font-weight: 600;
+    box-shadow: 0 6px 20px rgba(37,99,235,.35);
+    transition: all .18s ease;
+    margin-bottom: 14px;
+  }
+  .dl-btn:hover { background: var(--accent-hover); color: #fff; text-decoration: none; transform: translateY(-2px); }
+  .dl-btn svg { width: 19px; height: 19px; }
+  .dl-meta { font-size: 13px; color: var(--text-secondary); }
+  .dl-meta a { font-weight: 600; }
+  .dl-list { list-style: none; }
+  .dl-list li {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 11px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 14px;
+  }
+  .dl-list li:last-child { border-bottom: none; }
+  .dl-list .check {
+    flex-shrink: 0;
+    width: 20px; height: 20px;
+    border-radius: 6px;
+    background: rgba(34,197,94,.12);
+    color: #16a34a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 2px;
+  }
+  .dl-list .check svg { width: 12px; height: 12px; }
+  .dl-list strong { font-weight: 600; }
+  .dl-list .sub { color: var(--text-secondary); font-size: 13px; display: block; }
+
+  /* ============ 页脚 ============ */
+  .win-footer {
+    background: #e9e9e9;
+    border-top: 1px solid var(--border);
+    padding: 36px 0 28px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 28px;
+    margin-bottom: 28px;
+  }
+  .footer-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .footer-brand img { width: 26px; height: 26px; }
+  .footer-brand .name { font-size: 15px; font-weight: 600; color: var(--text); }
+  .footer-brand p { font-size: 13px; color: var(--text-secondary); }
+  .footer-col h4 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  .footer-col ul { list-style: none; }
+  .footer-col li { margin-bottom: 7px; }
+  .footer-bottom {
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+  }
+
+  /* ============ Reveal ============ */
+  .reveal {
+    opacity: 0;
+    transform: translateY(22px);
+    transition: opacity .6s ease, transform .6s ease;
+  }
+  .reveal.visible { opacity: 1; transform: translateY(0); }
+
+  /* ============ Responsive ============ */
+  @media (max-width: 900px) {
+    .feature-grid { grid-template-columns: repeat(2, 1fr); }
+    .intro-grid { grid-template-columns: 1fr; }
+    .download-grid { grid-template-columns: 1fr; }
+    .footer-grid { grid-template-columns: 1fr 1fr; }
+    .hero h1 { font-size: 34px; }
+  }
+  @media (max-width: 620px) {
+    .feature-grid { grid-template-columns: 1fr; }
+    .footer-grid { grid-template-columns: 1fr; }
+    .win-nav a.nav-link { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ 顶部栏 ============ -->
+<header class="win-header">
+  <div class="container win-header-inner">
+    <a class="win-brand" href="index.html">
+      <img src="assets/images/icon_rounded.png" alt="OMNI Link">
+      OMNI Link
+    </a>
+    <nav class="win-nav">
+      <a class="nav-link active" href="index.html">主页</a>
+      <a class="nav-link" href="pages.html">页面介绍</a>
+      <a class="nav-link" href="#download">下载</a>
+      <a class="nav-link" href="https://github.com/LuckkMaker/omni-link" target="_blank" rel="noopener">GitHub</a>
+      <a class="nav-btn" href="#download">立即下载</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ============ Hero ============ -->
+<section class="hero">
+  <div class="container hero-inner">
+    <div class="hero-badge reveal">
+      <span class="dot"></span>
+      v0.4.2 · MIT 开源 · 免费使用
+    </div>
+    <h1 class="reveal" style="transition-delay:.1s">
+      一站式<span class="accent">嵌入式调试</span>工作台
+    </h1>
+    <p class="hero-sub reveal" style="transition-delay:.15s">
+      把烧录、命令行调试、RTT 日志、变量波形监控等散落在多个工具里的能力，
+      整合进一个工作台。支持 DAPLink / ST-Link / J-Link，无需额外购买专用调试硬件。
+    </p>
+    <div class="hero-cta reveal" style="transition-delay:.2s">
+      <a class="btn btn-primary" href="#download">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        立即下载
+      </a>
+      <a class="btn btn-secondary" href="pages.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        页面介绍
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 特性 ============ -->
+<section class="section" id="features">
+  <div class="container">
+    <div class="section-head reveal">
+      <h2>一个工作台，搞定所有调试环节</h2>
+      <p>面向嵌入式开发者的全能调试工具集，覆盖从代码调试到固件烧录的完整链路</p>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-card reveal">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-3 3 3 3M16 9l3 3-3 3"/><line x1="12" y1="5" x2="12" y2="19"/></svg>
+        </div>
+        <h3>Zone 调试工作台</h3>
+        <p>源码调试、反汇编、寄存器、外设、调用栈、Watch 变量监视与内存查看整合于一个视图，全链路可视化调试。</p>
+        <a class="more" href="pages.html#zone">了解详情 →</a>
+      </div>
+      <div class="feature-card reveal" style="transition-delay:.05s">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <h3>Flash 烧录工具</h3>
+        <p>bin / hex / elf 固件烧录，整片与扇区擦除、自动校验、Hex 查看器、Fill Memory、Compare，文件拖拽即烧。</p>
+        <a class="more" href="pages.html#flash">了解详情 →</a>
+      </div>
+      <div class="feature-card reveal" style="transition-delay:.1s">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        </div>
+        <h3>Commander 命令行</h3>
+        <p>交互式 REPL，命令参考表与「调试」「断点调试」「解锁刷写」一键工作流，多步操作链单击完成。</p>
+        <a class="more" href="pages.html#commander">了解详情 →</a>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </div>
+        <h3>RTT Viewer</h3>
+        <p>SEGGER RTT 实时数据收发，多 tab 通道管理，日志级别着色，文件发送与录制，切换页面不中断数据流。</p>
+        <a class="more" href="pages.html#rtt">了解详情 →</a>
+      </div>
+      <div class="feature-card reveal" style="transition-delay:.05s">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        </div>
+        <h3>Monitor 变量监控</h3>
+        <p>DWARF 符号解析自动提取变量地址，SWD / RTT 双传输，uPlot 波形图、触发、游标测量、CSV 导出。</p>
+        <a class="more" href="pages.html#monitor">了解详情 →</a>
+      </div>
+      <div class="feature-card reveal" style="transition-delay:.1s">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+        </div>
+        <h3>工具集与芯片扩展</h3>
+        <p>Fault / Map Analyzer、进制转换、文件校验，配合 Keil Pack 导入扩展 STM32、GD32、NXP 等芯片支持。</p>
+        <a class="more" href="pages.html#tools">了解详情 →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 功能介绍 ============ -->
+<section class="section" id="features-intro">
+  <div class="container">
+    <div class="section-head reveal">
+      <h2>OMNI Link 功能介绍</h2>
+      <p>四大核心页面，覆盖嵌入式调试的完整链路</p>
+    </div>
+    <div class="intro-grid">
+      <div class="intro-card reveal">
+        <div class="win-window">
+          <div class="win-titlebar">
+            <span class="wt"><img src="assets/images/icon_rounded.png" alt="">Zone 调试工作台</span>
+            <div class="win-controls">
+              <span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span>
+            </div>
+          </div>
+          <img src="assets/images/zone_page.png" alt="Zone 调试工作台">
+        </div>
+        <div class="intro-body">
+          <h3>Zone 调试工作台</h3>
+          <p>源码调试、反汇编、寄存器、外设、调用栈、Watch 变量监视与内存查看整合于一个视图，全链路可视化调试。</p>
+          <a class="more" href="pages.html#zone">了解详情 →</a>
+        </div>
+      </div>
+      <div class="intro-card reveal" style="transition-delay:.05s">
+        <div class="win-window">
+          <div class="win-titlebar">
+            <span class="wt"><img src="assets/images/icon_rounded.png" alt="">Flash 烧录工具</span>
+            <div class="win-controls">
+              <span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span>
+            </div>
+          </div>
+          <img src="assets/images/flash_page.png" alt="Flash 烧录工具">
+        </div>
+        <div class="intro-body">
+          <h3>Flash 烧录工具</h3>
+          <p>bin / hex / elf 固件烧录，整片与扇区擦除、自动校验、Hex 查看器，文件拖拽即烧。</p>
+          <a class="more" href="pages.html#flash">了解详情 →</a>
+        </div>
+      </div>
+      <div class="intro-card reveal">
+        <div class="win-window">
+          <div class="win-titlebar">
+            <span class="wt"><img src="assets/images/icon_rounded.png" alt="">RTT Viewer</span>
+            <div class="win-controls">
+              <span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span>
+            </div>
+          </div>
+          <img src="assets/images/rtt_viewer_page.png" alt="RTT Viewer">
+        </div>
+        <div class="intro-body">
+          <h3>RTT Viewer</h3>
+          <p>SEGGER RTT 实时数据收发，多 tab 通道管理，日志级别着色，切换页面不中断数据流。</p>
+          <a class="more" href="pages.html#rtt">了解详情 →</a>
+        </div>
+      </div>
+      <div class="intro-card reveal" style="transition-delay:.05s">
+        <div class="win-window">
+          <div class="win-titlebar">
+            <span class="wt"><img src="assets/images/icon_rounded.png" alt="">Monitor 变量监控</span>
+            <div class="win-controls">
+              <span class="wc">─</span><span class="wc">□</span><span class="wc close">✕</span>
+            </div>
+          </div>
+          <img src="assets/images/monitor_page.png" alt="Monitor 变量监控">
+        </div>
+        <div class="intro-body">
+          <h3>Monitor 变量监控</h3>
+          <p>DWARF 符号解析自动提取变量地址，SWD / RTT 双传输，uPlot 波形图、触发与 CSV 导出。</p>
+          <a class="more" href="pages.html#monitor">了解详情 →</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 下载 ============ -->
+<section class="section download-section" id="download">
+  <div class="container">
+    <div class="section-head reveal">
+      <h2>免费下载，即刻开始</h2>
+      <p>MIT 开源协议，可自由使用与分发</p>
+    </div>
+    <div class="download-grid">
+      <div class="panel dl-main reveal">
+        <div class="dl-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </div>
+        <h3>OMNI Link for Windows</h3>
+        <p class="dl-version">v0.4.2 · x64 · NSIS 安装包</p>
+        <a class="dl-btn" href="https://github.com/LuckkMaker/omni-link/releases/latest" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          下载 Windows 安装包
+        </a>
+        <p class="dl-meta">
+          查看全部版本与更新日志 →
+          <a href="https://github.com/LuckkMaker/omni-link/releases" target="_blank" rel="noopener">GitHub Releases</a>
+        </p>
+      </div>
+      <div class="panel reveal" style="transition-delay:.1s">
+        <ul class="dl-list">
+          <li>
+            <span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+            <div><strong>Windows 10 或更高版本</strong><span class="sub">x64 架构，NSIS 安装向导，支持自定义安装目录</span></div>
+          </li>
+          <li>
+            <span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+            <div><strong>调试器支持</strong><span class="sub">DAPLink / CMSIS-DAP（v1 / v2）、ST-Link、J-Link</span></div>
+          </li>
+          <li>
+            <span class="check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+            <div><strong>目标芯片</strong><span class="sub">STM32、GD32、APM32、NXP 等 Cortex-M 系列，Keil Pack 扩展</span></div>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 页脚 ============ -->
+<footer class="win-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <div class="footer-brand">
+          <img src="assets/images/icon_rounded.png" alt="OMNI Link">
+          <span class="name">OMNI Link</span>
+        </div>
+        <p>一站式嵌入式调试工作台，MIT 开源，免费使用。</p>
+      </div>
+      <div class="footer-col">
+        <h4>导航</h4>
+        <ul>
+          <li><a href="index.html">主页</a></li>
+          <li><a href="pages.html">页面介绍</a></li>
+          <li><a href="#download">下载</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>社区</h4>
+        <ul>
+          <li><a href="https://github.com/LuckkMaker/omni-link" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="https://github.com/LuckkMaker/omni-link/issues" target="_blank" rel="noopener">问题反馈</a></li>
+          <li><a href="https://github.com/LuckkMaker/omni-link/releases" target="_blank" rel="noopener">Release</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>支持</h4>
+        <ul>
+          <li><a href="https://github.com/LuckkMaker/omni-link/blob/main/LICENSE" target="_blank" rel="noopener">MIT 许可证</a></li>
+          <li><a href="https://github.com/LuckkMaker/omni-link" target="_blank" rel="noopener">赞赏作者</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 LuckkMaker · OMNI Link</span>
+      <span>Made for embedded developers</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const header = document.querySelector('.win-header');
+  const onScroll = () => header.classList.toggle('scrolled', window.scrollY > 30);
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

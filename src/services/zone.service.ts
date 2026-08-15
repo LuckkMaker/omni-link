@@ -123,7 +123,17 @@ export interface MemoryUsage {
   flash_used: number
   ram_used: number
   total: number
-  sections: { name: string; address: number; size: number; writable: boolean; flash: boolean }[]
+  sections: {
+    name: string
+    address: number
+    size: number
+    writable: boolean
+    flash: boolean
+    /** 该 section 的语义分类占用（kind → 字节数） */
+    categories: Record<string, number>
+  }[]
+  /** 语义分类聚合：Code/RO Data/RW Data/ZI Data/Heap/Stack */
+  categories: { name: string; kind: string; rom: number; ram: number }[]
 }
 
 // ── 调试控制 ──────────────────────────────
