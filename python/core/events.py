@@ -19,6 +19,8 @@ def _infer_log_source(message: str) -> str:
         return "rtt"
     if "Commander" in msg:
         return "commander"
+    if any(k in msg for k in ("Zone", "Debug", "Session", "ELF", "Breakpoint", "Register")):
+        return "zone"
     if any(k in msg for k in ("Flash", "烧录", "擦除", "Program", "Erase", "Verify", "Read Back", "Check Blank", "固件")):
         return "flash"
     return "system"

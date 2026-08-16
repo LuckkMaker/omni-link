@@ -1097,8 +1097,11 @@ class ContinueCommand(CommandBase):
         core = self.context.selected_core
         # 如果 PC 正好在断点上，先临时移除断点并 step 一次跳过断点指令，
         # 否则 resume 后 FPB 会立刻匹配当前 PC 导致瞬间 halt。
-        pc = core.read_core_register('pc')
-        bp = core.find_breakpoint(pc) or core.find_breakpoint(pc | 1)
+        # 注意：Cortex-M 停在断点上时读回的 PC 可能带 Thumb 位（bit0=1，奇数），
+        # 而断点存的是偶数地址，因此必须先用 & ~1 掩掉 Thumb 位再匹配，
+        # 否则 step-over 不触发，resume 后立即重停同一断点，当前指令永远不执行。
+        pc = core.read_core_register('pc') & ~1
+        bp = core.find_breakpoint(pc)
         if bp is not None:
             core.remove_breakpoint(bp.addr)
             core.bp_manager.flush()
@@ -1145,8 +1148,8 @@ class StepCommand(CommandBase):
         # 临时移除当前 PC 处的断点，避免 step 后被同一断点重新捕获。
         # 虽然 Cortex-M 的 C_STEP 模式下 FPB 理论上不触发，但某些实现
         # （如通过 J-Link 连接时）可能不完全遵循此规范。
-        pc = core.read_core_register('pc')
-        bp = core.find_breakpoint(pc) or core.find_breakpoint(pc | 1)
+        pc = core.read_core_register('pc') & ~1
+        bp = core.find_breakpoint(pc)
         if bp is not None:
             core.remove_breakpoint(bp.addr)
             core.bp_manager.flush()

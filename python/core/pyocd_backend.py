@@ -38,6 +38,16 @@ class ProbeSession:
     error: Optional[str] = None
 
 
+# 会话关闭回调：供其他模块（如 zone）注册以清理其按 uid 维护的会话态（如断点表）。
+# 在 pyOCD session 真正关闭后同步触发，线程由调用方保证（_close_session 在后台线程执行）。
+_session_closed_handlers: list = []
+
+
+def register_session_closed(handler):
+    """注册会话关闭回调 handler(uid)"""
+    _session_closed_handlers.append(handler)
+
+
 class PyOCDBackend(BackendInterface):
     """pyOCD 后端实现"""
 
@@ -51,6 +61,11 @@ class PyOCDBackend(BackendInterface):
         self._pending_target: str | None = None  # 连接时使用的目标型号
         self._probe_info_cache: dict[str, ProbeInfo] = {}  # 缓存探针初始信息（避免连接后名称变化）
         self._cancel_flag: threading.Event = threading.Event()
+        # 调试/刷新协调锁（per-UID）：用户调试操作（halt/step/continue/reset）持有
+        # （阻塞获取），周期刷新（read_memory_direct 等）try-acquire，获取不到直接跳过，
+        # 保证调试操作不被周期性刷新并发访问 pyOCD target 影响。
+        self._op_locks: dict[str, threading.Lock] = {}
+        self._op_locks_guard = threading.Lock()
 
     # ── 探针扫描 ──────────────────────────────────────────────
 
@@ -125,7 +140,7 @@ class PyOCDBackend(BackendInterface):
 
     def connect(self, probe_uid: str, target: str | None = None,
                 interface: str = "swd", speed: int | None = None,
-                connect_mode: str | None = None) -> bool:
+                connect_mode: str | None = None, force: bool = False) -> bool:
         """连接指定探针
 
         Args:
@@ -138,16 +153,17 @@ class PyOCDBackend(BackendInterface):
                 - halt: 复位并暂停在复位向量
                 - pre-reset: 连接前执行复位
                 - under-reset: 拉低复位线时连接（用于深度睡眠/被锁目标）
+            force: 是否强制重连。为 True 时即使已连接也会关闭旧会话并以新参数重连
+                （用于切换连接模式，如 Zone 会话的 attach/halt 绑定）。
         """
         from pyocd.core.helpers import ConnectHelper
 
         with self._lock:
             existing = self._sessions.get(probe_uid)
             if existing and existing.state == ProbeState.CONNECTED:
-                return True
-
-            # 提取旧会话对象（可能来自之前失败的连接）
-            # 旧会话可能持有 USB 句柄，必须先释放才能重新连接
+                if not force:
+                    return True
+                # force=True：关闭旧会话后以新参数重连
             old_session = existing.session if existing else None
 
             # 创建或更新会话记录
@@ -160,11 +176,17 @@ class PyOCDBackend(BackendInterface):
         # 也要清理可能残留的旧 session 对象。
         if old_session is not None:
             try:
-                old_session.options.set('resume_on_disconnect', False)
+                # 强制重连时关闭旧会话：恢复目标运行（resume_on_disconnect=True）。
+                # 若保持 halted 断开，芯片会停在暂停/低功耗状态，后续重连常需手动复位才能恢复。
+                old_session.options.set('resume_on_disconnect', True)
+                # 清除旧会话在目标上的硬件断点（FPB），避免残留影响重连后的调试
+                self._clear_hw_breakpoints(old_session)
                 old_session.close()
                 event_manager.log("info", f"Closed stale session for {probe_uid[:16]} before reconnect")
             except Exception:
                 pass
+            finally:
+                self._notify_session_closed(probe_uid)
 
         event_manager.log("info", f"Connecting to probe {probe_uid[:16]}...")
 
@@ -202,7 +224,8 @@ class PyOCDBackend(BackendInterface):
 
         # 连接超时（秒）。目标未 reset 或无响应时，pyOCD 内部 DP 连接会重试 4 次 SWJ 序列，
         # 可能阻塞数秒到数十秒。用线程池 + future.result(timeout) 强制中断。
-        CONNECT_TIMEOUT = 5.0
+        # CMSIS-DAP v1 (HID) 单包仅 64B、轮询慢，完整 SWJ 序列需更长时间，故放宽到 15s。
+        CONNECT_TIMEOUT = 15.0
         # JTAG 连接失败时的降速重试频率（Hz）
         JTAG_FALLBACK_SPEED = 1000000
 
@@ -238,7 +261,8 @@ class PyOCDBackend(BackendInterface):
         last_error = None
         try:
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 future = executor.submit(_do_connect, actual_speed, interface)
                 try:
                     session = future.result(timeout=CONNECT_TIMEOUT)
@@ -279,6 +303,12 @@ class PyOCDBackend(BackendInterface):
                                 "建议：尝试使用 SWD 接口连接"
                             )
                             event_manager.log("error", f"JTAG connection failed: {last_error}")
+
+            finally:
+                # 不等待 worker 线程完成：DAPLink/USB 卡死时，
+                # shutdown(wait=True) 会在此处阻塞，进而卡死 asyncio 事件循环。
+                # wait=False 立即返回，让卡住的底层线程在后台自行结束。
+                executor.shutdown(wait=False, cancel_futures=True)
 
             if session is None:
                 # _do_connect 返回 None 表示探针未找到
@@ -329,6 +359,13 @@ class PyOCDBackend(BackendInterface):
                 "target": target_info.to_dict() if target_info else None,
             })
 
+            # force reconnect 成功后，旧 session 已关闭，commander 上下文残留的旧 session 引用
+            # 会导致后续 commander_backend.execute("reset halt") 失败——它访问的是已关闭的旧
+            # session 而非新 session。重置 commander 上下文，下次执行命令时自动重建新上下文。
+            if force and old_session is not None:
+                from core.commander_backend import commander_backend
+                commander_backend.reset_context(probe_uid)
+
             return True
 
         except Exception as e:
@@ -352,19 +389,51 @@ class PyOCDBackend(BackendInterface):
             # 放入后台线程执行以避免阻塞前端。
             import threading
             session = session_info.session
-            t = threading.Thread(target=self._close_session, args=(session,), daemon=True)
+            t = threading.Thread(target=self._close_session, args=(probe_uid, session), daemon=True)
             t.start()
 
         return True
 
-    def _close_session(self, session):
+    def _clear_hw_breakpoints(self, session):
+        """清除目标 core 上的全部硬件断点（FPB）
+
+        在关闭会话前显式调用，避免 stop session 后芯片残留断点。
+        逐个 core 容错处理，单个失败不影响其余清理。
+        """
+        target = getattr(session, 'target', None)
+        if target is None:
+            return
+        try:
+            cores = getattr(target, 'cores', None) or [target.selected_core]
+        except Exception:
+            cores = []
+        for core in cores:
+            try:
+                core.bp_manager.remove_all_breakpoints()
+            except Exception:
+                pass  # 单个 core 清理失败忽略，继续处理其余
+
+    def _notify_session_closed(self, uid):
+        """同步触发已注册的会话关闭回调（用于清理各模块按 uid 维护的会话态）"""
+        for handler in _session_closed_handlers:
+            try:
+                handler(uid)
+            except Exception:
+                pass  # 单个回调失败不影响其余
+
+    def _close_session(self, uid, session):
         """后台关闭 pyOCD session，避免 blocking 前端"""
         try:
-            # 设置 resume_on_disconnect=False 避免 target.resume() 耗时操作
-            session.options.set('resume_on_disconnect', False)
+            # 断开时恢复目标运行（resume_on_disconnect=True），让芯片退出会话后 free-run，
+            # 避免芯片停在 halt/低功耗导致下次连接需手动复位。resume() 在本后台线程执行，不阻塞前端。
+            session.options.set('resume_on_disconnect', True)
+            # 清除目标上所有硬件断点（FPB），避免 stop session 后芯片残留断点
+            self._clear_hw_breakpoints(session)
             session.close()
         except Exception:
             pass  # 后台清理，忽略超时等异常
+        finally:
+            self._notify_session_closed(uid)
 
     def get_state(self, probe_uid: str) -> ProbeState:
         """获取探针连接状态"""
@@ -827,10 +896,6 @@ class PyOCDBackend(BackendInterface):
 
             event_manager.log("info", f"Programming {file_size} bytes from {os.path.basename(file_path)}...")
 
-            # 烧录前先复位并暂停目标（与 pyocd flash CLI 的 pre_reset 行为一致）
-            # 原因：目标可能正在运行用户代码，Flash 控制器状态未知，直接编程会失败
-            session.target.reset_and_halt()
-
             # 确定文件格式和基地址
             ext = os.path.splitext(file_path)[1].lower()
             kwargs = {}
@@ -847,6 +912,10 @@ class PyOCDBackend(BackendInterface):
             # 计算实际数据大小（HEX/ELF 文件大小 ≠ 数据大小）
             data_segments = self._extract_file_data(session, file_path, ext)
             actual_data_size = sum(len(d) for _, d in data_segments) if data_segments else file_size
+
+            # 烧录前先复位并暂停目标（与 pyocd flash CLI 的 pre_reset 行为一致）
+            # 原因：目标可能正在运行用户代码，Flash 控制器状态未知，直接编程会失败
+            session.target.reset_and_halt()
 
             # 第一阶段：擦除（chip erase 可能耗时较长，在前端展示 Erasing... 状态）
             event_manager.emit("flash.progress", {
@@ -1530,13 +1599,68 @@ class PyOCDBackend(BackendInterface):
             return False
 
     def read_memory(self, probe_uid: str, address: int, size: int) -> bytes:
-        """读取内存"""
+        """读取内存（自动 halt，通过内存缓存层）"""
         session = self._get_session(probe_uid)
         if not session:
             raise RuntimeError("Not connected")
 
         session.target.halt()
         return bytes(session.target.read_memory_block8(address, size))
+
+    def get_op_lock(self, probe_uid: str) -> threading.Lock:
+        """获取该探针的调试/刷新协调锁（per-UID，惰性创建）。
+
+        用户调试操作（halt/step/continue/reset 等，经 commander_backend）持有该锁
+        （阻塞获取）；周期刷新（read_memory_direct / 外设寄存器读取）try-acquire，
+        获取不到直接跳过，保证调试操作不被周期性刷新并发访问 pyOCD target 影响。
+        """
+        with self._op_locks_guard:
+            lock = self._op_locks.get(probe_uid)
+            if lock is None:
+                lock = threading.Lock()
+                self._op_locks[probe_uid] = lock
+            return lock
+
+    def read_memory_direct(self, probe_uid: str, address: int, size: int) -> Optional[bytes]:
+        """直接读取内存（不 halt、不经过缓存层），仅适用于目标已暂停场景。
+
+        与 read_memory 的区别：
+          - 不调用 session.target.halt()：避免在已暂停目标上产生不必要的状态变更
+          - 通过 core 的 AP 直接读取，绕过 MemoryCache 缓存层，确保返回最新值
+          - try-acquire 协调锁：用户调试操作（halt/step/continue/reset）执行期间
+            返回 None，调用方跳过本轮刷新，避免与调试操作并发访问 pyOCD target
+        """
+        lock = self.get_op_lock(probe_uid)
+        if not lock.acquire(blocking=False):
+            return None
+        try:
+            session = self._get_session(probe_uid)
+            if not session:
+                raise RuntimeError("Not connected")
+            core = session.target.selected_core_or_raise
+            return bytes(core.read_memory_block8(address, size))
+        finally:
+            lock.release()
+
+    def write_memory_direct(self, probe_uid: str, address: int, data: bytes) -> None:
+        """直接写内存（不 halt、不经过缓存层），仅适用于目标已暂停场景。
+
+        与 read_memory_direct 对称：通过 core 的 AP 直接写入，绕过 MemoryCache 缓存层，
+        避免写入后缓存仍返回旧值导致回显不一致。
+        """
+        session = self._get_session(probe_uid)
+        if not session:
+            raise RuntimeError("Not connected")
+        core = session.target.selected_core_or_raise
+        core.write_memory_block8(address, data)
+
+    def write_core_register(self, probe_uid: str, name: str, value: int) -> None:
+        """写核心寄存器（仅目标暂停时有效）。"""
+        session = self._get_session(probe_uid)
+        if not session:
+            raise RuntimeError("Not connected")
+        core = session.target.selected_core_or_raise
+        core.write_core_register(name.lower(), value)
 
     # ── 清理 ──────────────────────────────────────────────
 

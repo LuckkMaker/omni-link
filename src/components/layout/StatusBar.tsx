@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Bell, Usb, ChevronDown, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
+import { Bell, Usb, ChevronDown, Check, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity, AlertCircle, BugPlay, BugOff } from 'lucide-react'
 import { useProbeStore, SPEED_OPTIONS, type DebugInterface } from '@/stores/probe.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import { useRttStore } from '@/stores/rtt.store'
 import { useMonitorStore } from '@/stores/monitor.store'
+import { useZoneStore } from '@/stores/zone.store'
 import { cn } from '@/lib/utils'
 
 const typeConfig = {
@@ -60,16 +62,23 @@ function DropdownSelector({
       </button>
       {open && !disabled && (
         <div className="absolute bottom-full left-0 mb-1 min-w-[120px] rounded-md border border-border bg-popover text-popover-foreground shadow-lg z-[100] py-0.5">
-          {options.map((opt) => (
-            <button
-              key={String(opt.value)}
-              type="button"
-              onClick={() => { onSelect(opt.value); setOpen(false) }}
-              className="block w-full text-left px-3 py-1 text-xs hover:bg-accent transition-colors"
-            >
-              {opt.label}
-            </button>
-          ))}
+          {options.map((opt) => {
+            const selected = String(opt.value) === value
+            return (
+              <button
+                key={String(opt.value)}
+                type="button"
+                onClick={() => { onSelect(opt.value); setOpen(false) }}
+                className={cn(
+                  'flex w-full items-center gap-2 px-3 py-1 text-left text-xs transition-colors',
+                  selected ? 'bg-accent font-medium' : 'hover:bg-accent'
+                )}
+              >
+                <Check className={cn('size-3.5 shrink-0', selected ? 'opacity-100' : 'opacity-0')} />
+                <span className="flex-1">{opt.label}</span>
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
@@ -176,6 +185,28 @@ export function StatusBar() {
   const speedLabel = SPEED_OPTIONS.find((s) => s.value === pendingSpeed)?.label ?? `${pendingSpeed} Hz`
   const interfaceDisabled = isConnected || isConnecting
 
+  // Zone 调试状态（仅 Zone 页面显示）
+  const location = useLocation()
+  const isOnZonePage = location.pathname === '/zone'
+  const zoneState = useZoneStore((s) => s.state)
+  const zonePc = useZoneStore((s) => s.pc)
+  const zoneBusy = useZoneStore((s) => s.busy)
+  const zoneError = useZoneStore((s) => s.error)
+  const zoneSession = useZoneStore((s) => s.sessionStatus)
+  // 基于会话生命周期描述状态，区分「会话未启动」与「目标已连接」：
+  // connecting/busy → 连接中；active → 目标 halted/running；idle → 无会话
+  const zoneConnecting = zoneSession === 'connecting' || zoneBusy
+  const zoneActive = zoneSession === 'active'
+  const zoneStateLabel = zoneConnecting
+    ? 'Connecting'
+    : zoneActive
+      ? zoneState === 'halted'
+        ? 'Halted'
+        : zoneState === 'running'
+          ? 'Running'
+          : 'Unknown'
+      : 'No Session'
+
   /** 格式化字节数为可读字符串 */
   const fmtBytes = (n: number): string => {
     if (n < 1024) return `${n} B`
@@ -229,6 +260,46 @@ export function StatusBar() {
           onSelect={(v) => setPendingSpeed(v as number)}
           disabled={interfaceDisabled}
         />
+
+        {/* Zone 调试状态：仅 Zone 页面显示（目标状态 / PC / 错误） */}
+        {isOnZonePage && (
+          <>
+            <div className="w-px h-3 bg-white/20" />
+            <div className="flex items-center gap-1 px-2" title="调试会话状态">
+              {zoneConnecting ? (
+                <Loader2 className="size-3 animate-spin text-white/80" />
+              ) : zoneActive ? (
+                <BugPlay className="size-3 text-green-400" />
+              ) : (
+                <BugOff className="size-3 text-white/40" />
+              )}
+              <span
+                className={cn(
+                  zoneConnecting || !zoneActive
+                    ? 'text-white/60'
+                    : zoneState === 'halted'
+                      ? 'text-amber-300'
+                      : 'text-green-400'
+                )}
+              >
+                {zoneStateLabel}
+              </span>
+            </div>
+            {zonePc !== null && zonePc !== undefined && (
+              <div className="flex items-center gap-1 px-2" title="程序计数器">
+                <span className="text-white/80 font-mono">
+                  PC=0x{(zonePc ?? 0).toString(16).toUpperCase().padStart(8, '0')}
+                </span>
+              </div>
+            )}
+            {zoneError && (
+              <div className="flex items-center gap-1 px-2" title={zoneError}>
+                <AlertCircle className="size-3 text-red-400" />
+                <span className="max-w-48 truncate text-red-400">{zoneError}</span>
+              </div>
+            )}
+          </>
+        )}
 
         {/* RTT 统计：运行时紧凑内联显示，与左侧项一致分隔 */}
         {rttRunning && (

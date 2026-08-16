@@ -1,25 +1,38 @@
 site_name: OMNI Link
-site_description: Embedded development toolkit
+site_description: 一站式嵌入式调试工作台
 site_author: LuckkMaker
 
 theme:
-  name: readthedocs
-  favicon: assets/images/favicon.png
-  logo: assets/images/logo.png
-  collapse_navigation: true
-  sticky_navigation: true
-  navigation_depth: 4
-  highlightjs: true
-  hljs_languages:
-    - yaml
-    - c
-    - cpp
+  name: material
+  language: zh
+  favicon: assets/images/icon_rounded.png
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Roboto
+    code: Roboto Mono
+  palette:
+    scheme: default
+    primary: custom
+    accent: custom
+  features:
+    - navigation.tabs
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
 
 extra_css:
   - css/extra.css
 
+extra_javascript:
+  - js/extra.js
+
 repo_name: omni-link
 repo_url: https://github.com/LuckkMaker/omni-link
+
+copyright: © 2026 LuckkMaker · OMNI Link · Made for embedded developers
 
 plugins:
   - search
@@ -47,11 +60,12 @@ markdown_extensions:
   - md_in_html
 
 nav:
-  - 首页: index.md
-  - 快速开始: getting-started.md
-  - 用户指南:
-      - Flash: guide/flash.md
-      - Commander: guide/commander.md
-      - RTT_Viewer: guide/rtt-viewer.md
-      - Monitor: guide/monitor.md
-  - 贡献指南: contributing.md
+  - 主页: index.md
+
+exclude_docs: |
+  getting-started.md
+  contributing.md
+  guide/
+  reference/
+  rule/
+  tech/

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Eraser,
   Upload,
@@ -33,6 +33,7 @@ import { ReadBackRangeDialog } from './components/ReadBackRangeDialog'
 import { CompareDialog } from './components/CompareDialog'
 import { useFlashStore } from '@/stores/flash.store'
 import { useProbeStore } from '@/stores/probe.store'
+import { cn } from '@/lib/utils'
 
 export default function FlashPage() {
   const {
@@ -79,15 +80,40 @@ export default function FlashPage() {
     || activeTab?.type === 'device' && !!activeTab.data
   const canReadBack = !!activeTab
 
+  // 自适应紧凑模式：工具栏溢出时隐藏文字标签（仅图标 + 悬停提示），与 Zone 工具栏对称
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [compact, setCompact] = useState(false)
+  const fullWidthRef = useRef(0)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      if (compact) {
+        if (el.clientWidth >= fullWidthRef.current + 48) setCompact(false)
+      } else {
+        fullWidthRef.current = el.scrollWidth
+        if (el.scrollWidth > el.clientWidth + 1) setCompact(true)
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [compact])
+
   return (
     <div className="flex h-full flex-col">
       {/* 顶部工具栏 */}
-      <div className="flex items-center gap-1 border-b border-border px-3 py-2 shrink-0">
+      <div
+        ref={containerRef}
+        className={cn(
+          'flex items-center gap-1 border-b border-border px-3 py-2 shrink-0',
+          compact && 'toolbar-compact'
+        )}
+      >
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" disabled={!isConnected || busy || !canProgram} className="h-8 gap-1">
+            <Button variant="ghost" size="sm" disabled={!isConnected || busy || !canProgram} className="h-8 gap-1" title="Program firmware to the target">
               <Upload className="size-3.5" />
-              Program
+              <span data-toolbar-label>Program</span>
               <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
@@ -104,9 +130,9 @@ export default function FlashPage() {
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" disabled={!isConnected || busy} className="h-8 gap-1">
+            <Button variant="ghost" size="sm" disabled={!isConnected || busy} className="h-8 gap-1" title="Erase flash memory (chip or selected sectors)">
               <Eraser className="size-3.5" />
-              Erase
+              <span data-toolbar-label>Erase</span>
               <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
@@ -118,18 +144,18 @@ export default function FlashPage() {
 
         <Separator orientation="vertical" className="mx-1 h-5" />
 
-        <Button variant="ghost" size="sm" disabled={!isConnected || busy || !canProgram} onClick={doVerify} className="h-8 gap-1.5">
+        <Button variant="ghost" size="sm" disabled={!isConnected || busy || !canProgram} onClick={doVerify} className="h-8 gap-1.5" title="Verify programmed data against the file">
           <CheckCircle className="size-3.5" />
-          Verify
+          <span data-toolbar-label>Verify</span>
         </Button>
 
         <Separator orientation="vertical" className="mx-1 h-5" />
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" disabled={!isConnected || busy || !canReadBack} className="h-8 gap-1">
+            <Button variant="ghost" size="sm" disabled={!isConnected || busy || !canReadBack} className="h-8 gap-1" title="Read back target memory to a file">
               <Download className="size-3.5" />
-              Read Back
+              <span data-toolbar-label>Read Back</span>
               <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
@@ -142,23 +168,23 @@ export default function FlashPage() {
 
         <Separator orientation="vertical" className="mx-1 h-5" />
 
-        <Button variant="ghost" size="sm" disabled={!isConnected || busy} onClick={doStartApp} className="h-8 gap-1.5">
+        <Button variant="ghost" size="sm" disabled={!isConnected || busy} onClick={doStartApp} className="h-8 gap-1.5" title="Start the application on the target">
           <Play className="size-3.5" />
-          Start App
+          <span data-toolbar-label>Start App</span>
         </Button>
 
         <Separator orientation="vertical" className="mx-1 h-5" />
 
-        <Button variant="ghost" size="sm" disabled={!isConnected || busy} onClick={doReset} className="h-8 gap-1.5">
+        <Button variant="ghost" size="sm" disabled={!isConnected || busy} onClick={doReset} className="h-8 gap-1.5" title="Reset the target">
           <RotateCcw className="size-3.5" />
-          Reset
+          <span data-toolbar-label>Reset</span>
         </Button>
 
         <Separator orientation="vertical" className="mx-1 h-5" />
 
-        <Button variant="ghost" size="sm" disabled={!isConnected || busy} onClick={doCheckBlank} className="h-8 gap-1.5">
+        <Button variant="ghost" size="sm" disabled={!isConnected || busy} onClick={doCheckBlank} className="h-8 gap-1.5" title="Check if the target memory is blank">
           <ScanSearch className="size-3.5" />
-          Check Blank
+          <span data-toolbar-label>Check Blank</span>
         </Button>
       </div>
 

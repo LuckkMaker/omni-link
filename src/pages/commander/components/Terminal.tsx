@@ -19,6 +19,8 @@ export interface TerminalApi {
   clearHistory: () => void
   /** 聚焦终端（接收键盘输入） */
   focus: () => void
+  /** 向 scrollback 写入一行（保留当前输入行），供外部注入日志/事件 —— 可选，未实现时忽略 */
+  writeLog?: (line: string) => void
 }
 
 interface TerminalProps {
@@ -28,6 +30,13 @@ interface TerminalProps {
   commands: CommandInfo[]
   /** 父组件创建的 ref，Terminal 会将 API 写入此 ref */
   apiRef: React.MutableRefObject<TerminalApi | null>
+  /**
+   * 命令执行前的拦截钩子（可选）。Terminal 回显命令并记录历史后、执行 commander 前调用。
+   * 返回 true 表示已由调用方处理（跳过 commander exec）；返回 false 走原执行逻辑。
+   */
+  onBeforeCommand?: (uid: string, cmd: string) => Promise<boolean>
+  /** 启动欢迎信息（每行一条）。未提供时使用 Commander 默认说明 */
+  banner?: string[]
 }
 
 // ── ANSI 颜色码 ──────────────────────────
@@ -72,7 +81,10 @@ function saveHistory(history: string[]) {
   }
 }
 
-export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
+export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, banner }: TerminalProps) {
+  // onBeforeCommand 用 ref 持有：避免调用方传内联函数导致 runCommand 闭包过期
+  const onBeforeCommandRef = useRef(onBeforeCommand)
+  onBeforeCommandRef.current = onBeforeCommand
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -93,6 +105,15 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
 
   // 字体大小
   const fontSize = useRef(13)
+
+  // 终端容器可见性：keep-alive 切走时 display:none（尺寸为 0）、切回恢复可见。
+  // 用于检测「隐藏→可见」转换：恢复后 xterm 内部光标位置会与 inputBuf.cursorPos 脱节，
+  // 需要重绘当前输入行把光标重新拉回正确列（否则会跑到 prompt 的 > 处）。
+  const lastVisibleRef = useRef(true)
+
+  // 标记「writeLog 已重绘 prompt+输入行」：命令执行收尾时若已重绘则不再补写 prompt，
+  // 避免事件注入与 runCommand 各画一次 prompt 导致 omni link> omni link> 叠加
+  const promptDrawnRef = useRef(false)
 
   // uid/running/commands 同步到 ref（供 onData 闭包访问最新值）
   const uidRef = useRef<string | null>(uid)
@@ -200,6 +221,8 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
       inputBuf.current = ''
       cursorPos.current = 0
       historyIndex.current = -1
+      // 新一轮命令开始：重置「writeLog 已重绘 prompt」标记，收尾时据此决定是否补写 prompt
+      promptDrawnRef.current = false
 
       if (!cmd.trim()) {
         // 空命令：清除当前行再写 prompt，避免 omni link> omni link> 重复叠加
@@ -214,6 +237,18 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
         term.write(`${COLOR.red}Error: No probe selected${COLOR.reset}\r\n`)
         term.write(PROMPT)
         return
+      }
+
+      // 命令执行前拦截：调用方（如 Zone ConsoleDock）可接管运行控制类命令，
+      // 走 Zone store 联动；返回 true 表示已处理，跳过 commander exec
+      if (onBeforeCommandRef.current) {
+        const handled = await onBeforeCommandRef.current(uidRef.current, cmd)
+        if (handled) {
+          // 拦截方（如 Zone 联动）执行时已通过 writeLog 注入事件并重绘 prompt，
+          // 此时不再补写，避免 omni link> omni link> 叠加
+          if (!promptDrawnRef.current) term.write(PROMPT)
+          return
+        }
       }
 
       // 显示运行指示（在命令行内新行）
@@ -235,7 +270,8 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
         term.write(`${COLOR.red}Error: ${result.error}${COLOR.reset}\r\n`)
       }
 
-      term.write(PROMPT)
+      // 末尾写完输出后补 prompt；若期间 writeLog 已重绘（如断点事件注入）则不再补写
+      if (!promptDrawnRef.current) term.write(PROMPT)
     },
     [execute, addToHistory, exitSearch]
   )
@@ -343,6 +379,28 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
     term.write('\r\x1b[2K' + PROMPT + inputBuf.current)
   }, [])
 
+  // ── 注入日志行（保留当前输入行，供 Console 混合流写入调试事件）──
+  const writeLog = useCallback(
+    (line: string) => {
+      const term = termRef.current
+      if (!term) return
+      const input = inputBuf.current
+      const cursor = cursorPos.current
+      // 清除当前输入行，在原行写入日志行，再换行重绘 prompt + 输入行
+      // 注意：不能先用 \r\n 换行再写（会把被清除的 prompt 行留成空行，导致事件间出现空行）
+      term.write('\r\x1b[2K')
+      term.write(`${line}\r\n`)
+      term.write(PROMPT + input)
+      const targetCol = PROMPT_VISIBLE_LEN + cursor
+      const currentCol = PROMPT_VISIBLE_LEN + input.length
+      if (targetCol < currentCol) {
+        term.write(`\x1b[${currentCol - targetCol}D`)
+      }
+      promptDrawnRef.current = true
+    },
+    []
+  )
+
   // ── 字体缩放 ──────────────────────────
   const zoomFont = useCallback((delta: number) => {
     const term = termRef.current
@@ -372,11 +430,12 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
         useCommanderStore.setState({ history: [] })
       },
       focus: () => termRef.current?.focus(),
+      writeLog,
     }
     return () => {
       apiRef.current = null
     }
-  }, [apiRef, runCommand, insertText, clearScreen])
+  }, [apiRef, runCommand, insertText, clearScreen, writeLog])
 
   // 初始化终端（仅挂载时）
   useEffect(() => {
@@ -439,16 +498,15 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
       }
     })
 
-    // 欢迎信息
-    term.write(
-      `${COLOR.dim}Type 'help' for commands, Tab to complete, Ctrl+R to search history${COLOR.reset}\r\n`
-    )
-    term.write(
-      `${COLOR.dim}Copy: Ctrl+Shift+C or right-click | Paste: Ctrl+Shift+V or right-click${COLOR.reset}\r\n`
-    )
-    term.write(
-      `${COLOR.dim}Python expr: $ target.read32(0x20000000) | Shell: ! dir | Run script: run script.py${COLOR.reset}\r\n`
-    )
+    // 欢迎信息（可用 banner prop 覆盖）
+    const lines = banner ?? [
+      `Type 'help' for commands, Tab to complete, Ctrl+R to search history`,
+      `Copy: Ctrl+Shift+C or right-click | Paste: Ctrl+Shift+V or right-click`,
+      `Python expr: $ target.read32(0x20000000) | Shell: ! dir | Run script: run script.py`,
+    ]
+    for (const text of lines) {
+      term.write(`${COLOR.dim}${text}${COLOR.reset}\r\n`)
+    }
     term.write(PROMPT)
 
     // 延迟 fit：等待 flex 布局计算完成
@@ -758,29 +816,31 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
       }
     })
 
-    // 响应式调整
-    const ro = new ResizeObserver(() => {
+    // 响应式调整：fit 后若刚从「隐藏(display:none)」恢复可见，需重绘当前输入行，
+    // 让 xterm 内部光标位置与 inputBuf.cursorPos 重新对齐（否则光标会跑到 prompt 的 > 处）
+    const onRefit = () => {
+      const el = containerRef.current
+      const visible = !!el && el.clientWidth > 0 && el.clientHeight > 0
+      const justRestored = visible && !lastVisibleRef.current
+      lastVisibleRef.current = visible
+      if (!visible) return
       try {
         fit.fit()
       } catch {
         // 容器未就绪时忽略
+        return
       }
-    })
+      if (justRestored) redrawInputLine()
+    }
+    const ro = new ResizeObserver(onRefit)
     ro.observe(containerRef.current)
 
-    // 同时监听 window resize（侧边栏折叠等触发）
-    const onWindowResize = () => {
-      try {
-        fit.fit()
-      } catch {
-        // 忽略
-      }
-    }
-    window.addEventListener('resize', onWindowResize)
+    // 同时监听 window resize（侧边栏折叠、keep-alive 切回等触发）
+    window.addEventListener('resize', onRefit)
 
     return () => {
       ro.disconnect()
-      window.removeEventListener('resize', onWindowResize)
+      window.removeEventListener('resize', onRefit)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -816,5 +876,5 @@ export function Terminal({ uid, connected, commands, apiRef }: TerminalProps) {
     }
   }, [connected])
 
-  return <div ref={containerRef} className="h-full w-full overflow-hidden pl-2" />
+  return <div ref={containerRef} className="h-full w-full overflow-hidden" />
 }

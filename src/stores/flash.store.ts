@@ -311,7 +311,6 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
   reloadFileTab: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab?.filePath) return
-    set({ showReloadDialog: false, pendingReloadTabId: null })
     get().updateTab(tabId, { loading: true })
     try {
       const [info, data] = await Promise.all([parseFile(tab.filePath), readFile(tab.filePath, tab.baseAddress)])

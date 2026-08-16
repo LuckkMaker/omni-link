@@ -30,10 +30,12 @@ interface LogConsoleProps {
   logs: LogEvent[]
   onClear: () => void
   title?: string
+  /** 标题栏插槽：渲染在标题右侧（可用于来源筛选等），最右为保存/清除 */
+  headerExtra?: React.ReactNode
 }
 
 /** 共享日志控制台组件，可被 Flash / RTT / Commander 等页面复用 */
-export function LogConsole({ logs, onClear, title = '日志' }: LogConsoleProps) {
+export function LogConsole({ logs, onClear, title = '日志', headerExtra }: LogConsoleProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // 自动滚动到底部
@@ -103,6 +105,7 @@ export function LogConsole({ logs, onClear, title = '日志' }: LogConsoleProps)
         {logs.length > 0 && (
           <span className="text-[10px] text-muted-foreground">({logs.length})</span>
         )}
+        {headerExtra}
         <div className="ml-auto flex items-center gap-0.5">
           <Button
             variant="ghost"

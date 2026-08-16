@@ -5,6 +5,23 @@ import type { ConnectMode } from '@/services/probe.service'
 import { listTargets } from '@/services/target.service'
 import { listDevices } from '@/services/device.service'
 import { useNotificationStore } from './notification.store'
+import { useLogStore } from './log.store'
+
+/** 从 FastAPI 错误响应中提取后端返回的 detail（字符串）错误详情 */
+function extractApiDetail(err: unknown): string | null {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return typeof detail === 'string' ? detail : null
+}
+
+/** 写全局日志（探针连接/断开归属 system 来源） */
+function probeLog(level: 'info' | 'warning' | 'error', message: string) {
+  useLogStore.getState().addLog({
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    source: 'system',
+  })
+}
 
 /** 调试接口类型 */
 export type DebugInterface = 'swd' | 'jtag'
@@ -35,13 +52,17 @@ export const CONNECT_MODE_OPTIONS: { label: string; value: ConnectMode; desc: st
 
 /** 速度选项 (Hz) */
 export const SPEED_OPTIONS = [
-  { label: '100 kHz', value: 100_000 },
-  { label: '500 kHz', value: 500_000 },
-  { label: '1 MHz', value: 1_000_000 },
-  { label: '2 MHz', value: 2_000_000 },
-  { label: '4 MHz', value: 4_000_000 },
-  { label: '8 MHz', value: 8_000_000 },
   { label: '10 MHz', value: 10_000_000 },
+  { label: '5 MHz', value: 5_000_000 },
+  { label: '2 MHz', value: 2_000_000 },
+  { label: '1 MHz', value: 1_000_000 },
+  { label: '500 kHz', value: 500_000 },
+  { label: '200 kHz', value: 200_000 },
+  { label: '100 kHz', value: 100_000 },
+  { label: '50 kHz', value: 50_000 },
+  { label: '20 kHz', value: 20_000 },
+  { label: '10 kHz', value: 10_000 },
+  { label: '5 kHz', value: 5_000 },
 ]
 
 interface ProbeStore {
@@ -233,8 +254,12 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
       if (get().deviceList.length === 0) {
         get().fetchDevices()
       }
+      probeLog('info', `仿真器连接成功（${uid}）`)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '连接仿真器失败'
+      const fallback = err instanceof Error ? err.message : '连接仿真器失败'
+      // 优先使用后端返回的 detail（如底层错误详情），否则退回通用 500 信息
+      const detail = extractApiDetail(err)
+      const msg = detail ?? fallback
       set((state) => ({
         probes: state.probes.map((p) =>
           p.uid === uid ? { ...p, state: 'error' as const } : p
@@ -242,6 +267,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
         connecting: false,
         error: msg,
       }))
+      probeLog('error', `仿真器连接失败（${uid}）：${msg}`)
       useNotificationStore.getState().push({
         type: 'error',
         title: '连接失败',
@@ -264,9 +290,13 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
         ),
         connecting: false,
       }))
+      probeLog('info', `仿真器已断开（${uid}）`)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '断开仿真器失败'
+      const fallback = err instanceof Error ? err.message : '断开仿真器失败'
+      const detail = extractApiDetail(err)
+      const msg = detail ?? fallback
       set({ connecting: false, error: msg })
+      probeLog('error', `仿真器断开失败（${uid}）：${msg}`)
       useNotificationStore.getState().push({
         type: 'error',
         title: '断开仿真器失败',

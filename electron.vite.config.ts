@@ -38,6 +38,10 @@ export default defineConfig({
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
     },
+    optimizeDeps: {
+      // monaco-editor 的 `?worker` 导入需按源码处理，否则预打包阶段无法解析 worker 后缀
+      exclude: ['monaco-editor']
+    },
     build: {
       emptyOutDir: false,
       rollupOptions: {

@@ -26,6 +26,8 @@ export async function connectProbe(
     interface?: string
     speed?: number
     connect_mode?: ConnectMode
+    /** 为 True 时即使已连接也按新 connect_mode 强制重连 */
+    force?: boolean
   }
 ): Promise<{ connected: boolean; uid: string; target: TargetInfo | null }> {
   const client = await api()
