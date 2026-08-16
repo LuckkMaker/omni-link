@@ -106,6 +106,11 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
   // 字体大小
   const fontSize = useRef(13)
 
+  // 终端容器可见性：keep-alive 切走时 display:none（尺寸为 0）、切回恢复可见。
+  // 用于检测「隐藏→可见」转换：恢复后 xterm 内部光标位置会与 inputBuf.cursorPos 脱节，
+  // 需要重绘当前输入行把光标重新拉回正确列（否则会跑到 prompt 的 > 处）。
+  const lastVisibleRef = useRef(true)
+
   // 标记「writeLog 已重绘 prompt+输入行」：命令执行收尾时若已重绘则不再补写 prompt，
   // 避免事件注入与 runCommand 各画一次 prompt 导致 omni link> omni link> 叠加
   const promptDrawnRef = useRef(false)
@@ -811,29 +816,31 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
       }
     })
 
-    // 响应式调整
-    const ro = new ResizeObserver(() => {
+    // 响应式调整：fit 后若刚从「隐藏(display:none)」恢复可见，需重绘当前输入行，
+    // 让 xterm 内部光标位置与 inputBuf.cursorPos 重新对齐（否则光标会跑到 prompt 的 > 处）
+    const onRefit = () => {
+      const el = containerRef.current
+      const visible = !!el && el.clientWidth > 0 && el.clientHeight > 0
+      const justRestored = visible && !lastVisibleRef.current
+      lastVisibleRef.current = visible
+      if (!visible) return
       try {
         fit.fit()
       } catch {
         // 容器未就绪时忽略
+        return
       }
-    })
+      if (justRestored) redrawInputLine()
+    }
+    const ro = new ResizeObserver(onRefit)
     ro.observe(containerRef.current)
 
-    // 同时监听 window resize（侧边栏折叠等触发）
-    const onWindowResize = () => {
-      try {
-        fit.fit()
-      } catch {
-        // 忽略
-      }
-    }
-    window.addEventListener('resize', onWindowResize)
+    // 同时监听 window resize（侧边栏折叠、keep-alive 切回等触发）
+    window.addEventListener('resize', onRefit)
 
     return () => {
       ro.disconnect()
-      window.removeEventListener('resize', onWindowResize)
+      window.removeEventListener('resize', onRefit)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -869,5 +876,5 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
     }
   }, [connected])
 
-  return <div ref={containerRef} className="h-full w-full overflow-hidden pl-2" />
+  return <div ref={containerRef} className="h-full w-full overflow-hidden" />
 }
