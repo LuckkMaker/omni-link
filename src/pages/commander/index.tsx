@@ -79,6 +79,16 @@ export default function CommanderPage() {
     }
   }, [uid, fetchCommands])
 
+  /** 命令执行前拦截：list 由界面提供 probe 连接与目标配置，命令冗余，Commander 亦不可用 */
+  const handleBeforeCommand = useCallback(async (cmdUid: string, cmd: string): Promise<boolean> => {
+    const first = cmd.trim().split(/\s+/)[0]?.toLowerCase()
+    if (first === 'list') {
+      terminalApiRef.current?.writeLog?.('命令「list」不可用：应用已提供 probe 连接与目标配置')
+      return true
+    }
+    return false
+  }, [])
+
   /** 拖拽调整侧边栏宽度
    *  右侧边栏：鼠标向左拖（delta<0）应扩大宽度，向右拖（delta>0）应缩小宽度 */
   const handleSidebarResize = useCallback((delta: number) => {
@@ -113,6 +123,7 @@ export default function CommanderPage() {
           connected={isConnected}
           commands={commands}
           apiRef={terminalApiRef}
+          onBeforeCommand={handleBeforeCommand}
         />
       </div>
 

@@ -166,6 +166,16 @@ export function ConsoleDock() {
   const onBeforeCommand = useCallback(async (cmdUid: string, cmd: string): Promise<boolean> => {
     const tokens = cmd.trim().split(/\s+/)
     const first = (tokens[0] ?? '').toLowerCase()
+    // list：应用已通过界面提供 probe 连接与目标配置，命令冗余，两个页面均不可用
+    if (first === 'list') {
+      useLogStore.getState().addLog({
+        timestamp: new Date().toISOString(),
+        level: 'warning',
+        message: '命令「list」在 Zone 控制台不可用：应用已提供 probe 连接与目标配置',
+        source: 'zone',
+      })
+      return true
+    }
     if (blockedCommands.includes(first)) {
       useLogStore.getState().addLog({
         timestamp: new Date().toISOString(),
@@ -302,7 +312,7 @@ export function ConsoleDock() {
           `Type 'help' for commands, Tab to complete, Ctrl+R to search history`,
           `Copy: Ctrl+Shift+C | Paste: Ctrl+Shift+V`,
           `Clear: Ctrl+L | Zoom: Ctrl+MouseWheel`,
-          `以下命令在 Zone 页面禁用: script/exec/eval/load/save/flash/erase/write`,
+          `以下命令在 Zone 页面禁用: list, script/exec/eval/load/save/flash/erase/write`,
         ]}
       />
     </div>
