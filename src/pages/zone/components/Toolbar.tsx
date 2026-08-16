@@ -8,7 +8,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { ConnectionConfigDialog, RUN_TO_MAIN_KEY } from '@/components/ConnectionConfigDialog'
+import { ConnectionConfigDialog } from '@/components/ConnectionConfigDialog'
 import { useZoneStore, type ZoneStartMode } from '../store'
 import { cn } from '@/lib/utils'
 
@@ -117,25 +117,12 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
   const [configOpen, setConfigOpen] = useState(false)
   const [pendingMode, setPendingMode] = useState<ZoneStartMode | null>(null)
 
-  // 每次启动调试会话都强制弹窗选择 ELF 文件（不做自动记忆/回退），再按所选方式自动重连并执行动作
-  const handleStart = useCallback(
-    (mode: ZoneStartMode) => {
-      // 仿真器未选择 / 设备未连接：先弹出连接配置弹窗（用户在此选择仿真器/目标 + ELF，再统一启动）
-      if (!uid || !connected) {
-        setPendingMode(mode)
-        setConfigOpen(true)
-        return
-      }
-      void (async () => {
-        const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
-        if (!path) return
-        // 已连接快速路径：静默应用持久化的「运行到 main()」偏好，与配置窗口行为一致
-        const runToMain = localStorage.getItem(RUN_TO_MAIN_KEY) === '1'
-        await startSession(uid, mode, path, { runToMain })
-      })()
-    },
-    [uid, connected, startSession]
-  )
+  // 每次启动调试会话都强制弹窗选择 ELF 文件（不做自动记忆/回退），再按所选方式自动重连并执行动作。
+  // 设备已连接时同样弹窗（聚焦「会话」tab，于可执行文件处引导），保证启动前必选 ELF。
+  const handleStart = useCallback((mode: ZoneStartMode) => {
+    setPendingMode(mode)
+    setConfigOpen(true)
+  }, [])
 
   // 调试会话配置弹窗确认后：携带用户选择的 ELF 路径与会话选项启动会话（连接由 startSession 内部统一处理，避免双重连接）
   const handleStartSessionFromDialog = useCallback(
@@ -333,13 +320,15 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
       <Separator orientation="vertical" className="mx-1 h-5" />
 
       {/* 调试会话配置弹窗（start 模式，含 ELF 选择区与会话选项）——
-          由 Start Session（未配置/未连接时自动弹出，带 pendingMode）或齿轮入口触发。
-          startOnConfirm 依据是否有待启动的 mode：有 → 确认即启动；齿轮打开（无 mode）→ 仅为配置编辑态。 */}
+          由 Start Session（点 Start 即弹，带 pendingMode）或齿轮入口触发。
+          startOnConfirm 依据是否有待启动的 mode：有 → 确认即启动；齿轮打开（无 mode）→ 仅为配置编辑态。
+          startConnected：设备已连接时聚焦「会话」tab，并在可执行文件处引导选择 ELF。 */}
       <ConnectionConfigDialog
         open={configOpen}
         onOpenChange={setConfigOpen}
         mode="start"
         startOnConfirm={pendingMode !== null}
+        startConnected={connected}
         onStartSession={handleStartSessionFromDialog}
       />
     </div>

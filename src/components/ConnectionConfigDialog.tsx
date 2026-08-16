@@ -50,6 +50,8 @@ interface ConnectionConfigDialogProps {
    * - false（齿轮入口）：仅作为配置编辑态，确认 =「完成」，只保存选项（勾选即持久化），不启动会话。
    */
   startOnConfirm?: boolean
+  /** mode='start' 且设备已连接时（Start 自动弹出）：默认聚焦「会话」tab，并在可执行文件处抖动引导选择 ELF */
+  startConnected?: boolean
 }
 
 /**
@@ -64,6 +66,7 @@ export function ConnectionConfigDialog({
   onStartSession,
   initialError,
   startOnConfirm = true,
+  startConnected = false,
 }: ConnectionConfigDialogProps) {
   const {
     probes,
@@ -107,6 +110,10 @@ export function ConnectionConfigDialog({
     localStorage.getItem(RUN_TO_MAIN_KEY) === '1'
   )
 
+  // ── 派生值（须在所有 useState 之后声明，避免引用未初始化） ──
+  // 设备已连接点击 Start：需先选 ELF → 会话 tab 可执行文件处做引导（抖动/高亮）
+  const needElf = showElf && startOnConfirm && startConnected && !elfPath
+
   // 当前设备显示名
   const currentDeviceName = target
     ? getDeviceInfo(target.part_number)?.display_name ?? target.part_number
@@ -121,13 +128,13 @@ export function ConnectionConfigDialog({
       if (deviceList.length === 0) fetchDevices()
     }
     if (open) {
-      // 默认 tab：Start 自动弹出先确认连接；齿轮打开(focus)聚焦会话配置
-      setActiveTab(startOnConfirm ? 'connect' : 'session')
+      // 默认 tab：Start 且设备已连接 → 聚焦「会话」引导选 ELF；Start 未连接 → 先确认连接；齿轮 → 会话
+      setActiveTab(startOnConfirm ? (startConnected ? 'session' : 'connect') : 'session')
       setErrorMsg(initialError ?? null)
       setProbeError(null)
       setElfError(null)
     }
-  }, [open, status, initialError, startOnConfirm, fetchProbes, fetchDevices, deviceList.length])
+  }, [open, status, initialError, startOnConfirm, startConnected, fetchProbes, fetchDevices, deviceList.length])
 
   // 打开 start 模式时，预填上一次选择的 ELF 路径（作为默认值，用户仍可重新选择或确认使用）
   useEffect(() => {
@@ -366,13 +373,21 @@ export function ConnectionConfigDialog({
               <button
                 onClick={handlePickElf}
                 title={elfPath ?? undefined}
-                className="flex w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm transition-colors hover:bg-accent"
+                className={cn(
+                  'flex w-full items-center justify-between gap-2 rounded-md border bg-background px-3 py-2 text-sm transition-colors',
+                  needElf
+                    ? 'border-primary/70 zone-elf-need hover:bg-primary/5'
+                    : 'border-input hover:bg-accent'
+                )}
               >
-                <span className={cn('min-w-0 truncate', elfPath ? 'font-medium' : 'text-muted-foreground')}>
-                  {elfPath ? elfPath.split(/[\\/]/).pop() : '点击选择可执行文件'}
+                <span className={cn('min-w-0 truncate', needElf ? 'font-medium text-primary' : elfPath ? 'font-medium' : 'text-muted-foreground')}>
+                  {elfPath ? elfPath.split(/[\\/]/).pop() : needElf ? '请选择可执行文件' : '点击选择可执行文件'}
                 </span>
-                <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
+                <FileCode2 className={cn('size-4 shrink-0', needElf ? 'text-primary' : 'text-muted-foreground')} />
               </button>
+              {needElf && (
+                <p className="text-xs text-amber-600">请选择要加载到目标的 ELF/AXF 可执行文件，再点击“连接并启动”</p>
+              )}
             </div>
 
             {/* 会话选项 */}

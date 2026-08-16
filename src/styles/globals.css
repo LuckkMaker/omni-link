@@ -104,3 +104,16 @@
 [data-panel] {
   overflow: hidden;
 }
+
+/* ── Zone ELF 选择引导 ────────────── */
+/* 设备已连接点击 Start 后，会话 tab 提示用户选择可执行文件：主色边框 + 水平抖动。 */
+@keyframes zone-elf-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-4px); }
+  40% { transform: translateX(4px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+}
+.zone-elf-need {
+  animation: zone-elf-shake 0.6s ease-in-out 2;
+}
