@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Select,
   SelectContent,
@@ -27,25 +28,34 @@ function formatProbeName(product: string, vendor: string): string {
 
 /** localStorage key：记录上一次选择的 ELF 路径，方便下次启动会话时快速确认 */
 const ELF_LAST_PATH_KEY = 'omni_link_last_elf_path'
+/** localStorage key：记录「运行到 main()」开关，跨会话保持一致（含已连接快速启动路径） */
+export const RUN_TO_MAIN_KEY = 'omni_link_run_to_main'
 
 interface ConnectionConfigDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   /**
    * 显示模式：
-   * - 'config'：仅保存连接配置（侧边栏入口），不显示 ELF 区；
-   * - 'start'：zone 页 Start Session 入口，显示 ELF 选择区，确认后携带 ELF 路径启动会话。
+   * - 'config'：仅保存连接配置（侧边栏入口），不显示 ELF/会话选项区；
+   * - 'start'：zone 页调试会话配置入口，显示 ELF 选择区与会话选项，确认后携带 ELF 路径和会话选项启动会话。
    */
   mode: 'config' | 'start'
-  /** mode='start' 时，确认后回调携带用户选择的 ELF 路径 */
-  onStartSession?: (elfPath: string) => void
+  /** mode='start' 时，确认后回调携带用户选择的 ELF 路径与「运行到 main()」开关 */
+  onStartSession?: (elfPath: string, runToMain: boolean) => void
   /** 打开时由外部注入的初始提示（如"请先选择目标设备"），关闭/确认后清除 */
   initialError?: string | null
+  /**
+   * mode='start' 时是否在确认后发起会话启动：
+   * - true（Start 自动弹出）：确认 =「连接并启动」，校验仿真器/ELF 并回调 onStartSession；
+   * - false（齿轮入口）：仅作为配置编辑态，确认 =「完成」，只保存选项（勾选即持久化），不启动会话。
+   */
+  startOnConfirm?: boolean
 }
 
 /**
- * 可复用的「连接配置」弹窗：仿真器 / 目标设备 / 接口 / 速度 / 连接模式。
- * 仅保存连接配置与收集 ELF 路径，不在此发起连接（连接由 startSession 统一处理，避免双重连接）。
+ * 会话启动配置弹窗：仿真器 / 目标设备 / 接口 / 速度 / 连接模式。
+ * mode='start' 时升级为「调试会话配置」，追加 ELF 选择与「运行到 main()」会话选项。
+ * 仅保存配置与收集选项，不在此发起连接（连接由 startSession 统一处理，避免双重连接）。
  */
 export function ConnectionConfigDialog({
   open,
@@ -53,6 +63,7 @@ export function ConnectionConfigDialog({
   mode,
   onStartSession,
   initialError,
+  startOnConfirm = true,
 }: ConnectionConfigDialogProps) {
   const {
     probes,
@@ -88,6 +99,10 @@ export function ConnectionConfigDialog({
   const [probeError, setProbeError] = useState<string | null>(null)
   const [elfError, setElfError] = useState<string | null>(null)
   const [elfPath, setElfPath] = useState<string | null>(null)
+  // 「运行到 main()」会话选项：默认开启，跨会话持久化（含已连接快速启动路径读取同一 key）
+  const [runToMain, setRunToMain] = useState<boolean>(() =>
+    localStorage.getItem(RUN_TO_MAIN_KEY) !== '0'
+  )
 
   // 当前设备显示名
   const currentDeviceName = target
@@ -131,7 +146,7 @@ export function ConnectionConfigDialog({
   }
 
   const handleConfirm = () => {
-    if (showElf) {
+    if (showElf && startOnConfirm) {
       if (!selectedProbe) {
         setProbeError('请先选择仿真器')
         return
@@ -141,13 +156,16 @@ export function ConnectionConfigDialog({
         return
       }
       const path = elfPath
+      const runToMainValue = runToMain
+      localStorage.setItem(RUN_TO_MAIN_KEY, runToMain ? '1' : '0')
       onOpenChange(false)
       setErrorMsg(null)
       setProbeError(null)
       setElfError(null)
       setElfPath(null)
-      onStartSession?.(path)
+      onStartSession?.(path, runToMainValue)
     } else {
+      // 非启动确认（config 模式 / 齿轮配置态）：仅关闭，选项已在勾选/选择时即时持久化
       onOpenChange(false)
       setErrorMsg(null)
       setProbeError(null)
@@ -160,7 +178,7 @@ export function ConnectionConfigDialog({
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="w-[440px] max-w-[calc(100vw-2rem)]">
           <DialogHeader>
-            <DialogTitle>连接配置</DialogTitle>
+            <DialogTitle>{showElf ? '调试会话配置' : '连接配置'}</DialogTitle>
           </DialogHeader>
 
           {/* 仿真器选择 + 刷新 */}
@@ -301,6 +319,29 @@ export function ConnectionConfigDialog({
             </div>
           )}
 
+          {/* 会话选项（仅 zone 页调试会话配置入口显示） */}
+          {showElf && (
+            <div className="min-w-0 space-y-2">
+              <span className="text-sm font-medium">会话选项</span>
+              <label
+                className="flex cursor-pointer items-center gap-2 rounded-md border border-border/60 bg-background px-3 py-2 text-sm transition-colors hover:bg-accent"
+                title="Download & Reset 后复位目标，并自动运行到 main() 后暂停，便于从程序入口开始调试"
+              >
+                <Checkbox
+                  checked={runToMain}
+                  onCheckedChange={(v) => {
+                    const next = !!v
+                    setRunToMain(next)
+                    localStorage.setItem(RUN_TO_MAIN_KEY, next ? '1' : '0')
+                  }}
+                  className="size-4"
+                  id="zone-run-to-main"
+                />
+                <span className="select-none">运行到 main()</span>
+              </label>
+            </div>
+          )}
+
           {/* 完成按钮 */}
           {selectedProbe && (
             <div className="flex justify-end pt-2">
@@ -309,7 +350,7 @@ export function ConnectionConfigDialog({
                 onClick={handleConfirm}
                 disabled={connecting || selectedProbe.state === 'connecting'}
               >
-                {showElf ? '连接并启动' : '完成'}
+                {showElf ? (startOnConfirm ? '连接并启动' : '完成') : '完成'}
               </Button>
             </div>
           )}

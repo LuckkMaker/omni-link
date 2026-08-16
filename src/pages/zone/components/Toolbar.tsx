@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, CircleSlash, Pause, RefreshCw } from 'lucide-react'
+import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, CircleSlash, Pause, RefreshCw, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -9,7 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { ConnectionConfigDialog } from '@/components/ConnectionConfigDialog'
+import { ConnectionConfigDialog, RUN_TO_MAIN_KEY } from '@/components/ConnectionConfigDialog'
 import { useZoneStore, type ZoneStartMode } from '../store'
 import { cn } from '@/lib/utils'
 
@@ -42,7 +42,7 @@ function SplitButton({
         onClick={onClick}
         disabled={disabled}
         title={title}
-        className="h-8 gap-1.5 rounded-r-none border-r border-border/60"
+        className="h-8 gap-1.5 rounded-r-none"
       >
         {main}
       </Button>
@@ -130,19 +130,21 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
       void (async () => {
         const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
         if (!path) return
-        await startSession(uid, mode, path)
+        // 已连接快速路径：静默应用持久化的「运行到 main()」偏好，与配置窗口行为一致
+        const runToMain = localStorage.getItem(RUN_TO_MAIN_KEY) !== '0'
+        await startSession(uid, mode, path, { runToMain })
       })()
     },
     [uid, connected, startSession]
   )
 
-  // 连接配置弹窗确认后：携带用户选择的 ELF 路径启动会话（连接由 startSession 内部统一处理，避免双重连接）
+  // 调试会话配置弹窗确认后：携带用户选择的 ELF 路径与会话选项启动会话（连接由 startSession 内部统一处理，避免双重连接）
   const handleStartSessionFromDialog = useCallback(
-    (elfPath: string) => {
+    (elfPath: string, runToMain: boolean) => {
       if (!uid || !pendingMode) return
       const mode = pendingMode
       setPendingMode(null)
-      void startSession(uid, mode, elfPath)
+      void startSession(uid, mode, elfPath, { runToMain })
     },
     [uid, pendingMode, startSession]
   )
@@ -320,11 +322,29 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         <span data-toolbar-label>Periodic Refresh</span>
       </Button>
 
-      {/* 连接配置弹窗（start 模式，含 ELF 选择区）——仅仿真器未选择/设备未连接时由 Start Session 触发 */}
+      <Separator orientation="vertical" className="mx-1 h-5" />
+
+      {/* Session Setting：齿轮入口，随时打开调试会话配置（连接 + ELF + 会话选项）；未配置/未连接时由 Start 自动弹出 */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setConfigOpen(true)}
+        disabled={busy || sessionConnecting}
+        className="h-8 gap-1.5"
+        title="Debug session configuration"
+      >
+        <Settings className="size-4" />
+        <span data-toolbar-label>session setting</span>
+      </Button>
+
+      {/* 调试会话配置弹窗（start 模式，含 ELF 选择区与会话选项）——
+          由 Start Session（未配置/未连接时自动弹出，带 pendingMode）或齿轮入口触发。
+          startOnConfirm 依据是否有待启动的 mode：有 → 确认即启动；齿轮打开（无 mode）→ 仅为配置编辑态。 */}
       <ConnectionConfigDialog
         open={configOpen}
         onOpenChange={setConfigOpen}
         mode="start"
+        startOnConfirm={pendingMode !== null}
         onStartSession={handleStartSessionFromDialog}
       />
     </div>

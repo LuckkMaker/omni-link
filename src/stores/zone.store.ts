@@ -235,7 +235,7 @@ interface ZoneStore {
   loadElf: (uid: string, path: string, silent?: boolean) => Promise<boolean>
 
   /** 启动调试会话（自动重连并绑定连接模式） */
-  startSession: (uid: string, mode: ZoneStartMode, path: string) => Promise<boolean>
+  startSession: (uid: string, mode: ZoneStartMode, path: string, opts?: { runToMain?: boolean }) => Promise<boolean>
 
   /** 会话管理 */
   fetchSessions: () => Promise<void>
@@ -731,7 +731,8 @@ export const useZoneStore = create<ZoneStore>()(
         }
       },
 
-      startSession: async (uid, mode, path) => {
+      startSession: async (uid, mode, path, opts) => {
+        const runToMain = opts?.runToMain ?? false
         // 每次启动前递增会话版本号：标识本次会话。后续所有落地状态都校验该版本号，
         // 若期间被 stopSession/断开 bump 过（版本号已变），则本次启动的烧录/复位/刷新回调
         // 一律作废，避免旧会话在 stop 之后回头把 sessionStatus 置回 active。
@@ -745,7 +746,9 @@ export const useZoneStore = create<ZoneStore>()(
           attach_halt: 'Attach & Halt',
         }
         const summary: Record<ZoneStartMode, string> = {
-          download_reset: '下载完成，目标已复位并暂停',
+          download_reset: runToMain
+            ? '固件下载完成，目标已复位并运行到 main()'
+            : '下载完成，目标已复位并暂停',
           attach_running: '已附加到运行中的程序，会话已启动',
           attach_halt: '目标已暂停，会话已启动',
         }
@@ -770,8 +773,9 @@ export const useZoneStore = create<ZoneStore>()(
           }
           // 3. 会话动作
           if (mode === 'download_reset') {
-            // 烧录（不自动运行）。复位并暂停在 Reset_Handler（参考 Keil：会话启动不自动运行到 main，
-            // 由用户手动 [Run]/[Step] 进入程序，避免在调试起点上强加 breakpoint 副作用）
+            // 烧录（不自动运行）。复位后按「运行到 main()」开关决定停在 Reset_Handler 还是 main：
+            // 开启 → break_symbol（复位暂停后跑到 main 断住）；关闭 → halt（复位并暂停，参考 Keil：
+            // 会话启动不自动运行到 main，由用户手动 [Run]/[Step] 进入程序，避免在调试起点上强加断点副作用）
             useNotificationStore.getState().update(notifId, { message: '正在下载固件并复位目标...' })
             const flashRes = await programFlash(uid, path, true, false)
             zoneLog('info', 'Zone Download & Reset Program')
@@ -784,7 +788,7 @@ export const useZoneStore = create<ZoneStore>()(
                   : '固件下载失败，请检查仿真器与目标板连接，或降低调试时钟频率'
               )
             }
-            await get().reset(uid, 'halt')
+            await get().reset(uid, runToMain ? 'break_symbol' : 'halt')
           } else if (mode === 'attach_halt') {
             useNotificationStore.getState().update(notifId, { message: '正在暂停目标...' })
             await get().halt(uid)
