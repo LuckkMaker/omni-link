@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/github/v/release/LuckkMaker/omni-link)](https://github.com/LuckkMaker/omni-link/releases/latest)
 [![License](https://img.shields.io/github/license/LuckkMaker/omni-link)](https://github.com/LuckkMaker/omni-link/blob/main/LICENSE)
 
-OMNI Link 是一站式嵌入式开发工作台，提供 Flash 烧录、Commander 交互式命令行、RTT Viewer 实时数据收发、Monitor 变量波形监控等核心调试功能，支持 DAPLink、JLink 等工具接入，适用于 STM32、GD32、APM32、NXP 等主流 Arm Cortex-M MCU 系列，支持厂商提供的 Keil Pack 包扩展芯片型号。
+OMNI Link 是一站式嵌入式开发工作台，提供 Zone 代码和性能调试、 Flash 烧录、Commander 交互式命令行、RTT Viewer 实时数据收发、Monitor 变量波形监控等核心调试功能，支持 DAPLink、JLink 等工具接入，适用于 STM32、GD32、APM32、NXP 等主流 Arm Cortex-M MCU 系列，支持厂商提供的 Keil Pack 包扩展芯片型号。
 
 ![Advertisement](assets/images/advertisement.png)
 
@@ -11,6 +11,7 @@ OMNI Link 是一站式嵌入式开发工作台，提供 Flash 烧录、Commander
 
 | 模块 | 说明 |
 |------|------|
+| Zone 调试工作台 | 源码调试、汇编窗口、寄存器、外设、调用栈、Watch 变量监视与内存查看整合于一个视图，全链路可视化调试 |
 | Flash 烧录工具 | 固件烧录、擦除（chip/sector）、校验、回读、Hex 查看器、Fill Memory、Compare |
 | Commander 命令行 | 交互式 REPL，复用 pyOCD Commander，支持 `source` 命令配置源码路径 |
 | RTT Viewer | RTT 实时数据收发，多 tab 通道管理，文件发送/录制 |
