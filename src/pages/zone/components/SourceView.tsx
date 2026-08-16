@@ -708,12 +708,17 @@ export function SourceView({ uid }: SourceViewProps) {
     return () => window.removeEventListener('keydown', onKey)
   }, [editing, saveCurrentFile])
 
-  // 切换文件时：把旧文件脏标记写入 map，恢复新文件脏标记
+  // 切换文件时：保存旧文件视口状态（Monaco 内置 saveViewState，须在 setModel 前、currentFileRef 更新前执行）+ 脏标记迁移
   useEffect(() => {
     const editor = editorRef.current
-    const model = editor?.getModel()
     const prev = currentFileRef.current
-    if (prev) dirtyMapRef.current.set(prev, dirtyRef.current)
+    if (prev) {
+      dirtyMapRef.current.set(norm(prev), dirtyRef.current)
+      if (prev !== activeSourceFile && editor) {
+        const m = editor.getModel()
+        if (m) viewStatesRef.current.set(norm(prev), editor.saveViewState())
+      }
+    }
     currentFileRef.current = activeSourceFile ?? null
     if (activeSourceFile) {
       const dirtyNow = dirtyMapRef.current.get(norm(activeSourceFile)) ?? false
@@ -1065,17 +1070,6 @@ export function SourceView({ uid }: SourceViewProps) {
       disposables.forEach((d) => d.dispose())
     }
   }, [uid, matchSourceFile, ensureModel])
-
-  // 文件切换时：保存旧文件的视口状态（在内容加载前执行）
-  useEffect(() => {
-    const prev = currentFileRef.current
-    const editor = editorRef.current
-    if (prev && prev !== activeSourceFile && editor) {
-      const m = editor.getModel()
-      if (m) viewStatesRef.current.set(prev, editor.saveViewState())
-    }
-    currentFileRef.current = activeSourceFile ?? null
-  }, [activeSourceFile])
 
   // 加载选中的源文件（创建/复用 model 并 setModel）
   useEffect(() => {
