@@ -6,7 +6,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ConnectionConfigDialog, RUN_TO_MAIN_KEY } from '@/components/ConnectionConfigDialog'
@@ -131,7 +130,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         const path = await window.electron?.openFileDialog?.({ extensions: ['elf', 'axf'], title: '选择 ELF 文件' })
         if (!path) return
         // 已连接快速路径：静默应用持久化的「运行到 main()」偏好，与配置窗口行为一致
-        const runToMain = localStorage.getItem(RUN_TO_MAIN_KEY) !== '0'
+        const runToMain = localStorage.getItem(RUN_TO_MAIN_KEY) === '1'
         await startSession(uid, mode, path, { runToMain })
       })()
     },
@@ -192,16 +191,19 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
           <Pause className="size-3.5 mr-1.5" />
           Attach &amp; Halt Program
         </DropdownMenuItem>
-        {sessionActive && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => uid && stopSession(uid)}>
-              <Square className="size-3.5 mr-1.5 text-red-500" />
-              Stop debug session
-            </DropdownMenuItem>
-          </>
-        )}
       </SplitButton>
+
+      {/* Session Setting：齿轮入口（仅图标），紧跟 Start Session 之后；随时打开调试会话配置（连接 + ELF + 会话选项） */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setConfigOpen(true)}
+        disabled={busy || sessionConnecting}
+        className="h-8 w-8 px-0"
+        title="Debug session configuration"
+      >
+        <Settings className="size-4" />
+      </Button>
 
       <Separator orientation="vertical" className="mx-1 h-5" />
 
@@ -329,19 +331,6 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
       </Button>
 
       <Separator orientation="vertical" className="mx-1 h-5" />
-
-      {/* Session Setting：齿轮入口，随时打开调试会话配置（连接 + ELF + 会话选项）；未配置/未连接时由 Start 自动弹出 */}
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={() => setConfigOpen(true)}
-        disabled={busy || sessionConnecting}
-        className="h-8 gap-1.5"
-        title="Debug session configuration"
-      >
-        <Settings className="size-4" />
-        <span data-toolbar-label>Session setting</span>
-      </Button>
 
       {/* 调试会话配置弹窗（start 模式，含 ELF 选择区与会话选项）——
           由 Start Session（未配置/未连接时自动弹出，带 pendingMode）或齿轮入口触发。

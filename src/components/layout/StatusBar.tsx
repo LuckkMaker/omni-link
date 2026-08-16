@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Bell, Usb, ChevronDown, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity, AlertCircle, Cpu } from 'lucide-react'
+import { Bell, Usb, ChevronDown, Check, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity, AlertCircle, BugPlay, BugOff } from 'lucide-react'
 import { useProbeStore, SPEED_OPTIONS, type DebugInterface } from '@/stores/probe.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import { useRttStore } from '@/stores/rtt.store'
@@ -62,16 +62,23 @@ function DropdownSelector({
       </button>
       {open && !disabled && (
         <div className="absolute bottom-full left-0 mb-1 min-w-[120px] rounded-md border border-border bg-popover text-popover-foreground shadow-lg z-[100] py-0.5">
-          {options.map((opt) => (
-            <button
-              key={String(opt.value)}
-              type="button"
-              onClick={() => { onSelect(opt.value); setOpen(false) }}
-              className="block w-full text-left px-3 py-1 text-xs hover:bg-accent transition-colors"
-            >
-              {opt.label}
-            </button>
-          ))}
+          {options.map((opt) => {
+            const selected = String(opt.value) === value
+            return (
+              <button
+                key={String(opt.value)}
+                type="button"
+                onClick={() => { onSelect(opt.value); setOpen(false) }}
+                className={cn(
+                  'flex w-full items-center gap-2 px-3 py-1 text-left text-xs transition-colors',
+                  selected ? 'bg-accent font-medium' : 'hover:bg-accent'
+                )}
+              >
+                <Check className={cn('size-3.5 shrink-0', selected ? 'opacity-100' : 'opacity-0')} />
+                <span className="flex-1">{opt.label}</span>
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
@@ -185,8 +192,20 @@ export function StatusBar() {
   const zonePc = useZoneStore((s) => s.pc)
   const zoneBusy = useZoneStore((s) => s.busy)
   const zoneError = useZoneStore((s) => s.error)
-  const zoneStateLabel =
-    zoneState === 'halted' ? 'Halted' : zoneState === 'running' ? 'Running' : zoneState === 'disconnected' ? 'Disconnected' : 'Unknown'
+  const zoneSession = useZoneStore((s) => s.sessionStatus)
+  // 基于会话生命周期描述状态，区分「会话未启动」与「目标已连接」：
+  // connecting/busy → 连接中；active → 目标 halted/running；idle → 无会话
+  const zoneConnecting = zoneSession === 'connecting' || zoneBusy
+  const zoneActive = zoneSession === 'active'
+  const zoneStateLabel = zoneConnecting
+    ? 'Connecting'
+    : zoneActive
+      ? zoneState === 'halted'
+        ? 'Halted'
+        : zoneState === 'running'
+          ? 'Running'
+          : 'Unknown'
+      : 'No Session'
 
   /** 格式化字节数为可读字符串 */
   const fmtBytes = (n: number): string => {
@@ -246,19 +265,21 @@ export function StatusBar() {
         {isOnZonePage && (
           <>
             <div className="w-px h-3 bg-white/20" />
-            <div className="flex items-center gap-1 px-2" title="目标调试状态">
-              {zoneBusy ? (
+            <div className="flex items-center gap-1 px-2" title="调试会话状态">
+              {zoneConnecting ? (
                 <Loader2 className="size-3 animate-spin text-white/80" />
+              ) : zoneActive ? (
+                <BugPlay className="size-3 text-green-400" />
               ) : (
-                <Cpu className="size-3 text-white/60" />
+                <BugOff className="size-3 text-white/40" />
               )}
               <span
                 className={cn(
-                  zoneState === 'halted'
-                    ? 'text-amber-300'
-                    : zoneState === 'running'
-                      ? 'text-green-400'
-                      : 'text-white/60'
+                  zoneConnecting || !zoneActive
+                    ? 'text-white/60'
+                    : zoneState === 'halted'
+                      ? 'text-amber-300'
+                      : 'text-green-400'
                 )}
               >
                 {zoneStateLabel}

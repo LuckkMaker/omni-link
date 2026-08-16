@@ -52,13 +52,17 @@ export const CONNECT_MODE_OPTIONS: { label: string; value: ConnectMode; desc: st
 
 /** 速度选项 (Hz) */
 export const SPEED_OPTIONS = [
-  { label: '100 kHz', value: 100_000 },
-  { label: '500 kHz', value: 500_000 },
-  { label: '1 MHz', value: 1_000_000 },
-  { label: '2 MHz', value: 2_000_000 },
-  { label: '4 MHz', value: 4_000_000 },
-  { label: '8 MHz', value: 8_000_000 },
   { label: '10 MHz', value: 10_000_000 },
+  { label: '5 MHz', value: 5_000_000 },
+  { label: '2 MHz', value: 2_000_000 },
+  { label: '1 MHz', value: 1_000_000 },
+  { label: '500 kHz', value: 500_000 },
+  { label: '200 kHz', value: 200_000 },
+  { label: '100 kHz', value: 100_000 },
+  { label: '50 kHz', value: 50_000 },
+  { label: '20 kHz', value: 20_000 },
+  { label: '10 kHz', value: 10_000 },
+  { label: '5 kHz', value: 5_000 },
 ]
 
 interface ProbeStore {

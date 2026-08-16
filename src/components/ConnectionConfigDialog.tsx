@@ -100,9 +100,11 @@ export function ConnectionConfigDialog({
   const [probeError, setProbeError] = useState<string | null>(null)
   const [elfError, setElfError] = useState<string | null>(null)
   const [elfPath, setElfPath] = useState<string | null>(null)
-  // 「运行到 main()」会话选项：默认开启，跨会话持久化（含已连接快速启动路径读取同一 key）
+  // 连接/会话 tab（start 模式）：默认按入口——Start 自动弹出先确认连接，齿轮打开聚焦会话
+  const [activeTab, setActiveTab] = useState<'connect' | 'session'>('connect')
+  // 「运行到 main()」会话选项：默认不选中，跨会话持久化（含已连接快速启动路径读取同一 key）
   const [runToMain, setRunToMain] = useState<boolean>(() =>
-    localStorage.getItem(RUN_TO_MAIN_KEY) !== '0'
+    localStorage.getItem(RUN_TO_MAIN_KEY) === '1'
   )
 
   // 当前设备显示名
@@ -119,11 +121,13 @@ export function ConnectionConfigDialog({
       if (deviceList.length === 0) fetchDevices()
     }
     if (open) {
+      // 默认 tab：Start 自动弹出先确认连接；齿轮打开(focus)聚焦会话配置
+      setActiveTab(startOnConfirm ? 'connect' : 'session')
       setErrorMsg(initialError ?? null)
       setProbeError(null)
       setElfError(null)
     }
-  }, [open, status, initialError, fetchProbes, fetchDevices, deviceList.length])
+  }, [open, status, initialError, startOnConfirm, fetchProbes, fetchDevices, deviceList.length])
 
   // 打开 start 模式时，预填上一次选择的 ELF 路径（作为默认值，用户仍可重新选择或确认使用）
   useEffect(() => {
@@ -150,10 +154,12 @@ export function ConnectionConfigDialog({
     if (showElf && startOnConfirm) {
       if (!selectedProbe) {
         setProbeError('请先选择仿真器')
+        setActiveTab('connect')
         return
       }
       if (!elfPath) {
         setElfError('请选择 ELF/AXF 文件')
+        setActiveTab('session')
         return
       }
       const path = elfPath
@@ -207,6 +213,39 @@ export function ConnectionConfigDialog({
             <DialogTitle>{showElf ? '调试会话配置' : '连接配置'}</DialogTitle>
           </DialogHeader>
 
+          {/* 连接/会话 两个 tab（仅 start 模式），风格与设置页 tab 一致 */}
+          {showElf && (
+            <div className="flex gap-1 border-b border-border">
+              <button
+                type="button"
+                onClick={() => setActiveTab('connect')}
+                className={cn(
+                  'border-b-2 px-4 py-2 text-sm font-medium transition-colors',
+                  activeTab === 'connect'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                )}
+              >
+                连接
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('session')}
+                className={cn(
+                  'border-b-2 px-4 py-2 text-sm font-medium transition-colors',
+                  activeTab === 'session'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                )}
+              >
+                会话
+              </button>
+            </div>
+          )}
+
+          {/* 连接配置（mode='config' 或 start 模式的「连接」tab） */}
+          {(!showElf || activeTab === 'connect') && (
+          <>
           {/* 仿真器选择 + 刷新 */}
           <div className="min-w-0 space-y-2">
             <div className="flex items-center justify-between">
@@ -256,12 +295,7 @@ export function ConnectionConfigDialog({
           {/* 接口 + 速度 */}
           <div className="grid min-w-0 grid-cols-2 gap-4">
             <div className="space-y-2">
-              <div className="flex items-center gap-1">
-                <span className="text-sm font-medium">接口</span>
-                <span className="text-[10px] text-muted-foreground cursor-help" title="SWD：2 线调试（SWCLK+SWDIO），推荐；JTAG：传统 4 线调试，需探针和目标均支持。连接失败时可降低速度重试。">
-                  ⓘ
-                </span>
-              </div>
+              <span className="text-sm font-medium">接口</span>
               <Select value={pendingInterface} onValueChange={(v) => setPendingInterface(v as 'swd' | 'jtag')}>
                 <SelectTrigger className="h-9" disabled={isConnected}>
                   <SelectValue />
@@ -273,12 +307,7 @@ export function ConnectionConfigDialog({
               </Select>
             </div>
             <div className="space-y-2">
-              <div className="flex items-center gap-1">
-                <span className="text-sm font-medium">速度</span>
-                <span className="text-[10px] text-muted-foreground cursor-help" title="时钟频率，越高传输越快但越易出错。探针不支持时会自动选最接近值。连接不稳定时请降低速度。">
-                  ⓘ
-                </span>
-              </div>
+              <span className="text-sm font-medium">速度</span>
               <Select value={String(pendingSpeed)} onValueChange={(v) => setPendingSpeed(Number(v))}>
                 <SelectTrigger className="h-9" disabled={isConnected}>
                   <SelectValue />
@@ -322,16 +351,21 @@ export function ConnectionConfigDialog({
               {CONNECT_MODE_OPTIONS.find((m) => m.value === pendingConnectMode)?.desc}
             </p>
           </div>
+          </>
+          )}
 
-          {/* ELF 文件选择（仅 zone 页 Start Session 入口显示） */}
-          {showElf && (
-            <div className="min-w-0 space-y-2">
+          {/* 会话配置（仅 zone 页「会话」tab 显示） */}
+          {showElf && activeTab === 'session' && (
+          <>
+          {/* ELF 文件选择 */}
+          <div className="min-w-0 space-y-2">
               <span className="text-sm font-medium">
                 可执行文件
                 {elfError && <span className="ml-2 text-xs font-normal text-red-500">{elfError}</span>}
               </span>
               <button
                 onClick={handlePickElf}
+                title={elfPath ?? undefined}
                 className="flex w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm transition-colors hover:bg-accent"
               >
                 <span className={cn('min-w-0 truncate', elfPath ? 'font-medium' : 'text-muted-foreground')}>
@@ -339,14 +373,9 @@ export function ConnectionConfigDialog({
                 </span>
                 <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
               </button>
-              {elfPath && (
-                <p className="truncate text-[10px] text-muted-foreground" title={elfPath}>{elfPath}</p>
-              )}
             </div>
-          )}
 
-          {/* 会话选项（仅 zone 页调试会话配置入口显示） */}
-          {showElf && (
+            {/* 会话选项 */}
             <div className="min-w-0 space-y-2">
               <span className="text-sm font-medium">会话选项</span>
               <label
@@ -366,6 +395,7 @@ export function ConnectionConfigDialog({
                 <span className="select-none">运行到 main()</span>
               </label>
             </div>
+          </>
           )}
 
           {/* 操作按钮 */}
