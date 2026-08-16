@@ -572,6 +572,12 @@ export const useZoneStore = create<ZoneStore>()(
             // 刷新（覆盖目标自行运行命中断点、非按钮触发的场景）
             if (st.state === 'halted' && prev !== 'halted') {
               patch.refreshTick = get().refreshTick + 1
+              // 运行中 → 自动暂停（目标自行命中断点/异常停止），且非用户调试动作发起
+              // （busy=false，按钮 halt/step 等动作会置 busy=true 并自行写 "Zone Halt" 日志）：
+              // 补充一条 zone 事件，让 Console 混合流能呈现「非按钮触发的暂停」信息
+              if (prev === 'running' && !get().busy) {
+                zoneLog('info', 'Target halted (breakpoint hit / exception)')
+              }
             }
             set(patch)
           }

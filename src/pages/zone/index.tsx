@@ -6,7 +6,7 @@ import { FunctionsPanel } from './components/FunctionsPanel'
 import { MemoryUsagePanel } from './components/MemoryUsagePanel'
 import { SourceView } from './components/SourceView'
 import { InspectorDock, MemoryPanel } from './components/InspectorDock'
-import { TerminalDock } from './components/TerminalDock'
+import { ConsoleDock } from './components/ConsoleDock'
 import { WatchPanel } from './components/WatchPanel'
 import { CallStackPanel } from './components/CallStackPanel'
 import { ResizeHandle } from '@/components/LogConsole'
@@ -294,7 +294,7 @@ export default function ZonePage() {
               <BottomTab active icon={SquareTerminal} label="Console" onClick={() => {}} />
             </div>
             <div className="min-h-0 flex-1 overflow-hidden">
-              <TerminalDock />
+              <ConsoleDock />
             </div>
           </div>
           {/* 左右分隔条 */}

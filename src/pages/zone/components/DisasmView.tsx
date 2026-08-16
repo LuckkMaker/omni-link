@@ -17,13 +17,15 @@ const WINDOW_MAX = 32
 // 初始加载时向目标地址之前预加载的窗口数，避免一向上滚动就触发 prepend 加载
 const PRELOAD_WINDOWS = 4
 
-// 反汇编诊断日志：写入全局日志区（来源 zone），便于分析 PC 指示丢失 / 源码对应汇编未加载问题
+// 反汇编诊断日志：写入全局日志区（来源 zone），便于分析 PC 指示丢失 / 源码对应汇编未加载问题。
+// 标记 internal，面向用户的 Console 混合流会过滤，仅保留在全局日志区供排障
 function zoneDbg(level: 'info' | 'warning' | 'error', message: string) {
   useLogStore.getState().addLog({
     timestamp: new Date().toISOString(),
     level,
     message,
     source: 'zone',
+    internal: true,
   })
 }
 
