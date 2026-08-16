@@ -22,8 +22,8 @@ export interface SourceDecorationInput {
   pcLine: number | null
   /** Run to Cursor 光标所在行 */
   cursorLine: { file: string; line: number } | null
-  /** 已设置的源码断点 */
-  breakpoints: { file: string; line: number }[]
+  /** 已设置的源码断点（enabled=false 渲染为空心圆） */
+  breakpoints: { file: string; line: number; enabled: boolean }[]
   /** 可执行（可打断点）行号集合 */
   executableLines: Set<number>
   /** 当前模型的总行数 */
@@ -42,10 +42,6 @@ export function buildSourceDecorations(
 
   // PC 行：整行高亮（含行号背景）+ glyph 运行指示
   if (input.pcLine != null && valid(input.pcLine)) {
-    // 同行有断点时，运行指示半透明显示，避免盖住断点红点
-    const bpOnPcLine = input.breakpoints.some(
-      (b) => input.activeFile && sameFile(b.file, input.activeFile) && b.line === input.pcLine
-    )
     dels.push({
       range: new monaco.Range(input.pcLine, 1, input.pcLine, 1),
       options: {
@@ -57,7 +53,7 @@ export function buildSourceDecorations(
     dels.push({
       range: new monaco.Range(input.pcLine, 1, input.pcLine, 1),
       options: {
-        glyphMarginClassName: bpOnPcLine ? 'cm-pc-glyph cm-pc-over-bp' : 'cm-pc-glyph',
+        glyphMarginClassName: 'cm-pc-glyph',
       },
     })
   }
@@ -75,15 +71,16 @@ export function buildSourceDecorations(
     })
   }
 
-  // 断点：glyph 红点 + overview ruler 标尺标记（右侧滚动条一眼看到全文件断点分布）
+  // 断点：启用 → glyph 红点 + overview ruler 标尺标记；禁用 → glyph 空心圆 + 暗色标尺
+  // （右侧滚动条一眼看到全文件断点分布）
   for (const bp of input.breakpoints) {
     if (input.activeFile && sameFile(bp.file, input.activeFile) && valid(bp.line)) {
       dels.push({
         range: new monaco.Range(bp.line, 1, bp.line, 1),
         options: {
-          glyphMarginClassName: 'cm-bp',
+          glyphMarginClassName: bp.enabled ? 'cm-bp' : 'cm-bp-disabled',
           overviewRuler: {
-            color: '#f85149',
+            color: bp.enabled ? '#f85149' : 'rgba(148, 163, 184, 0.6)',
             position: monaco.editor.OverviewRulerLane.Left,
           },
         },

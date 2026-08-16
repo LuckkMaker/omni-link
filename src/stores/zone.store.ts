@@ -48,6 +48,11 @@ function friendlyBreakpointError(detail: string): string {
   return detail
 }
 
+/** 断点设置在无可执行代码的行：属正常点击，仅在 toast 提示，不显示在底部 status bar */
+function isNoCodeError(detail: string | null): boolean {
+  return !!detail && /^No code at /.test(detail)
+}
+
 /** 右侧检查器 dock 的 section 类型 */
 export type InspectorTabId = 'disasm' | 'callstack' | 'registers' | 'peripherals'
 
@@ -664,7 +669,7 @@ export const useZoneStore = create<ZoneStore>()(
           const detail = extractApiErrorDetail(err)
           const fallback = err instanceof Error ? err.message : 'Breakpoint failed'
           const msg = friendlyBreakpointError(detail ?? fallback)
-          set({ error: msg })
+          if (!isNoCodeError(detail)) set({ error: msg })
           zoneLog('error', `Zone breakpoint failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '断点操作失败', message: msg })
           return false
@@ -710,7 +715,7 @@ export const useZoneStore = create<ZoneStore>()(
           const detail = extractApiErrorDetail(err)
           const fallback = err instanceof Error ? err.message : 'Update breakpoint failed'
           const msg = friendlyBreakpointError(detail ?? fallback)
-          set({ error: msg })
+          if (!isNoCodeError(detail)) set({ error: msg })
           zoneLog('error', `Zone update breakpoint failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '断点更新失败', message: msg })
         }
@@ -725,7 +730,7 @@ export const useZoneStore = create<ZoneStore>()(
           const detail = extractApiErrorDetail(err)
           const fallback = err instanceof Error ? err.message : 'Remove breakpoint failed'
           const msg = friendlyBreakpointError(detail ?? fallback)
-          set({ error: msg })
+          if (!isNoCodeError(detail)) set({ error: msg })
           zoneLog('error', `Zone remove breakpoint failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '移除断点失败', message: msg })
         }

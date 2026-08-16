@@ -21,6 +21,10 @@ const api = {
 
   /** 从拖拽的 File 对象获取文件路径（Electron 32+ context isolation 下 file.path 不可用） */
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+
+  /** 写入剪贴板文本（file:// 下 navigator.clipboard 不可用，走主进程 clipboard 模块） */
+  writeClipboardText: (text: string): Promise<boolean> =>
+    ipcRenderer.invoke('clipboard:write-text', text),
 }
 
 export type ElectronAPI = typeof api

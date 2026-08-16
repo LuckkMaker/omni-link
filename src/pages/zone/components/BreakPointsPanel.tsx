@@ -1,15 +1,19 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Checkbox } from '@/components/ui/checkbox'
-import { X, ChevronRight } from 'lucide-react'
+import { X } from 'lucide-react'
 import { useZoneStore } from '../store'
-import { BreakpointConditionDialog } from './BreakpointConditionDialog'
-import type { SourceBreakpoint, BreakpointMode, BreakpointUpdate } from '@/services/zone.service'
+import type { SourceBreakpoint } from '@/services/zone.service'
 import { cn } from '@/lib/utils'
 
-const MODE_LABEL: Record<BreakpointMode, string> = {
-  break: 'Break',
-  log: 'Log',
-  execute: 'Execute',
+/** 取文件 basename（兼容 Windows/Unix 路径分隔符） */
+function baseName(p: string): string {
+  const norm = p.replace(/\\/g, '/')
+  return norm.slice(norm.lastIndexOf('/') + 1) || p
+}
+
+/** 规范化路径（与 SourceView 一致） */
+function norm(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
 /** 右键菜单项（与 SourceView 一致） */
@@ -36,62 +40,47 @@ function MenuItem({
   )
 }
 
-function MenuSeparator() {
-  return <div className="-mx-1 my-1 h-px bg-muted/60" />
-}
-
-/** 二级展开菜单：编辑模式三档（hover 展开） */
-function ModeMenuSub({
-  bp,
-  onPick,
-}: {
-  bp: SourceBreakpoint
-  onPick: (mode: BreakpointMode) => void
-}) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div
-      className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
-      <div
-        className={cn(
-          'flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors',
-          open ? 'bg-accent text-accent-foreground' : 'hover:bg-accent hover:text-accent-foreground'
-        )}
-      >
-        <span className="flex-1 text-left">编辑模式</span>
-        <ChevronRight className="size-3.5 text-muted-foreground" />
-      </div>
-      {open && (
-        <div className="absolute left-full top-0 z-50 min-w-[9rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
-          {(Object.keys(MODE_LABEL) as BreakpointMode[]).map((m) => (
-            <MenuItem key={m} label={MODE_LABEL[m]} checked={m === bp.mode} onClick={() => onPick(m)} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 interface CtxMenuState {
   x: number
   y: number
   bp: SourceBreakpoint
 }
 
-/** BreakPoints 面板：列举所有断点的 [Checkbox][file:line]，支持启停/删除/右键编辑 */
+/** 断点符号（与源码窗口 glyph 一致）：启用=红色实心圆，禁用=灰色空心圆 */
+function BreakpointSymbol({ enabled }: { enabled: boolean }) {
+  return (
+    <span
+      className={cn(
+        'inline-block size-3 shrink-0 rounded-full',
+        enabled ? 'bg-[#f85149]' : 'border-[1.5px] border-slate-400/80'
+      )}
+      title={enabled ? '启用断点' : '关闭断点'}
+    />
+  )
+}
+
+/** BreakPoints 面板：列举所有断点的 [Checkbox][file:line]，支持点击跳转源码/启停/删除/右键启停删除 */
 export function BreakPointsPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const breakpoints = useZoneStore((s) => s.breakpoints)
   const refreshBreakpoints = useZoneStore((s) => s.refreshBreakpoints)
-  const updateBreakpoint = useZoneStore((s) => s.updateBreakpoint)
   const removeBreakpoint = useZoneStore((s) => s.removeBreakpoint)
   const setBreakpointEnabled = useZoneStore((s) => s.setBreakpointEnabled)
+  const sourceFiles = useZoneStore((s) => s.sourceFiles)
+  const gotoSource = useZoneStore((s) => s.gotoSource)
 
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null)
   const ctxMenuRef = useRef<HTMLDivElement>(null)
-  const [editTarget, setEditTarget] = useState<SourceBreakpoint | null>(null)
+
+  // 点击断点跳转源码：先经源文件列表把 basename 解析为完整路径（与 PC 定位一致），再 gotoSource
+  const jumpTo = (bp: SourceBreakpoint) => {
+    const target = norm(bp.file)
+    const full =
+      sourceFiles.find((f) => {
+        const fp = norm(f.path)
+        return fp === target || fp.endsWith('/' + target) || fp.endsWith(target)
+      })?.path ?? bp.file
+    gotoSource(full, bp.line)
+  }
 
   // uid/连接变化时拉取断点列表
   useEffect(() => {
@@ -128,20 +117,12 @@ export function BreakPointsPanel({ uid, connected }: { uid: string | null; conne
     }
   }, [ctxMenu])
 
-  const handleSave = (bp: SourceBreakpoint) => (patch: BreakpointUpdate) => {
-    setEditTarget(null)
-    if (uid) void updateBreakpoint(uid, bp.address, patch)
-  }
-
-  const editLabel = (m: BreakpointMode) =>
-    m === 'log' ? '编辑日志内容' : m === 'execute' ? '编辑执行命令' : '编辑条件'
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1 overflow-auto">
         {breakpoints.length === 0 ? (
           <div className="flex h-full items-center justify-center p-4 text-center text-xs text-muted-foreground">
-            暂无断点（在源码行点击行号或按 F9 添加）
+            无断点
           </div>
         ) : (
           breakpoints.map((bp) => (
@@ -153,22 +134,21 @@ export function BreakPointsPanel({ uid, connected }: { uid: string | null; conne
                 setCtxMenu({ x: e.clientX, y: e.clientY, bp })
               }}
             >
+              <BreakpointSymbol enabled={bp.enabled} />
               <Checkbox
                 checked={bp.enabled}
                 onCheckedChange={(v) => uid && void setBreakpointEnabled(uid, bp.address, !!v)}
-                title={bp.enabled ? '禁用断点' : '启用断点'}
+                title={bp.enabled ? '关闭断点' : '启用断点'}
               />
               <span
                 className={cn(
-                  'min-w-0 flex-1 truncate font-mono',
-                  !bp.enabled && 'text-muted-foreground line-through'
+                  'min-w-0 flex-1 cursor-pointer truncate font-mono hover:text-primary',
+                  !bp.enabled && 'text-muted-foreground'
                 )}
                 title={`${bp.file}:${bp.line} (0x${bp.address.toString(16)})`}
+                onClick={() => jumpTo(bp)}
               >
-                {bp.file}:{bp.line}
-              </span>
-              <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
-                {MODE_LABEL[bp.mode]}
+                {baseName(bp.file)}:{bp.line}
               </span>
               {!bp.enabled && (
                 <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
@@ -194,15 +174,6 @@ export function BreakPointsPanel({ uid, connected }: { uid: string | null; conne
           style={{ left: ctxMenu.x, top: ctxMenu.y }}
           onContextMenu={(e) => e.preventDefault()}
         >
-          <MenuItem label={editLabel(ctxMenu.bp.mode)} onClick={() => { setEditTarget(ctxMenu.bp); setCtxMenu(null) }} />
-          <ModeMenuSub
-            bp={ctxMenu.bp}
-            onPick={(m) => {
-              setCtxMenu(null)
-              if (uid) void updateBreakpoint(uid, ctxMenu.bp.address, { mode: m })
-            }}
-          />
-          <MenuSeparator />
           {ctxMenu.bp.enabled ? (
             <MenuItem
               label="关闭断点"
@@ -219,15 +190,6 @@ export function BreakPointsPanel({ uid, connected }: { uid: string | null; conne
             onClick={() => { setCtxMenu(null); if (uid) void removeBreakpoint(uid, ctxMenu.bp.address) }}
           />
         </div>
-      )}
-
-      {editTarget && uid && (
-        <BreakpointConditionDialog
-          open={!!editTarget}
-          bp={editTarget}
-          onOpenChange={(open) => { if (!open) setEditTarget(null) }}
-          onSave={handleSave(editTarget)}
-        />
       )}
     </div>
   )

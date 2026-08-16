@@ -7,45 +7,58 @@
 .cm-pc-margin {
   background: rgba(110, 231, 183, 0.14) !important;
 }
-/* PC 运行指示与断点同行时半透明，露出断点红点（运行指示用 ::after，叠在断点 ::before 之上） */
-.cm-pc-over-bp::after {
-  opacity: 0.45;
-}
 /* 光标行整行高亮（琥珀） */
 .cm-cursor {
   background: rgba(252, 211, 77, 0.1) !important;
 }
-/* 断点红点（glyph margin）：更大、靠右贴近行号（对齐 VS Code 断点样式）
-   用 ::before 渲染；配合 PC 运行指示（::after）绝对定位重叠，半透明时露出红点 */
+/* 断点红点（glyph margin）：CSS 绘制实心圆，与禁用空心圆共用同一外径与定位，保证对齐 */
 .cm-bp::before {
-  content: '●';
-  color: #f85149;
-  font-size: 16px;
-  line-height: 20px;
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #f85149;
   position: absolute;
   right: 1px;
   top: 50%;
   transform: translateY(-50%);
 }
-/* 可执行行灰色断点圆点（表示该行可打断点） */
+/* 禁用断点（glyph margin）：同一外径的空心圆（border-box 边框向内绘制，不撑大外框） */
+.cm-bp-disabled::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(148, 163, 184, 0.9);
+  box-sizing: border-box;
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+/* 可执行行灰色断点圆点（表示该行可打断点）：与断点同尺寸、更淡 */
 .cm-bp-available::before {
-  content: '●';
-  color: rgba(148, 163, 184, 0.55);
-  font-size: 13px;
-  line-height: 20px;
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.35);
   position: absolute;
   right: 1px;
   top: 50%;
   transform: translateY(-50%);
 }
-/* PC 运行指示 ▶（glyph margin）：用 ::after 避免与断点 ::before 冲突，可与断点重叠 */
+/* PC 运行指示（glyph margin）：CSS 绘制右向三角形，避免文本符号 ▶ 的字体对齐/大小问题；
+   用 ::after 避免与断点 ::before 冲突，可与断点重叠 */
 .cm-pc-glyph::after {
-  content: '▶';
-  color: #3fb950;
-  font-size: 12px;
-  line-height: 20px;
+  content: '';
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 8px solid #3fb950;
   position: absolute;
-  right: 1px;
+  right: 2px;
   top: 50%;
   transform: translateY(-50%);
 }

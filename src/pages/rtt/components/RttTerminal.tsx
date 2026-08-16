@@ -1,4 +1,4 @@
-import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
+import { useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -8,6 +8,7 @@ import { useRttStore } from '@/stores/rtt.store'
 import { useUiStore } from '@/stores/ui.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import { rttService } from '@/services/rtt.service'
+import { writeClipboard } from '@/lib/clipboard'
 
 /** 终端对外暴露的 API */
 export interface RttTerminalApi {
@@ -21,6 +22,8 @@ export interface RttTerminalApi {
   focus: () => void
   /** 字体缩放 */
   zoom: (delta: number) => void
+  /** 复制选中内容；无选中时全选后复制，返回是否成功 */
+  copy: () => Promise<boolean>
 }
 
 interface RttTerminalProps {
@@ -109,6 +112,33 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
       ? activeTab.channel
       : selectedDownChannel
 
+    // 复制文本到剪贴板并给出成功/失败提示
+    const notifyCopy = useCallback(async (text: string): Promise<boolean> => {
+      if (!text) return false
+      const ok = await writeClipboard(text)
+      useNotificationStore.getState().push({
+        type: ok ? 'success' : 'error',
+        title: ok ? '已复制' : '复制失败',
+        message: ok ? `已复制 ${text.length} 字符到剪贴板` : '无法访问系统剪贴板',
+        autoClose: true,
+        autoCloseDelay: ok ? 1500 : 3000,
+      })
+      return ok
+    }, [])
+
+    // 复制当前选中；无选中时全选后复制，随后清除选区
+    const copyTermSelection = useCallback(async (): Promise<boolean> => {
+      const term = termRef.current
+      if (!term) return false
+      let text = term.getSelection()
+      if (!text) {
+        term.selectAll()
+        text = term.getSelection()
+        term.clearSelection()
+      }
+      return notifyCopy(text)
+    }, [notifyCopy])
+
     // 暴露 API
     useImperativeHandle(ref, () => ({
       clear: () => {
@@ -132,6 +162,7 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
           try { fit.fit() } catch { /* ignore */ }
         })
       },
+      copy: () => copyTermSelection(),
     }), [tabId])
 
     // 初始化终端
@@ -144,6 +175,8 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
         fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
         convertEol: true,
         scrollback: 10000,
+        // 右键单击选中单词，便于快速复制
+        rightClickSelectsWord: true,
         // terminal 模式启用输入，bar 模式禁用（由 InputBar 处理）
         disableStdin: inputModeRef.current !== 'terminal',
         allowProposedApi: true,
@@ -169,11 +202,19 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
       //   全选更实用；若下位机 shell 需要 Ctrl+A，可在 InputBar 模式输入 \x01 发送。
       // - 输入栏模式：无影响（焦点在 InputBar 时 Ctrl+A 选中文本框内容）。
       term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-        // Ctrl+Shift+C 复制选中
-        if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') {
+        // Ctrl+Shift+C 复制选中（跨平台标准）
+        if (event.ctrlKey && event.shiftKey && !event.altKey && event.code === 'KeyC') {
           const selection = term.getSelection()
           if (selection) {
-            navigator.clipboard.writeText(selection).catch(() => {})
+            notifyCopy(selection)
+            event.preventDefault()
+            return false
+          }
+        }
+        // Ctrl+C：有选区时复制（终端惯例），否则透传下位机（SIGINT）
+        if (event.ctrlKey && !event.shiftKey && !event.altKey && event.code === 'KeyC') {
+          if (term.hasSelection()) {
+            notifyCopy(term.getSelection())
             event.preventDefault()
             return false
           }
@@ -186,6 +227,15 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
         }
         return true
       })
+
+      // 右键复制：右键单击已选中文字时将其复制（PuTTY 风格），并阻止默认菜单
+      const onContextMenu = (e: MouseEvent) => {
+        e.preventDefault()
+        if (term.hasSelection()) {
+          notifyCopy(term.getSelection())
+        }
+      }
+      containerRef.current.addEventListener('contextmenu', onContextMenu)
 
       // 终端输入处理（仅 terminal 输入模式生效）
       // onData 收到的 data 是原始输入序列：可见字符、Tab(\t)、Enter(\r)、
@@ -227,6 +277,7 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
       return () => {
         ro.disconnect()
         window.removeEventListener('resize', fitNow)
+        containerRef.current?.removeEventListener('contextmenu', onContextMenu)
         onDataDisposable.dispose()
         term.dispose()
         termRef.current = null
@@ -321,6 +372,8 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
       termRef.current?.clear()
     }, [tabId])
 
-    return <div ref={containerRef} className="h-full w-full overflow-hidden pl-2" />
+    return (
+      <div ref={containerRef} className="h-full w-full overflow-hidden pl-2" />
+    )
   }
 )

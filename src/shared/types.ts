@@ -198,6 +198,8 @@ export interface ElectronAPI {
   openFileDialog: (opts?: { extensions?: string[]; title?: string }) => Promise<string | null>
   saveFileDialog: (defaultName?: string) => Promise<string | null>
   getPathForFile: (file: File) => string
+  /** 写入剪贴板文本（生产环境 file:// 下 navigator.clipboard 不可用，走主进程） */
+  writeClipboardText: (text: string) => Promise<boolean>
 }
 
 declare global {

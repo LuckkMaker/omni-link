@@ -2,7 +2,7 @@
 // Copyright (c) 2026 LuckkMaker
 // SPDX-License-Identifier: MIT
 
-import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, clipboard } from 'electron'
 import { join } from 'path'
 import { PythonBridge } from './python-bridge'
 
@@ -69,6 +69,14 @@ app.whenReady().then(async () => {
   // IPC: Python 后端状态
   ipcMain.handle('python:status', () => {
     return pythonBridge?.getStatus() ?? { running: false, port: null }
+  })
+
+  // IPC: 写入剪贴板文本
+  //   生产环境渲染进程以 file:// 加载（非安全上下文），navigator.clipboard 不可用，
+  //   故统一走主进程 clipboard 模块，保证复制在 Electron 内始终可用。
+  ipcMain.handle('clipboard:write-text', (_event, text: string) => {
+    clipboard.writeText(String(text ?? ''))
+    return true
   })
 
   // IPC: 打开文件选择对话框
