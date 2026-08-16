@@ -359,6 +359,13 @@ class PyOCDBackend(BackendInterface):
                 "target": target_info.to_dict() if target_info else None,
             })
 
+            # force reconnect 成功后，旧 session 已关闭，commander 上下文残留的旧 session 引用
+            # 会导致后续 commander_backend.execute("reset halt") 失败——它访问的是已关闭的旧
+            # session 而非新 session。重置 commander 上下文，下次执行命令时自动重建新上下文。
+            if force and old_session is not None:
+                from core.commander_backend import commander_backend
+                commander_backend.reset_context(probe_uid)
+
             return True
 
         except Exception as e:

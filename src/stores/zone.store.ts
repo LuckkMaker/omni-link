@@ -10,6 +10,7 @@ import type {
   BreakpointUpdate,
 } from '@/services/zone.service'
 import * as probeService from '@/services/probe.service'
+import { useProbeStore } from '@/stores/probe.store'
 import type { ConnectMode } from '@/services/probe.service'
 import { programFlash } from '@/services/flash.service'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -808,8 +809,18 @@ export const useZoneStore = create<ZoneStore>()(
           autoClose: false,
         })
         try {
-          // 1. 强制以绑定模式重连（自动切换连接模式，避免与全局设置冲突）
-          await probeService.connectProbe(uid, { connect_mode: connectMode, force: true })
+          // 1. 强制以绑定模式重连（自动切换连接模式，避免与全局设置冲突）。
+          //    重连会关闭旧 session 再建新 session，必须带上当前目标型号，否则后端
+          //    _pending_target 为空时回退到默认型号（如 stm32f407xg），导致用户已选的
+          //    目标（如 apm32f407ig）在重连后漂移。优先用用户待选目标，回退到已连接目标。
+          const probe = useProbeStore.getState()
+          const target =
+            probe.pendingTarget ?? probe.getSelectedTarget()?.part_number ?? undefined
+          await probeService.connectProbe(uid, {
+            connect_mode: connectMode,
+            force: true,
+            target,
+          })
           useNotificationStore.getState().update(notifId, { message: '正在加载 ELF 符号...' })
           // 2. 加载 ELF 符号（静默模式，避免与下方会话通知重复弹窗）
           const ok = await get().loadElf(uid, path, true)
