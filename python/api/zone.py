@@ -20,6 +20,12 @@ from core.commander_backend import commander_backend
 from core.elf_backend import elf_backend
 from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend, register_session_closed
+from core.soft_bp import (
+    install_handler as _softbp_install,
+    uninstall_handler as _softbp_uninstall,
+    suppress_handler as _softbp_suppress,
+    unsuppress_handler as _softbp_unsuppress,
+)
 
 router = APIRouter()
 
@@ -64,6 +70,18 @@ class BreakpointRequest(BaseModel):
     file: str
     line: int
     set: bool = True
+    enabled: bool = True
+    condition: Optional[str] = None
+    mode: str = 'break'  # 'break' | 'log' | 'execute'
+
+
+class UpdateBreakpointRequest(BaseModel):
+    """按地址更新单个断点：enabled/mode/condition。apply_condition 区分「清空/更新条件」与「不修改」"""
+    address: int
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None
+    condition: Optional[str] = None
+    apply_condition: bool = False
 
 
 class RunToCursorRequest(BaseModel):
@@ -103,8 +121,12 @@ class WatchSetRequest(BaseModel):
 async def zone_halt(uid: str):
     """暂停目标"""
     from core.monitor_backend import monitor_backend
-    with monitor_backend.pause_during(uid):
-        result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
+    _softbp_suppress(uid)
+    try:
+        with monitor_backend.pause_during(uid):
+            result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
+    finally:
+        _softbp_unsuppress(uid)
     if not result["success"] and result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])
     return {"success": True}
@@ -131,20 +153,24 @@ async def zone_step(uid: str, req: StepRequest = StepRequest()):
     # 目标未暂停时先自动中断，再单步。
     # 参考 cdt-gdb-adapter customReset 的 pauseIfRunning 语义：单步必须从暂停态发起，
     # 若目标仍在运行（如 download&reset 后），先 halt 使其暂停，避免直接报 "Target not halted"。
-    if not target.is_halted():
-        with monitor_backend.pause_during(uid):
-            halt_result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
-        if not halt_result["success"] and halt_result.get("error"):
-            raise HTTPException(status_code=400, detail=halt_result["error"])
+    _softbp_suppress(uid)
+    try:
+        if not target.is_halted():
+            with monitor_backend.pause_during(uid):
+                halt_result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
+            if not halt_result["success"] and halt_result.get("error"):
+                raise HTTPException(status_code=400, detail=halt_result["error"])
 
-    core = target.selected_core_or_raise
-    with monitor_backend.pause_during(uid):
-        if mode == 'into':
-            halted = await asyncio.to_thread(_step_source_into, core, session, uid)
-        elif mode == 'over':
-            halted = await asyncio.to_thread(_step_source_over, core, session, uid)
-        else:  # 'out'
-            halted = await asyncio.to_thread(_step_over_out, core, session, 'out')
+        core = target.selected_core_or_raise
+        with monitor_backend.pause_during(uid):
+            if mode == 'into':
+                halted = await asyncio.to_thread(_step_source_into, core, session, uid)
+            elif mode == 'over':
+                halted = await asyncio.to_thread(_step_source_over, core, session, uid)
+            else:  # 'out'
+                halted = await asyncio.to_thread(_step_over_out, core, session, 'out')
+    finally:
+        _softbp_unsuppress(uid)
     return {"success": True, "mode": mode, "halted": halted}
 
 
@@ -159,8 +185,12 @@ async def zone_continue(uid: str):
     session = backend._get_session(uid)
     if session is not None and not session.target.is_halted():
         return {"success": True}
-    with monitor_backend.pause_during(uid):
-        result = await asyncio.to_thread(commander_backend.execute, uid, "continue")
+    _softbp_suppress(uid)
+    try:
+        with monitor_backend.pause_during(uid):
+            result = await asyncio.to_thread(commander_backend.execute, uid, "continue")
+    finally:
+        _softbp_unsuppress(uid)
     if not result["success"] and result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])
     return {"success": True}
@@ -200,6 +230,7 @@ async def zone_run_to_cursor(uid: str, req: RunToCursorRequest):
     restore = _step_over_current_breakpoint(core)
     # 目标行已有永久断点则复用；否则设置临时断点
     is_temp = core.find_breakpoint(address) is None
+    _softbp_suppress(uid)
     try:
         with monitor_backend.pause_during(uid):
             if is_temp:
@@ -207,6 +238,7 @@ async def zone_run_to_cursor(uid: str, req: RunToCursorRequest):
                 core.bp_manager.flush()
             halted = await asyncio.to_thread(_resume_until_halted, session)
     finally:
+        _softbp_unsuppress(uid)
         if is_temp:
             try:
                 with monitor_backend.pause_during(uid):
@@ -231,78 +263,82 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
     from core.monitor_backend import monitor_backend
     mode = req.mode
 
-    # break_symbol：先解析入口符号地址
-    symbol_name = None
-    symbol_addr = None
-    if mode == 'break_symbol':
-        for name in ('main', '__main', 'Reset_Handler'):
-            addr = elf_backend.get_symbol_address(uid, name)
-            if addr is not None:
-                symbol_name, symbol_addr = name, addr
-                break
-        if symbol_addr is None:
-            # 无法解析符号（未加载 ELF 或不含入口符号），回退到复位并暂停
-            with monitor_backend.pause_during(uid):
+    _softbp_suppress(uid)
+    try:
+        # break_symbol：先解析入口符号地址
+        symbol_name = None
+        symbol_addr = None
+        if mode == 'break_symbol':
+            for name in ('main', '__main', 'Reset_Handler'):
+                addr = elf_backend.get_symbol_address(uid, name)
+                if addr is not None:
+                    symbol_name, symbol_addr = name, addr
+                    break
+            if symbol_addr is None:
+                # 无法解析符号（未加载 ELF 或不含入口符号），回退到复位并暂停
+                with monitor_backend.pause_during(uid):
+                    result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
+                if not result["success"] and result.get("error"):
+                    raise HTTPException(status_code=400, detail=result["error"])
+                return {"success": True, "mode": mode, "symbol": None, "address": None}
+
+        with monitor_backend.pause_during(uid):
+            if mode in ('halt', 'break_symbol'):
+                # halt / break_symbol：先复位并暂停目标，确保已知状态
                 result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
+                if not result["success"] and result.get("error"):
+                    # 兼容部分目标无 reset halt，改走 reset
+                    result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
+            else:
+                # run：复位后继续运行
+                result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
             if not result["success"] and result.get("error"):
                 raise HTTPException(status_code=400, detail=result["error"])
-            return {"success": True, "mode": mode, "symbol": None, "address": None}
 
-    with monitor_backend.pause_during(uid):
-        if mode in ('halt', 'break_symbol'):
-            # halt / break_symbol：先复位并暂停目标，确保已知状态
-            result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
-            if not result["success"] and result.get("error"):
-                # 兼容部分目标无 reset halt，改走 reset
-                result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
-        else:
-            # run：复位后继续运行
-            result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
-        if not result["success"] and result.get("error"):
-            raise HTTPException(status_code=400, detail=result["error"])
+            # 复位会经 reset-catch（VECTOR_CATCH）清除目标上已武装的全部断点并禁用 FPB
+            # （见 pyocd BreakpointManager._pre/_post_reset_catch_handler）。复位暂停后需
+            # 重新武装应用层记录的断点，否则用户 Reset 后再 Run 将不会命中任何断点。
+            if mode in ('halt', 'break_symbol'):
+                await asyncio.to_thread(_rearm_breakpoints, uid)
 
-        # 复位会经 reset-catch（VECTOR_CATCH）清除目标上已武装的全部断点并禁用 FPB
-        # （见 pyocd BreakpointManager._pre/_post_reset_catch_handler）。复位暂停后需
-        # 重新武装应用层记录的断点，否则用户 Reset 后再 Run 将不会命中任何断点。
-        if mode in ('halt', 'break_symbol'):
-            await asyncio.to_thread(_rearm_breakpoints, uid)
+            if mode == 'break_symbol':
+                # 复位暂停后设置入口断点并继续运行，可靠停在 main
+                await asyncio.to_thread(commander_backend.execute, uid, f"break 0x{symbol_addr:x}")
+                await asyncio.to_thread(commander_backend.execute, uid, "continue")
 
+        # break_symbol：轮询等待目标暂停（超时 8s）
+        halted = False
         if mode == 'break_symbol':
-            # 复位暂停后设置入口断点并继续运行，可靠停在 main
-            await asyncio.to_thread(commander_backend.execute, uid, f"break 0x{symbol_addr:x}")
-            await asyncio.to_thread(commander_backend.execute, uid, "continue")
-
-    # break_symbol：轮询等待目标暂停（超时 8s）
-    halted = False
-    if mode == 'break_symbol':
-        deadline = asyncio.get_event_loop().time() + 8.0
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.1)
-            session = backend._get_session(uid)
-            if session is None:
-                break
-            try:
-                if session.target.is_halted():
-                    halted = True
+            deadline = asyncio.get_event_loop().time() + 8.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0.1)
+                session = backend._get_session(uid)
+                if session is None:
                     break
-            except Exception:
-                break
+                try:
+                    if session.target.is_halted():
+                        halted = True
+                        break
+                except Exception:
+                    break
 
-        # 目标已停在入口符号断点。此刻必须移除该一次性断点：
-        # 若保留，FPB 断点仍武装，后续 Step 在入口指令 fetch 阶段会立即再次触发断点，
-        # 导致 PC 永远停在入口、单步"无反应"（指令不执行、反汇编/源码窗口都不变）。
-        if halted:
-            await asyncio.to_thread(
-                commander_backend.execute, uid, f"rmbreak 0x{symbol_addr:x}"
-            )
+            # 目标已停在入口符号断点。此刻必须移除该一次性断点：
+            # 若保留，FPB 断点仍武装，后续 Step 在入口指令 fetch 阶段会立即再次触发断点，
+            # 导致 PC 永远停在入口、单步"无反应"（指令不执行、反汇编/源码窗口都不变）。
+            if halted:
+                await asyncio.to_thread(
+                    commander_backend.execute, uid, f"rmbreak 0x{symbol_addr:x}"
+                )
 
-    return {
-        "success": True,
-        "mode": mode,
-        "symbol": symbol_name,
-        "address": symbol_addr,
-        "halted": halted,
-    }
+        return {
+            "success": True,
+            "mode": mode,
+            "symbol": symbol_name,
+            "address": symbol_addr,
+            "halted": halted,
+        }
+    finally:
+        _softbp_unsuppress(uid)
 
 
 @router.post("/probes/{uid}/zone/debug/status")
@@ -335,21 +371,49 @@ def _sync_status(uid: str) -> dict:
 
 
 # ── 源码行断点 ──────────────────────────────
-# uid -> {address: {address, file, line}}
+# uid -> {address: {address, file, line, enabled, condition, mode}}
 _BREAKPOINTS: dict[str, dict[int, dict]] = {}
 
 
+def _bp_defaults(b: dict) -> dict:
+    """读取断点记录时兜底默认字段，兼容旧记录"""
+    return {
+        "address": b.get("address", 0),
+        "file": b.get("file", ""),
+        "line": b.get("line", 0),
+        "enabled": b.get("enabled", True),
+        "condition": b.get("condition"),
+        "mode": b.get("mode", "break"),
+    }
+
+
 def _clear_zone_breakpoints(uid: str):
-    """会话关闭回调：清空该 uid 的应用层断点表
+    """会话关闭回调：清空该 uid 的应用层断点表并卸载软断点处理器
 
     由 pyocd_backend 在 session 关闭后触发，确保 stop session / 强制重连后
     不再残留断点记录，避免下次同一 uid 启动会话时经 _rearm_breakpoints 重新武装旧断点。
     """
     _BREAKPOINTS.pop(uid, None)
+    _softbp_uninstall(uid)
 
 
 # 注册到后端会话关闭回调（模块导入时执行一次）
 register_session_closed(_clear_zone_breakpoints)
+
+
+def _ensure_soft_bp(uid: str):
+    """确保该 uid 已安装软断点处理器（幂等）。
+
+    在首个断点设置 / 复位重装断点时调用，此时会话与 core 必然可用。
+    """
+    session = backend._get_session(uid)
+    if not session:
+        return
+    try:
+        core = session.target.selected_core_or_raise
+    except Exception:
+        return
+    _softbp_install(uid, session.target, core, lambda: _BREAKPOINTS.get(uid, {}))
 
 
 def _get_session_core(uid: str):
@@ -374,8 +438,10 @@ def _rearm_breakpoints(uid: str):
     if not bps:
         return
     core = _get_session_core(uid)
-    for address in bps:
-        core.set_breakpoint(address)
+    _ensure_soft_bp(uid)
+    for address, b in bps.items():
+        if b.get("enabled", True):
+            core.set_breakpoint(address)
     core.bp_manager.flush()
 
 
@@ -392,10 +458,18 @@ async def zone_breakpoint(uid: str, req: BreakpointRequest):
     bps = _BREAKPOINTS.setdefault(uid, {})
     if req.set:
         core = _get_session_core(uid)
+        _ensure_soft_bp(uid)
         with monitor_backend.pause_during(uid):
             core.set_breakpoint(address)
             core.bp_manager.flush()
-        bps[address] = {"address": address, "file": req.file, "line": req.line}
+        bps[address] = {
+            "address": address,
+            "file": req.file,
+            "line": req.line,
+            "enabled": req.enabled,
+            "condition": req.condition,
+            "mode": req.mode,
+        }
     else:
         core = _get_session_core(uid)
         with monitor_backend.pause_during(uid):
@@ -409,7 +483,47 @@ async def zone_breakpoint(uid: str, req: BreakpointRequest):
 @router.get("/probes/{uid}/zone/breakpoints")
 async def zone_breakpoints(uid: str):
     """列出当前已设置的源码断点"""
-    return {"success": True, "breakpoints": sorted(_BREAKPOINTS.get(uid, {}).values(), key=lambda b: b["address"])}
+    bps = [_bp_defaults(b) for b in _BREAKPOINTS.get(uid, {}).values()]
+    return {"success": True, "breakpoints": sorted(bps, key=lambda b: b["address"])}
+
+
+@router.patch("/probes/{uid}/zone/debug/breakpoint")
+async def zone_update_breakpoint(uid: str, req: UpdateBreakpointRequest):
+    """按地址更新单个断点：启停 / 改模式 / 改条件（apply_condition=True 时更新 condition）"""
+    from core.monitor_backend import monitor_backend
+    bps = _BREAKPOINTS.get(uid, {})
+    if req.address not in bps:
+        raise HTTPException(status_code=404, detail="Breakpoint not found")
+    rec = bps[req.address]
+    core = _get_session_core(uid)
+    if req.enabled is not None and req.enabled != rec.get("enabled", True):
+        with monitor_backend.pause_during(uid):
+            if req.enabled:
+                core.set_breakpoint(req.address)
+            else:
+                core.remove_breakpoint(req.address)
+            core.bp_manager.flush()
+        rec["enabled"] = req.enabled
+    if req.mode is not None:
+        rec["mode"] = req.mode
+    if req.apply_condition:
+        rec["condition"] = req.condition
+    return {"success": True, **_bp_defaults(rec)}
+
+
+@router.delete("/probes/{uid}/zone/debug/breakpoint")
+async def zone_remove_breakpoint(uid: str, address: int):
+    """按地址删除单个断点"""
+    from core.monitor_backend import monitor_backend
+    bps = _BREAKPOINTS.get(uid, {})
+    if address not in bps:
+        raise HTTPException(status_code=404, detail="Breakpoint not found")
+    core = _get_session_core(uid)
+    with monitor_backend.pause_during(uid):
+        core.remove_breakpoint(address)
+        core.bp_manager.flush()
+    bps.pop(address, None)
+    return {"success": True, "cleared": 1}
 
 
 # ── ELF 源码 / 反汇编 ──────────────────────

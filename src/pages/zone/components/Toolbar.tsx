@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Play, RotateCcw, Power, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, CircleSlash, Pause, RefreshCw, Settings } from 'lucide-react'
+import { Play, RotateCcw, ChevronDown, Download, ArrowDown, CornerDownRight, CornerUpRight, Square, CircleSlash, Pause, RefreshCw, Settings, BugPlay, BugOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -166,7 +166,13 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
       <SplitButton
         main={
           <>
-            <Power className={sessionActive ? 'size-3.5 text-red-500' : 'size-3.5 text-green-500'} />
+            {sessionConnecting ? (
+              <RefreshCw className="size-3.5 animate-spin" />
+            ) : sessionActive ? (
+              <BugPlay className="size-3.5 text-green-600" />
+            ) : (
+              <BugOff className="size-3.5 text-muted-foreground" />
+            )}
             <span data-toolbar-label>{sessionActive ? 'Stop Session' : 'Start Session'}</span>
           </>
         }

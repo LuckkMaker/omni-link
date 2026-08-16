@@ -312,7 +312,6 @@ export function ConsoleDock() {
           `Type 'help' for commands, Tab to complete, Ctrl+R to search history`,
           `Copy: Ctrl+Shift+C | Paste: Ctrl+Shift+V`,
           `Clear: Ctrl+L | Zoom: Ctrl+MouseWheel`,
-          `以下命令在 Zone 页面禁用: list, script/exec/eval/load/save/flash/erase/write`,
         ]}
       />
     </div>

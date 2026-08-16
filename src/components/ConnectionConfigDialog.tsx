@@ -78,6 +78,7 @@ export function ConnectionConfigDialog({
     fetchProbes,
     fetchDevices,
     selectProbe,
+    connectProbe,
     setPendingTarget,
     setPendingInterface,
     setPendingSpeed,
@@ -171,6 +172,31 @@ export function ConnectionConfigDialog({
       setProbeError(null)
       setElfError(null)
     }
+  }
+
+  /** [取消]：仅关闭弹窗并清除错误提示，不发起连接，不改动已持久化的选项 */
+  const handleCancel = () => {
+    onOpenChange(false)
+    setErrorMsg(null)
+    setProbeError(null)
+    setElfError(null)
+  }
+
+  /** [完成并连接]：config 模式保存配置并立即发起连接（校验仿真器与目标设备） */
+  const handleConnect = () => {
+    if (!selectedProbe) {
+      setProbeError('请先选择仿真器')
+      return
+    }
+    if (!pendingTarget) {
+      setErrorMsg('请先选择目标设备')
+      return
+    }
+    onOpenChange(false)
+    setErrorMsg(null)
+    setProbeError(null)
+    setElfError(null)
+    void connectProbe(selectedProbe.uid)
   }
 
   return (
@@ -342,18 +368,37 @@ export function ConnectionConfigDialog({
             </div>
           )}
 
-          {/* 完成按钮 */}
-          {selectedProbe && (
-            <div className="flex justify-end pt-2">
-              <Button
-                className="gap-2"
-                onClick={handleConfirm}
-                disabled={connecting || selectedProbe.state === 'connecting'}
-              >
-                {showElf ? (startOnConfirm ? '连接并启动' : '完成') : '完成'}
+          {/* 操作按钮 */}
+            <div className="flex items-center justify-between pt-2">
+              <Button variant="outline" onClick={handleCancel}>
+                取消
               </Button>
+              <div className="flex gap-2">
+                {!showElf && (
+                  <>
+                    <Button variant="outline" onClick={handleConfirm} disabled={connecting}>
+                      确认
+                    </Button>
+                    <Button
+                      className="gap-2"
+                      onClick={handleConnect}
+                      disabled={!selectedProbe || connecting || selectedProbe.state === 'connecting'}
+                    >
+                      确认并连接
+                    </Button>
+                  </>
+                )}
+                {showElf && (
+                  <Button
+                    className="gap-2"
+                    onClick={handleConfirm}
+                    disabled={connecting || selectedProbe?.state === 'connecting'}
+                  >
+                    {startOnConfirm ? '连接并启动' : '完成'}
+                  </Button>
+                )}
+              </div>
             </div>
-          )}
         </DialogContent>
       </Dialog>
 

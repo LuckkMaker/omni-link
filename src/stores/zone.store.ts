@@ -7,6 +7,7 @@ import type {
   ZoneResetMode,
   ZoneStepMode,
   SourceBreakpoint,
+  BreakpointUpdate,
 } from '@/services/zone.service'
 import * as probeService from '@/services/probe.service'
 import type { ConnectMode } from '@/services/probe.service'
@@ -230,6 +231,12 @@ interface ZoneStore {
   /** 清除当前目标全部断点 */
   clearBreakpoints: (uid: string) => Promise<void>
   refreshBreakpoints: (uid: string) => Promise<void>
+  /** 更新单个断点（启停/模式/条件），成功后刷新列表 */
+  updateBreakpoint: (uid: string, address: number, patch: BreakpointUpdate) => Promise<void>
+  /** 删除单个断点，成功后刷新列表 */
+  removeBreakpoint: (uid: string, address: number) => Promise<void>
+  /** 设置断点启用状态（转发 updateBreakpoint） */
+  setBreakpointEnabled: (uid: string, address: number, enabled: boolean) => Promise<void>
 
   /** ELF 加载（silent=true 时不弹全局通知，用于 startSession 内合并为一条通知） */
   loadElf: (uid: string, path: string, silent?: boolean) => Promise<boolean>
@@ -690,6 +697,41 @@ export const useZoneStore = create<ZoneStore>()(
           zoneLog('error', `Zone Clear breakpoints failed: ${msg}`)
           useNotificationStore.getState().push({ type: 'error', title: '清除断点失败', message: msg })
         }
+      },
+
+      updateBreakpoint: async (uid, address, patch) => {
+        const label = patch.mode ? `mode→${patch.mode}` : patch.enabled !== undefined ? (patch.enabled ? 'enable' : 'disable') : 'condition'
+        try {
+          await zoneService.zoneUpdateBreakpoint(uid, address, patch)
+          zoneLog('info', `Zone Update breakpoint 0x${address.toString(16)} (${label})`)
+          await get().refreshBreakpoints(uid)
+        } catch (err) {
+          const detail = extractApiErrorDetail(err)
+          const fallback = err instanceof Error ? err.message : 'Update breakpoint failed'
+          const msg = friendlyBreakpointError(detail ?? fallback)
+          set({ error: msg })
+          zoneLog('error', `Zone update breakpoint failed: ${msg}`)
+          useNotificationStore.getState().push({ type: 'error', title: '断点更新失败', message: msg })
+        }
+      },
+
+      removeBreakpoint: async (uid, address) => {
+        try {
+          await zoneService.zoneRemoveBreakpoint(uid, address)
+          zoneLog('info', `Zone Remove breakpoint 0x${address.toString(16)}`)
+          await get().refreshBreakpoints(uid)
+        } catch (err) {
+          const detail = extractApiErrorDetail(err)
+          const fallback = err instanceof Error ? err.message : 'Remove breakpoint failed'
+          const msg = friendlyBreakpointError(detail ?? fallback)
+          set({ error: msg })
+          zoneLog('error', `Zone remove breakpoint failed: ${msg}`)
+          useNotificationStore.getState().push({ type: 'error', title: '移除断点失败', message: msg })
+        }
+      },
+
+      setBreakpointEnabled: async (uid, address, enabled) => {
+        await get().updateBreakpoint(uid, address, { enabled })
       },
 
       loadElf: async (uid, path, silent = false) => {

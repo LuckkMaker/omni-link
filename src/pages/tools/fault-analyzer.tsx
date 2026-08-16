@@ -730,7 +730,7 @@ export default function FaultAnalyzer() {
           className="h-8 gap-1.5"
         >
           <ListOrdered className="size-3.5" />
-          Reg
+          Core Reg
         </Button>
       </div>
 

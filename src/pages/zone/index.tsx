@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react'
-import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, Eye, ListTree } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { FileCode2, FunctionSquare, MemoryStick, SquareTerminal, Eye, ListTree, ListChecks } from 'lucide-react'
 import { Toolbar } from './components/Toolbar'
 import { SourceFilesPanel } from './components/SourceFilesPanel'
 import { FunctionsPanel } from './components/FunctionsPanel'
@@ -9,10 +9,13 @@ import { InspectorDock, MemoryPanel } from './components/InspectorDock'
 import { ConsoleDock } from './components/ConsoleDock'
 import { WatchPanel } from './components/WatchPanel'
 import { CallStackPanel } from './components/CallStackPanel'
+import { BreakPointsPanel } from './components/BreakPointsPanel'
 import { ResizeHandle } from '@/components/LogConsole'
 import { useProbeStore } from '@/stores/probe.store'
 import { useZoneStore } from './store'
 import * as zoneService from '@/services/zone.service'
+import { wsClient } from '@/services/ws'
+import { useNotificationStore } from '@/stores/notification.store'
 import { cn } from '@/lib/utils'
 
 // ── 尺寸常量 ──────────────────────────────
@@ -32,7 +35,7 @@ function ratioOf(max: number): number {
 
 type LeftTab = 'source' | 'functions' | 'memory'
 // 底部右栏 tab（左栏固定 Console）
-type BottomTab = 'callstack' | 'memory' | 'watch'
+type BottomTab = 'callstack' | 'memory' | 'watch' | 'breakpoints'
 
 /** 左侧纵向 tab 按钮（垂直列表：图标 + 完整标签横向排列） */
 function RailTab({
@@ -182,6 +185,45 @@ export default function ZonePage() {
     return () => clearInterval(timer)
   }, [isConnected, uid, refreshStatus, sessionStatus])
 
+  // ── 软断点跳过事件订阅 ──
+  // log/execute/条件不满足的断点命中时，目标会经 FPB「跳断点继续」流程自动恢复运行（不真正暂停）。
+  // 订阅 zone.breakpoint.skip：弹 toast 让用户感知这次跳过。同一断点（address+reason）1s 内
+  // 去重，避免高频断点（如每条消息都打的 log 点）反复弹窗刷屏。
+  const lastSkipRef = useRef<Record<string, number>>({})
+  useEffect(() => {
+    if (!uid) return
+    const off = wsClient.on('zone.breakpoint.skip', (data: unknown) => {
+      const ev = data as {
+        uid: string
+        address: number
+        file: string
+        line: number
+        mode: string
+        reason: string
+        error?: string
+      }
+      if (ev.uid !== uid) return
+      const now = Date.now()
+      const key = `${ev.address}-${ev.reason}`
+      if (now - (lastSkipRef.current[key] ?? 0) < 1000) return
+      lastSkipRef.current[key] = now
+      const reasonText: Record<string, string> = {
+        log: '日志点',
+        execute: '执行断点',
+        condition_false: '条件不满足',
+      }
+      const loc = ev.file ? `${ev.file}:${ev.line}` : `0x${(ev.address >>> 0).toString(16)}`
+      useNotificationStore.getState().push({
+        type: 'info',
+        title: `${reasonText[ev.reason] ?? '断点'}已跳过`,
+        message: `${loc} (${ev.mode})${ev.error ? ` · ${ev.error}` : ''}`,
+        autoClose: true,
+        autoCloseDelay: 3000,
+      })
+    })
+    return off
+  }, [uid])
+
   // 左侧面板宽度拖拽（面板在分隔条左侧：向右拖动→变宽）
   const handleSourceResize = useCallback((delta: number) => {
     setSourceWidth((w) => Math.max(0, Math.min(ratioOf(SOURCE_PANEL_MAX_RATIO), w + delta)))
@@ -309,6 +351,7 @@ export default function ZonePage() {
               <BottomTab active={bottomTab === 'callstack'} onClick={() => setBottomTab('callstack')} icon={ListTree} label="Call Stack" />
               <BottomTab active={bottomTab === 'watch'} onClick={() => setBottomTab('watch')} icon={Eye} label="Watch" />
               <BottomTab active={bottomTab === 'memory'} onClick={() => setBottomTab('memory')} icon={MemoryStick} label="Memory" />
+              <BottomTab active={bottomTab === 'breakpoints'} onClick={() => setBottomTab('breakpoints')} icon={ListChecks} label="BreakPoints" />
             </div>
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {/* 三个面板始终挂载（会话启动后各自预取数据），仅 CSS 隐藏未激活 tab 的面板 */}
@@ -324,6 +367,9 @@ export default function ZonePage() {
               </div>
               <div className={cn('min-h-0 flex-1', bottomTab !== 'memory' && 'hidden')}>
                 <MemoryPanel uid={uid} connected={isConnected} />
+              </div>
+              <div className={cn('min-h-0 flex-1', bottomTab !== 'breakpoints' && 'hidden')}>
+                <BreakPointsPanel uid={uid} connected={isConnected} />
               </div>
             </div>
           </div>

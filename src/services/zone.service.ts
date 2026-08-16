@@ -179,11 +179,29 @@ export async function zoneReset(uid: string, mode: ZoneResetMode = 'halt'): Prom
   return data
 }
 
+/** 断点模式：break 中断 / log 日志点（命中打印并继续）/ execute 执行只读命令（命中执行并继续） */
+export type BreakpointMode = 'break' | 'log' | 'execute'
+
 /** 源码行断点 */
 export interface SourceBreakpoint {
   address: number
   file: string
   line: number
+  /** 是否启用（checkbox 启停） */
+  enabled: boolean
+  /** 按 mode 复用：break→触发条件表达式 / log→日志文本（可含 {expr}）/ execute→多行只读命令 */
+  condition: string | null
+  /** 断点模式 */
+  mode: BreakpointMode
+}
+
+/** 单个断点的局部更新（PATCH）：仅提供要修改的字段 */
+export interface BreakpointUpdate {
+  enabled?: boolean
+  mode?: BreakpointMode
+  /** 更新 condition 时需同时置 applyCondition=true（用于区分「设为空」与「不修改」） */
+  condition?: string | null
+  applyCondition?: boolean
 }
 
 /** 按源码行设置/移除断点 */
@@ -191,18 +209,61 @@ export async function zoneSetBreakpoint(
   uid: string,
   file: string,
   line: number,
-  set: boolean
+  set: boolean,
+  opts?: { enabled?: boolean; condition?: string | null; mode?: BreakpointMode }
 ): Promise<{ success: boolean; address: number; file: string; line: number; active: boolean }> {
   const client = await api()
-  const { data } = await client.post(`/api/probes/${uid}/zone/debug/breakpoint`, { file, line, set })
+  const { data } = await client.post(`/api/probes/${uid}/zone/debug/breakpoint`, {
+    file,
+    line,
+    set,
+    enabled: opts?.enabled,
+    condition: opts?.condition,
+    mode: opts?.mode,
+  })
   return data
 }
 
-/** 列出已设置的源码断点 */
+/** 按地址更新单个断点（启停 / 模式 / 条件） */
+export async function zoneUpdateBreakpoint(
+  uid: string,
+  address: number,
+  patch: BreakpointUpdate
+): Promise<{ success: boolean } & SourceBreakpoint> {
+  const client = await api()
+  const { data } = await client.patch(`/api/probes/${uid}/zone/debug/breakpoint`, {
+    address,
+    enabled: patch.enabled,
+    mode: patch.mode,
+    condition: patch.applyCondition ? patch.condition : undefined,
+    apply_condition: patch.applyCondition ?? false,
+  })
+  return data
+}
+
+/** 按地址删除单个断点 */
+export async function zoneRemoveBreakpoint(
+  uid: string,
+  address: number
+): Promise<{ success: boolean; cleared: number }> {
+  const client = await api()
+  const { data } = await client.delete(`/api/probes/${uid}/zone/debug/breakpoint`, { params: { address } })
+  return data
+}
+
+/** 列出已设置的源码断点（前端兜底默认新字段，兼容旧后端返回） */
 export async function zoneListBreakpoints(uid: string): Promise<{ success: boolean; breakpoints: SourceBreakpoint[] }> {
   const client = await api()
   const { data } = await client.get(`/api/probes/${uid}/zone/breakpoints`)
-  return data
+  const bps = (data.breakpoints as Partial<SourceBreakpoint>[] ?? []).map((b) => ({
+    address: b.address ?? 0,
+    file: b.file ?? '',
+    line: b.line ?? 0,
+    enabled: b.enabled ?? true,
+    condition: b.condition ?? null,
+    mode: (b.mode as BreakpointMode) ?? 'break',
+  }))
+  return { success: data.success, breakpoints: bps }
 }
 
 /** 清除全部断点 */
