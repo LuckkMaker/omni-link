@@ -3,6 +3,7 @@ import { Terminal, type TerminalApi } from '@/pages/commander/components/Termina
 import { useProbeStore } from '@/stores/probe.store'
 import { useCommanderStore } from '@/stores/commander.store'
 import { useZoneStore } from '../store'
+import { zoneResolveSymbol, zoneSourceLine } from '@/services/zone.service'
 import { useLogStore } from '@/stores/log.store'
 import type { LogEvent } from '@shared/types'
 
@@ -35,7 +36,7 @@ function formatTime(ts: string | number): string {
 const HELP_LINES = [
   'Commands:',
   '--------',
-  'break                     ADDR                 Set a breakpoint address.',
+  'break                     ADDR|SYMBOL|FILE:LINE Set a source breakpoint: address, symbol, or file:line.',
   'c, continue, g, go                             Resume execution of the target.',
   'd, disasm                 [-c/--center] ADDR [LEN] Disassemble instructions at an address.',
   'fill                      [SIZE] ADDR LEN PATTERN Fill a range of memory with a pattern.',
@@ -50,7 +51,7 @@ const HELP_LINES = [
   'rmbreak                   ADDR                 Remove a breakpoint.',
   'rmwatch                   ADDR [r|w|rw] [1|2|4] Remove watchpoint(s).',
   'st, status                                     Show the target\'s current state.',
-  's, step                   [COUNT]              Step one or more instructions.',
+  's, step                   [COUNT|into|over|out] Step into (default) [COUNT] times, or over/out.',
   'symbol                    NAME                 Show a symbol\'s value.',
   'watch                     ADDR [r|w|rw] [1|2|4] Set a watchpoint address, and optional access type (default rw) and size (4).',
   'where                     [ADDR]               Show symbol, file, and line for address.',
@@ -206,17 +207,85 @@ export function ConsoleDock() {
         await zone.continue(cmdUid)
         return true
       case 'step': {
-        const mode = (tokens[1] ?? '').toLowerCase()
-        if (mode === 'over') await zone.step(cmdUid, 'over')
-        else if (mode === 'out') await zone.step(cmdUid, 'out')
-        else await zone.step(cmdUid, 'into')
+        // 支持 step [into|over|out] 和 step N（N 次 step into）
+        const arg1 = (tokens[1] ?? '').toLowerCase()
+        let mode: 'into' | 'over' | 'out' = 'into'
+        let count = 1
+        if (arg1 === 'over') mode = 'over'
+        else if (arg1 === 'out') mode = 'out'
+        else if (/^\d+$/.test(arg1)) count = parseInt(arg1, 10)
+        for (let i = 0; i < count; i++) {
+          await zone.step(cmdUid, mode)
+        }
+        return true
+      }
+      case 'break': {
+        // 统一走 Zone 源码断点体系（联动断点面板），不放行 pyOCD 地址断点，避免断点冲突。
+        // 支持：break <地址> / break <符号名> / break <file>:<line> / break <符号>:<line>
+        const arg = tokens[1]
+        const warn = (msg: string) =>
+          useLogStore.getState().addLog({ timestamp: new Date().toISOString(), level: 'warning', message: msg, source: 'zone' })
+        if (!arg) {
+          warn('用法: break <地址> / break <符号名> / break <file>:<line>')
+          return true
+        }
+        // 1) 地址 → 反查源码行
+        let addr: number | null = null
+        if (/^0x[0-9a-fA-F]+$/.test(arg)) addr = parseInt(arg, 16)
+        else if (/^\d+$/.test(arg)) addr = parseInt(arg, 10)
+        if (addr != null) {
+          try {
+            const src = await zoneSourceLine(cmdUid, addr)
+            if (src?.file && src.line != null) {
+              await zone.toggleBreakpoint(cmdUid, src.file, src.line)
+            } else {
+              warn(`无法将地址 ${arg} 映射到源码行`)
+            }
+          } catch {
+            warn(`解析地址 ${arg} 失败`)
+          }
+          return true
+        }
+        // 2) file:line / 符号:line
+        const colon = arg.indexOf(':')
+        if (colon > 0) {
+          const name = arg.slice(0, colon)
+          const line = parseInt(arg.slice(colon + 1), 10)
+          if (!line || line <= 0) {
+            warn(`行号无效: ${arg.slice(colon + 1)}`)
+            return true
+          }
+          // 冒号前优先当符号名解析（如 main:152 → main 符号 → 其所在文件），失败则当文件路径
+          let file = name
+          try {
+            const res = await zoneResolveSymbol(cmdUid, name)
+            const sym = res.success ? res.symbol : null
+            if (sym?.file) file = sym.file
+          } catch {
+            // 忽略，按文件路径处理
+          }
+          await zone.toggleBreakpoint(cmdUid, file, line)
+          return true
+        }
+        // 3) 纯符号名 → 解析为源码断点
+        try {
+          const res = await zoneResolveSymbol(cmdUid, arg)
+          const sym = res.success ? res.symbol : null
+          if (sym?.file && sym?.line != null) {
+            await zone.toggleBreakpoint(cmdUid, sym.file, sym.line)
+          } else {
+            warn(`无法解析符号「${arg}」为可用的源码断点`)
+          }
+        } catch {
+          warn(`解析符号「${arg}」失败`)
+        }
         return true
       }
       case 'reset':
         await zone.reset(cmdUid, 'halt')
         return true
       default:
-        // 内存/寄存器/断点类命令（read32/write32/break 等）仍直通 commander
+        // 内存/寄存器类命令（read32/write32 等）仍直通 commander
         return false
     }
   }, [])

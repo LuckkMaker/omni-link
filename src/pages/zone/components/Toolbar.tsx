@@ -334,7 +334,7 @@ export function Toolbar({ uid, connected }: ToolbarProps) {
         title="Debug session configuration"
       >
         <Settings className="size-4" />
-        <span data-toolbar-label>session setting</span>
+        <span data-toolbar-label>Session setting</span>
       </Button>
 
       {/* 调试会话配置弹窗（start 模式，含 ELF 选择区与会话选项）——
