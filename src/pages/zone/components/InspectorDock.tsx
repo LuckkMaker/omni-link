@@ -1,11 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Loader2, AlertCircle, Cpu, Blocks, Binary, ChevronRight, ChevronDown, X, Plus, Columns2 } from 'lucide-react'
+import { Loader2, AlertCircle, Cpu, Blocks, Binary, ChevronRight, ChevronDown, X, Plus, Columns2, Settings2 } from 'lucide-react'
 import { useZoneStore, type InspectorTabId } from '../store'
 import { useSessionReady, useAutoRefresh } from '../hooks'
 import * as zoneService from '@/services/zone.service'
 import type { Peripheral, PeripheralRegister, PeripheralField, CoreRegister } from '@/services/zone.service'
 import { cn } from '@/lib/utils'
 import { DisasmView } from './DisasmView'
+import { CorePeripheralsPanel } from './CorePeripheralsPanel'
 
 interface InspectorDockProps {
   uid: string | null
@@ -54,6 +55,7 @@ export function InspectorDock({ uid, connected }: InspectorDockProps) {
   const sections = [
     { id: 'disasm' as InspectorTabId, label: 'Disassembly', icon: Binary, content: <DisasmView uid={uid} connected={connected} /> },
     { id: 'registers' as InspectorTabId, label: 'Registers', icon: Cpu, content: <RegistersPanel uid={uid} connected={connected} /> },
+    { id: 'coreperipheral' as InspectorTabId, label: 'Core Peripherals', icon: Settings2, content: <CorePeripheralsPanel uid={uid} connected={connected} /> },
     { id: 'peripherals' as InspectorTabId, label: 'Peripherals', icon: Blocks, content: <PeripheralsPanel uid={uid} connected={connected} /> },
   ]
   const expandedSections = new Set(expanded)

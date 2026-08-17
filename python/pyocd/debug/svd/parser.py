@@ -369,6 +369,12 @@ class SVDParser(object):
         peripherals = []
         for peripheral_node in device_node.findall('.//peripheral'):
             peripherals.append(self._parse_peripheral(peripheral_node))
+        # Device-level interrupts (some vendors, e.g. Geehy, define all
+        # interrupts here instead of on individual peripherals).
+        interrupts = []
+        for interrupt_node in device_node.findall('./interrupt'):
+            interrupts.append(self._parse_interrupt(interrupt_node))
+        interrupts = interrupts if interrupts else None
         cpu_node = device_node.find('./cpu')
         cpu = SVDCpu(
             name=_get_text(cpu_node, 'name'),
@@ -399,6 +405,7 @@ class SVDParser(object):
             address_unit_bits=_get_int(device_node, 'addressUnitBits'),
             width=_get_int(device_node, 'width'),
             peripherals=peripherals,
+            interrupts=interrupts,
             size=_get_int(device_node, "size"),
             access=_get_text(device_node, 'access'),
             protection=_get_text(device_node, 'protection'),

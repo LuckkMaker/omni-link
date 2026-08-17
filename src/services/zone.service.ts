@@ -104,6 +104,16 @@ export interface RegisterReadResult {
   errors: { address: number; error: string }[]
 }
 
+/** Core Peripheral：单个中断源状态（NVIC 视图一行） */
+export interface NvicIrq {
+  number: number
+  name: string
+  enabled: boolean
+  pending: boolean
+  active: boolean
+  priority: number
+}
+
 /** 会话配置 */
 export interface ZoneSession {
   name: string
@@ -664,6 +674,29 @@ export async function zoneCoreRegisters(
   const client = await api()
   const { data } = await client.get(`/api/probes/${uid}/zone/registers/core`)
   return data as { success: boolean; registers: CoreRegister[] }
+}
+
+// ── Core Peripherals（NVIC） ─────────────────
+
+/** NVIC 中断源状态表（Keil 范式：按中断源展示 Enable/Pending/Active/Priority） */
+export async function zoneCoreNvic(uid: string): Promise<{ success: boolean; interrupts: NvicIrq[] }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/peripherals/core/nvic`)
+  return data as { success: boolean; interrupts: NvicIrq[] }
+}
+
+/** 使能/禁止指定中断 */
+export async function zoneSetNvicEnable(uid: string, number: number, enable: boolean): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/nvic/${number}/enable`, { enable })
+  return data as { success: boolean }
+}
+
+/** 置位/清除指定中断的挂起 */
+export async function zoneSetNvicPending(uid: string, number: number, pending: boolean): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/nvic/${number}/pending`, { pending })
+  return data as { success: boolean }
 }
 
 /** 读取内存 */

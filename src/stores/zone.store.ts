@@ -54,7 +54,7 @@ function isNoCodeError(detail: string | null): boolean {
 }
 
 /** 右侧检查器 dock 的 section 类型 */
-export type InspectorTabId = 'disasm' | 'callstack' | 'registers' | 'peripherals'
+export type InspectorTabId = 'disasm' | 'callstack' | 'registers' | 'peripherals' | 'coreperipheral'
 
 /** 刷新策略模式 */
 export type RefreshMode = 'on_stop' | 'periodic_always' | 'off'

@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from core.commander_backend import commander_backend
+from core.core_peripherals import read_nvic, set_enable, set_pending
 from core.elf_backend import elf_backend
 from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend, register_session_closed
@@ -50,6 +51,14 @@ class DisasmRequest(BaseModel):
 
 class ReadRegistersRequest(BaseModel):
     addresses: list[int]
+
+
+class NvicEnableRequest(BaseModel):
+    enable: bool
+
+
+class NvicPendingRequest(BaseModel):
+    pending: bool
 
 
 class ReadMemoryRequest(BaseModel):
@@ -1061,6 +1070,41 @@ async def zone_registers_core(uid: str):
             errors.append({"name": name, "error": str(e)})
 
     return {"success": True, "registers": registers, "errors": errors}
+
+
+# ── Core Peripherals（NVIC，Keil 范式：按中断源） ──────────
+
+@router.get("/probes/{uid}/zone/peripherals/core/nvic")
+async def zone_nvic(uid: str):
+    """NVIC 中断源状态表（按中断源展示 Enable/Pending/Active/Priority，Keil 范式）"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    result = await asyncio.to_thread(read_nvic, uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read NVIC failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/nvic/{number}/enable")
+async def zone_nvic_enable(uid: str, number: int, req: NvicEnableRequest):
+    """使能/禁止指定中断（目标须暂停）"""
+    if number < 0:
+        raise HTTPException(status_code=400, detail="Invalid interrupt number")
+    result = await asyncio.to_thread(set_enable, uid, number, req.enable)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Set NVIC enable failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/nvic/{number}/pending")
+async def zone_nvic_pending(uid: str, number: int, req: NvicPendingRequest):
+    """置位/清除指定中断的挂起（目标须暂停）"""
+    if number < 0:
+        raise HTTPException(status_code=400, detail="Invalid interrupt number")
+    result = await asyncio.to_thread(set_pending, uid, number, req.pending)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Set NVIC pending failed"))
+    return result
 
 
 @router.post("/probes/{uid}/zone/memory/read")
