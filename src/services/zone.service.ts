@@ -736,6 +736,13 @@ export async function zoneReadScb(uid: string): Promise<{ success: boolean; regi
   return data as { success: boolean; registers: ScbRegister[]; skipped?: boolean }
 }
 
+/** 读取 SysTick 寄存器（CTRL/LOAD/VAL/CALIB）+ 位域 */
+export async function zoneReadSystick(uid: string): Promise<{ success: boolean; registers: ScbRegister[]; skipped?: boolean }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/peripherals/core/systick`)
+  return data as { success: boolean; registers: ScbRegister[]; skipped?: boolean }
+}
+
 /** 触发软件中断（STIR.INTID，运行态可操作） */
 export async function zoneTriggerStir(uid: string, intid: number): Promise<{ success: boolean }> {
   const client = await api()

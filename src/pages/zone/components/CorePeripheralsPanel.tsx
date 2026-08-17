@@ -39,9 +39,34 @@ export function CorePeripheralsPanel({ uid, connected }: CorePeripheralsPanelPro
         <>
           <NvicSection uid={uid} connected={connected} />
           <SystemCtrlSection uid={uid} connected={connected} />
+          <SysTickSection uid={uid} connected={connected} />
         </>
       )}
     </div>
+  )
+}
+
+// ── System Control and Configuration（SCB：ICSR/VTOR/AIRCR/STIR） ──
+function SystemCtrlSection(props: { uid: string | null; connected: boolean }) {
+  return (
+    <CoreRegSection
+      {...props}
+      title="System Control and Configuration"
+      subtitle="SCB 系统控制与配置"
+      fetchRegisters={zoneService.zoneReadScb}
+    />
+  )
+}
+
+// ── System Tick Timer（SysTick：CTRL/LOAD/VAL/CALIB） ──
+function SysTickSection(props: { uid: string | null; connected: boolean }) {
+  return (
+    <CoreRegSection
+      {...props}
+      title="System Tick Timer"
+      subtitle="SysTick 系统滴答定时器"
+      fetchRegisters={zoneService.zoneReadSystick}
+    />
   )
 }
 
@@ -278,16 +303,21 @@ function StateCell({ changed, on }: { changed: boolean; on: boolean }) {
   )
 }
 
-// ── System Control and Configuration（SCB：ICSR/VTOR/AIRCR/STIR） ──
-function SystemCtrlSection({ uid, connected }: { uid: string | null; connected: boolean }) {
+// ── Core 寄存器分组（System Control and Configuration / System Tick Timer） ──
+type RegSectionProps = {
+  uid: string | null
+  connected: boolean
+  title: string
+  subtitle: string
+  fetchRegisters: (uid: string) => Promise<{ success: boolean; registers: ScbRegister[]; skipped?: boolean }>
+}
+function CoreRegSection({ uid, connected, title, subtitle, fetchRegisters }: RegSectionProps) {
   const { ready } = useSessionReady(uid, connected)
 
   const [expanded, setExpanded] = useState(false)
   const [registers, setRegisters] = useState<ScbRegister[]>([])
   // 展开的寄存器 key 集合（寄存器地址）
   const [expandedRegs, setExpandedRegs] = useState<Set<number>>(() => new Set())
-  // 展开的分组 key 集合（默认全部展开）
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // 值变化的寄存器地址集合（黄底黑字）
@@ -316,7 +346,7 @@ function SystemCtrlSection({ uid, connected }: { uid: string | null; connected: 
     const seq = ++refreshSeqRef.current
     setLoading(true)
     try {
-      const res = await zoneService.zoneReadScb(uid)
+      const res = await fetchRegisters(uid)
       if (seq !== refreshSeqRef.current) return
       if (res.success) {
         // 运行中其他调试操作占用总线时后端返回 skipped=True：静默保留上一份快照
@@ -358,7 +388,7 @@ function SystemCtrlSection({ uid, connected }: { uid: string | null; connected: 
       if (seq === refreshSeqRef.current) setLoading(false)
       inflightRef.current = false
     }
-  }, [ready, uid])
+  }, [ready, uid, fetchRegisters])
 
   useAutoRefresh(uid, connected, ready, refresh)
 
@@ -428,9 +458,9 @@ function SystemCtrlSection({ uid, connected }: { uid: string | null; connected: 
       >
         <span className="flex min-w-0 items-center gap-1">
           {expanded ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
-          <span className="font-medium text-primary">System Control and Configuration</span>
+          <span className="font-medium text-primary">{title}</span>
         </span>
-        <span className="truncate text-right text-[10px] text-muted-foreground">SCB 系统控制与配置</span>
+        <span className="truncate text-right text-[10px] text-muted-foreground">{subtitle}</span>
       </button>
 
       {expanded && (

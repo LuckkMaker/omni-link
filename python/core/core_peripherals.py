@@ -278,13 +278,98 @@ _SCB_REGS = [
 ]
 
 
+# ── System Tick Timer（SysTick：CTRL/LOAD/VAL/CALIB）──────────────────────
+SYSTICK_BASE = 0xE000E010
+STK_CTRL = 0xE000E010
+STK_LOAD = 0xE000E014
+STK_VAL = 0xE000E018
+STK_CALIB = 0xE000E01C
+
+
+def _stk_field(name, description, bit_offset, bit_width, values=None, access="ro"):
+    return _scb_field(name, description, bit_offset, bit_width, values, access)
+
+
+# 位域定义参考 ARMv7-M System Tick Timer，顺序即展示顺序（与 Keil SysTick 一致）
+_SYSTICK_REGS = [
+    {
+        "name": "SysTick->CTRL",
+        "address": STK_CTRL,
+        "description": "SysTick Control and Status Register",
+        "group": "Control and Status",
+        "group_desc": "CTRL 控制与状态",
+        "fields": [
+            _stk_field("ENABLE", "计数器使能", 0, 1, access="rw"),
+            _stk_field("TICKINT", "计数到 0 时挂起 SysTick 异常", 1, 1, access="rw"),
+            _stk_field("CLKSOURCE", "时钟源（1=处理器时钟/0=外部参考时钟）", 2, 1, access="rw"),
+            _stk_field("COUNTFLAG", "计数器计数到 0 标志（读本位自动清零，只读）", 16, 1),
+        ],
+    },
+    {
+        "name": "SysTick->LOAD",
+        "address": STK_LOAD,
+        "description": "SysTick Reload Value Register",
+        "group": "Reload and Current Value",
+        "group_desc": "LOAD/VAL 重载与当前值",
+        "fields": [
+            _stk_field("RELOAD", "重载值（计数器从 RELOAD 递减到 0）", 0, 24, access="rw"),
+        ],
+    },
+    {
+        "name": "SysTick->VAL",
+        "address": STK_VAL,
+        "description": "SysTick Current Value Register",
+        "group": "Reload and Current Value",
+        "group_desc": "LOAD/VAL 重载与当前值",
+        "write_only": False,
+        "fields": [
+            _stk_field("CURRENT", "当前计数值（读返回当前递减值，只读）", 0, 24),
+        ],
+    },
+    {
+        "name": "SysTick->CALIB",
+        "address": STK_CALIB,
+        "description": "SysTick Calibration Value Register",
+        "group": "Calibration",
+        "group_desc": "CALIB 校准值",
+        "fields": [
+            _stk_field("TENMS", "10ms 时间校准值", 0, 24),
+            _stk_field("SKEW", "校准值并非精确的 10ms", 30, 1),
+            _stk_field("NOREF", "无独立参考时钟（处理器时钟仍可用）", 31, 1),
+        ],
+    },
+]
+
+
+def read_systick(uid):
+    """Read SysTick registers (CTRL/LOAD/VAL/CALIB).
+
+    Non-invasive reads work while the target is running. VAL/CALIB read-only
+    fields surface value=None if a read fails (e.g. unsupported CALIB).
+    """
+    session = _get_session(uid)
+    banks = [(r["address"], r) for r in _SYSTICK_REGS]
+    results = {}
+    for addr, _cfg in banks:
+        words, err = _read_words(uid, addr, 1)
+        results[addr] = (words, err)
+
+    out = []
+    for addr, cfg in banks:
+        words, _err = results[addr]
+        reg = dict(cfg)
+        reg["value"] = words[0] if words is not None else None
+        out.append(reg)
+    return {"success": True, "registers": out}
+
+
 def read_scb(uid):
     """Read SCB registers (ICSR/AIRCR/VTOR/STIR) with read-only values.
 
-    Reading is non-invasive (system AHB space via direct AP read), so it works
-    while the target is running. STIR is write-only: a read failure there only
-    yields value=None, not an overall error. When the op lock is held by another
-    debug operation we return success=True with skipped=True.
+    Non-invasive (system AHB space via direct AP read), so it works while the
+    target is running. STIR is write-only: a read failure there only yields
+    value=None, not an overall error. When the op lock is held by another debug
+    operation we return success=True with skipped=True.
     """
     session = _get_session(uid)
     banks = [(r["address"], r) for r in _SCB_REGS]
@@ -325,9 +410,9 @@ def trigger_stir(uid, intid):
 
 
 def write_scb_field(uid, address, field_name, value):
-    """Read-modify-write a writable SCB bitfield (AIRCR.KEY handled).
+    """Read-modify-write a writable core bitfield (SCB or SysTick).
 
-    Works while the target is running (SCB sits in the system AHB space, so a
+    Works while the target is running (these sit in the system AHB space, so a
     single 32-bit AP write is non-invasive). Only fields marked access in
     ("rw", "w") are writable; writes to read-only fields are rejected.
 
@@ -336,7 +421,8 @@ def write_scb_field(uid, address, field_name, value):
     """
     try:
         session = _get_session(uid)
-        reg_cfg = next((r for r in _SCB_REGS if r["address"] == address), None)
+        reg_table = _SCB_REGS + _SYSTICK_REGS
+        reg_cfg = next((r for r in reg_table if r["address"] == address), None)
         if reg_cfg is None:
             return {"success": False, "error": f"Unknown SCB register 0x{address:08X}"}
         field_cfg = next((f for f in reg_cfg["fields"] if f["name"] == field_name), None)

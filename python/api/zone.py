@@ -20,6 +20,7 @@ from core.commander_backend import commander_backend
 from core.core_peripherals import (
     read_nvic,
     read_scb,
+    read_systick,
     set_enable,
     set_pending,
     trigger_stir,
@@ -1134,6 +1135,17 @@ async def zone_scb(uid: str):
     result = await asyncio.to_thread(read_scb, uid)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "Read SCB failed"))
+    return result
+
+
+@router.get("/probes/{uid}/zone/peripherals/core/systick")
+async def zone_systick(uid: str):
+    """System Tick Timer：读取 CTRL/LOAD/VAL/CALIB 寄存器及位域"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    result = await asyncio.to_thread(read_systick, uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read SysTick failed"))
     return result
 
 
