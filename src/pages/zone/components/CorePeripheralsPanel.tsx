@@ -174,7 +174,7 @@ export function CorePeripheralsPanel({ uid, connected }: CorePeripheralsPanelPro
               <div className="min-h-0 flex-1 overflow-auto">
                 <div className="grid grid-cols-[44px_minmax(0,1fr)_56px_56px_56px_64px] border-b border-border text-[10px] font-medium text-muted-foreground">
                   <span className="px-2 py-1 text-left">IRQ</span>
-                  <span className="border-l border-border px-2 py-1 text-left">Interrupt</span>
+                  <span className="border-l border-border px-2 py-1 text-left">Name</span>
                   <span className="border-l border-border px-2 py-1 text-center">Enable</span>
                   <span className="border-l border-border px-2 py-1 text-center">Pending</span>
                   <span className="border-l border-border px-2 py-1 text-center">Active</span>
