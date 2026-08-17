@@ -111,6 +111,14 @@ function formatHexAddr(addr: number): string {
   return `0x${hex.slice(0, 4)}_${hex.slice(4)}`
 }
 
+// 寄存器分组定义（顺序即展示顺序，参考 Keil 分组）
+const REGISTER_GROUPS = [
+  { id: 'core', label: 'Core', description: '通用寄存器与程序状态' },
+  { id: 'banked', label: 'Banked', description: '双堆栈指针' },
+  { id: 'system', label: 'System', description: '系统控制与屏蔽' },
+  { id: 'fpu', label: 'FPU', description: '浮点状态' },
+]
+
 // ── 寄存器面板（CPU Core：Name / Value / Description） ──────────
 function RegistersPanel({ uid, connected }: { uid: string | null; connected: boolean }) {
   const { ready } = useSessionReady(uid, connected)
@@ -125,6 +133,16 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
   const prevTextsRef = useRef<Map<string, string>>(new Map())
   // 刷新序号：latest-wins，丢弃过期响应（快速连点 Run 时乱序返回）
   const refreshSeqRef = useRef(0)
+  // 分组折叠状态（参考 Peripherals 面板手风琴；默认展开 Core，其余折叠）
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set(['core']))
+  const toggleGroup = useCallback((g: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(g)) next.delete(g)
+      else next.add(g)
+      return next
+    })
+  }, [])
 
   const refresh = useCallback(async () => {
     if (!ready || !uid) {
@@ -188,20 +206,36 @@ function RegistersPanel({ uid, connected }: { uid: string | null; connected: boo
             <span className="border-l border-border px-2 py-1 text-left">Value</span>
             <span className="border-l border-border px-2 py-1 text-left">Description</span>
           </div>
-          {registers.map((r) => (
-            <div key={r.name} className="grid grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-xs hover:bg-muted/30">
-              <span className="min-w-0 truncate px-2 py-1 font-mono">{r.name}</span>
-              <span
-                className={cn(
-                  'min-w-0 truncate border-l border-border px-2 py-1 font-mono',
-                  changed.has(r.name) ? 'bg-yellow-400/30 text-foreground' : 'text-primary'
-                )}
-              >
-                {fmtHex(r.value)}
-              </span>
-              <span className="min-w-0 truncate border-l border-border px-2 py-1 text-muted-foreground" title={r.description}>{r.description}</span>
-            </div>
-          ))}
+          {REGISTER_GROUPS.map((g) => {
+            const groupRegs = registers.filter((r) => r.group === g.id)
+            const open = expandedGroups.has(g.id)
+            return (
+              <div key={g.id}>
+                <GroupRow
+                  open={open}
+                  onToggle={() => toggleGroup(g.id)}
+                  name={g.label}
+                  count={groupRegs.length}
+                  description={g.description}
+                />
+                {open &&
+                  groupRegs.map((r) => (
+                    <div key={r.name} className="grid grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-xs hover:bg-muted/30">
+                      <span className="min-w-0 truncate py-1 pl-6 pr-2 font-mono">{r.name}</span>
+                      <span
+                        className={cn(
+                          'min-w-0 truncate border-l border-border px-2 py-1 font-mono',
+                          changed.has(r.name) ? 'bg-yellow-400/30 text-foreground' : 'text-primary'
+                        )}
+                      >
+                        {fmtHex(r.value)}
+                      </span>
+                      <span className="min-w-0 truncate border-l border-border px-2 py-1 text-muted-foreground" title={r.description}>{r.description}</span>
+                    </div>
+                  ))}
+              </div>
+            )
+          })}
           {registers.length === 0 && (
             <div className="px-2 py-4 text-center text-muted-foreground">暂无数据</div>
           )}
@@ -404,6 +438,21 @@ function PeripheralsPanel({ uid, connected }: { uid: string | null; connected: b
         </div>
       )}
     </div>
+  )
+}
+
+function GroupRow({ open, onToggle, name, count, description }: {
+  open: boolean; onToggle: () => void; name: string; count: number; description?: string
+}) {
+  return (
+    <button onClick={onToggle} className="grid w-full grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-left text-xs hover:bg-muted/30">
+      <span className="flex min-w-0 items-center gap-1 px-2 py-1">
+        <ChevronDownGlyph open={open} />
+        <span className="truncate font-medium text-primary">{name}</span>
+      </span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-muted-foreground">{count}</span>
+      <span className="min-w-0 truncate border-l border-border px-2 py-1 text-[10px] text-muted-foreground" title={description}>{description}</span>
+    </button>
   )
 }
 

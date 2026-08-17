@@ -1008,15 +1008,25 @@ _CORE_REG_DESCRIPTIONS = {
     "primask": "优先级屏蔽寄存器 (PRIMASK)",
     "basepri": "基础优先级寄存器 (BASEPRI)",
     "faultmask": "错误屏蔽寄存器 (FAULTMASK)",
-    "ipsr": "中断程序状态寄存器 (IPSR)",
     "fpscr": "浮点状态与控制寄存器 (FPSCR)",
+}
+
+# 寄存器分组（Registers 面板按组折叠展示，参考 Keil 分组）
+_CORE_REG_GROUP = {
+    "r0": "core", "r1": "core", "r2": "core", "r3": "core", "r4": "core",
+    "r5": "core", "r6": "core", "r7": "core", "r8": "core", "r9": "core",
+    "r10": "core", "r11": "core", "r12": "core",
+    "sp": "core", "lr": "core", "pc": "core", "xpsr": "core",
+    "msp": "banked", "psp": "banked",
+    "control": "system", "primask": "system", "basepri": "system", "faultmask": "system",
+    "fpscr": "fpu",
 }
 
 # 读取顺序（按 ARM 惯例排列）
 _CORE_REG_ORDER = [
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12",
     "sp", "lr", "pc", "xpsr", "msp", "psp",
-    "control", "primask", "basepri", "faultmask", "ipsr", "fpscr",
+    "control", "primask", "basepri", "faultmask", "fpscr",
 ]
 
 
@@ -1045,6 +1055,7 @@ async def zone_registers_core(uid: str):
                 "name": name.upper(),
                 "value": value,
                 "description": _CORE_REG_DESCRIPTIONS.get(name, ""),
+                "group": _CORE_REG_GROUP.get(name, "core"),
             })
         except Exception as e:
             errors.append({"name": name, "error": str(e)})

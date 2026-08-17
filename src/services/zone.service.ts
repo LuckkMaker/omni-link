@@ -89,11 +89,12 @@ export interface Peripheral {
   registers: PeripheralRegister[]
 }
 
-/** 核心寄存器（Name/Value/Description） */
+/** 核心寄存器（Name/Value/Description，group 用于分组折叠展示） */
 export interface CoreRegister {
   name: string
   value: number
   description: string
+  group: string
 }
 
 /** 寄存器读取结果 */
