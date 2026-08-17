@@ -17,7 +17,14 @@ from pydantic import BaseModel
 from typing import Optional
 
 from core.commander_backend import commander_backend
-from core.core_peripherals import read_nvic, set_enable, set_pending
+from core.core_peripherals import (
+    read_nvic,
+    read_scb,
+    set_enable,
+    set_pending,
+    trigger_stir,
+    write_scb_field,
+)
 from core.elf_backend import elf_backend
 from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend, register_session_closed
@@ -59,6 +66,16 @@ class NvicEnableRequest(BaseModel):
 
 class NvicPendingRequest(BaseModel):
     pending: bool
+
+
+class StirTriggerRequest(BaseModel):
+    intid: int
+
+
+class ScbFieldWriteRequest(BaseModel):
+    address: int
+    field: str
+    value: int
 
 
 class ReadMemoryRequest(BaseModel):
@@ -1104,6 +1121,41 @@ async def zone_nvic_pending(uid: str, number: int, req: NvicPendingRequest):
     result = await asyncio.to_thread(set_pending, uid, number, req.pending)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "Set NVIC pending failed"))
+    return result
+
+
+# ── Core Peripherals（System Control and Configuration：SCB） ──────────
+
+@router.get("/probes/{uid}/zone/peripherals/core/scb")
+async def zone_scb(uid: str):
+    """System Control and Configuration：读取 ICSR/VTOR/AIRCR/STIR 寄存器及位域"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    result = await asyncio.to_thread(read_scb, uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read SCB failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/scb/stir")
+async def zone_scb_stir(uid: str, req: StirTriggerRequest):
+    """Software Trigger Interrupt：写 STIR.INTID 触发软件中断（运行态可操作）"""
+    if req.intid < 0:
+        raise HTTPException(status_code=400, detail="Invalid interrupt number")
+    result = await asyncio.to_thread(trigger_stir, uid, req.intid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Trigger STIR failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/scb/field")
+async def zone_scb_field(uid: str, req: ScbFieldWriteRequest):
+    """System Control and Configuration：写入可写 SCB 位域（RMW，VECTKEY 自动处理）"""
+    result = await asyncio.to_thread(
+        write_scb_field, uid, req.address, req.field, req.value
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Write SCB field failed"))
     return result
 
 

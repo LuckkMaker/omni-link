@@ -194,3 +194,189 @@ def _set_nvic_bit(uid, label, number, value, set_ofs, clear_ofs):
     except Exception as e:
         logger.warning(f"Set NVIC {label} failed: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ── System Control and Configuration（SCB 寄存器）──────────────────────────
+SCB_ICSR = 0xE000ED04
+SCB_VTOR = 0xE000ED08
+SCB_AIRCR = 0xE000ED0C
+SCB_STIR = 0xE000EF00
+
+_PRG_GROUPS = [
+    ("7.1", 0), ("6.2", 1), ("5.3", 2), ("4.4", 3),
+    ("3.5", 4), ("2.6", 5), ("1.7", 6), ("0.8", 7),
+]
+
+
+def _scb_field(name, description, bit_offset, bit_width, values=None, access="ro"):
+    d = {
+        "name": name,
+        "description": description,
+        "bit_offset": bit_offset,
+        "bit_width": bit_width,
+        "access": access,  # ro 只读；rw 可读可写；w 写1触发（一般不回读）
+    }
+    if values:
+        d["values"] = [{"name": n, "value": v} for n, v in values]
+    return d
+
+
+# 字段/位域定义参考 ARMv7-M（Cortex-M3/M4）System Control Block，顺序即展示顺序
+# access 标注：只读位按位宽显示值；可写位由前端以复选框/下拉操作。
+_SCB_REGS = [
+    {
+        "name": "SCB->ICSR",
+        "address": SCB_ICSR,
+        "description": "Interrupt Control and State Register",
+        "group": "Interrupt Control and State",
+        "group_desc": "ICSR 中断控制与状态",
+        "fields": [
+            _scb_field("VECTPENDING", "挂起的最高优先级异常的编号", 12, 9),
+            _scb_field("RETTOBASE", "除当前异常外是否有其他活动异常", 11, 1),
+            _scb_field("ISRPREEMPT", "是否存在可抢占当前异常的挂起异常", 24, 1),
+            _scb_field("ISRPENDING", "是否有外部中断处于挂起状态", 23, 1),
+            _scb_field("VECTACTIVE", "当前活动异常的编号", 0, 9),
+        ],
+    },
+    {
+        "name": "SCB->AIRCR",
+        "address": SCB_AIRCR,
+        "description": "Application Interrupt and Reset Control Register",
+        "group": "Application Interrupt and Reset Control",
+        "group_desc": "AIRCR 应用中断与复位控制",
+        "fields": [
+            _scb_field("ENDIANNESS", "数据端序（1=大端/0=小端）", 15, 1),
+            _scb_field("PRIGROUP", "优先级分组（抢占/子优先级）", 8, 3,
+                       values=_PRG_GROUPS, access="rw"),
+            _scb_field("SYSRESETREQ", "请求系统复位（写 1 触发）", 2, 1, access="w"),
+            _scb_field("VECTCLRACTIVE", "清除异常活动状态", 1, 1, access="w"),
+            _scb_field("VECTRESET", "系统复位（调试时，写 1 触发）", 0, 1, access="w"),
+        ],
+    },
+    {
+        "name": "SCB->VTOR",
+        "address": SCB_VTOR,
+        "description": "Vector Table Offset Register",
+        "group": "Vector Table Offset",
+        "group_desc": "VTOR 向量表偏移",
+        "fields": [
+            _scb_field("TBLBASE", "向量表基址所在区域（1=SRAM/0=Flash）", 28, 1, access="rw"),
+            _scb_field("TBLOFF", "向量表在基地址区域的字偏移", 7, 25, access="rw"),
+        ],
+    },
+    {
+        "name": "SCB->STIR",
+        "address": SCB_STIR,
+        "description": "Software Trigger Interrupt Register",
+        "group": "Software Interrupt Trigger",
+        "group_desc": "STIR 软件中断触发",
+        "write_only": True,
+        "fields": [
+            _scb_field("INTID", "待触发的软件中断编号（写触发）", 0, 9, access="w"),
+        ],
+    },
+]
+
+
+def read_scb(uid):
+    """Read SCB registers (ICSR/AIRCR/VTOR/STIR) with read-only values.
+
+    Reading is non-invasive (system AHB space via direct AP read), so it works
+    while the target is running. STIR is write-only: a read failure there only
+    yields value=None, not an overall error. When the op lock is held by another
+    debug operation we return success=True with skipped=True.
+    """
+    session = _get_session(uid)
+    banks = [(r["address"], r) for r in _SCB_REGS]
+    results = {}
+    for addr, _cfg in banks:
+        words, err = _read_words(uid, addr, 1)
+        results[addr] = (words, err)
+        if addr == SCB_ICSR and words is None and err == "busy":
+            return {"success": True, "skipped": True}
+
+    out = []
+    for addr, cfg in banks:
+        words, _err = results[addr]
+        reg = dict(cfg)
+        reg["value"] = words[0] if words is not None else None
+        out.append(reg)
+    return {"success": True, "registers": out}
+
+
+def trigger_stir(uid, intid):
+    """Write software-triggered interrupt (STIR.INTID), works while running."""
+    try:
+        session = _get_session(uid)
+        if intid < 0:
+            return {"success": False, "error": "Invalid interrupt number"}
+        from core.pyocd_backend import backend
+        lock = backend.get_op_lock(uid)
+        if not lock.acquire(blocking=False):
+            return {"success": False, "error": "debug operation in progress"}
+        try:
+            session.target.write32(SCB_STIR, intid & 0x1FF)
+            return {"success": True, "intid": intid}
+        finally:
+            lock.release()
+    except Exception as e:
+        logger.warning(f"Trigger STIR failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def write_scb_field(uid, address, field_name, value):
+    """Read-modify-write a writable SCB bitfield (AIRCR.KEY handled).
+
+    Works while the target is running (SCB sits in the system AHB space, so a
+    single 32-bit AP write is non-invasive). Only fields marked access in
+    ("rw", "w") are writable; writes to read-only fields are rejected.
+
+    AIRCR is a keyed register: writing it requires VECTKEY = 0x05FA in the
+    upper half-word, which we force here irrespective of the value read back.
+    """
+    try:
+        session = _get_session(uid)
+        reg_cfg = next((r for r in _SCB_REGS if r["address"] == address), None)
+        if reg_cfg is None:
+            return {"success": False, "error": f"Unknown SCB register 0x{address:08X}"}
+        field_cfg = next((f for f in reg_cfg["fields"] if f["name"] == field_name), None)
+        if field_cfg is None:
+            return {"success": False, "error": f"Unknown field {field_name}"}
+        if field_cfg["access"] not in ("rw", "w"):
+            return {"success": False, "error": f"{field_name} is read-only"}
+
+        width = field_cfg["bit_width"]
+        offset = field_cfg["bit_offset"]
+        if width >= 32:
+            mask = 0xFFFFFFFF
+        else:
+            mask = ((1 << width) - 1) << offset
+        value = int(value) & ((1 << width) - 1)
+
+        from core.pyocd_backend import backend
+        lock = backend.get_op_lock(uid)
+        if not lock.acquire(blocking=False):
+            return {"success": False, "error": "debug operation in progress"}
+        try:
+            target = session.target
+            if address == SCB_AIRCR:
+                # 读回当前值以便保留其它位域；AIRCR 是 keyed 寄存器，
+                # 高位强制写入 VECTKEY 0x05FA。
+                cur = target.read32(address) & 0x0000FFFF
+                cur &= ~mask
+                new = cur | (value << offset) | (0x05FA << 16)
+            else:
+                cur = target.read32(address)
+                new = (cur & ~mask) | (value << offset)
+            target.write32(address, new)
+            return {
+                "success": True,
+                "address": address,
+                "field": field_name,
+                "value": value,
+            }
+        finally:
+            lock.release()
+    except Exception as e:
+        logger.warning(f"Write SCB field {field_name} failed: {e}")
+        return {"success": False, "error": str(e)}

@@ -114,6 +114,34 @@ export interface NvicIrq {
   priority: number
 }
 
+/** Core Peripheral：SCB 寄存器位域取值（枚举项） */
+export interface ScbFieldValue {
+  name: string
+  value: number
+}
+
+/** Core Peripheral：SCB 寄存器位域 */
+export interface ScbField {
+  name: string
+  description: string
+  bit_offset: number
+  bit_width: number
+  access: 'ro' | 'rw' | 'w'
+  values?: ScbFieldValue[]
+}
+
+/** Core Peripheral：SCB 寄存器（System Control and Configuration 一行） */
+export interface ScbRegister {
+  name: string
+  address: number
+  description: string
+  write_only?: boolean
+  group: string
+  group_desc?: string
+  value: number | null
+  fields: ScbField[]
+}
+
 /** 会话配置 */
 export interface ZoneSession {
   name: string
@@ -696,6 +724,29 @@ export async function zoneSetNvicEnable(uid: string, number: number, enable: boo
 export async function zoneSetNvicPending(uid: string, number: number, pending: boolean): Promise<{ success: boolean }> {
   const client = await api()
   const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/nvic/${number}/pending`, { pending })
+  return data as { success: boolean }
+}
+
+// ── Core Peripherals（System Control and Configuration：SCB） ──
+
+/** 读取 SCB 寄存器（ICSR/VTOR/AIRCR/STIR）+ 位域 */
+export async function zoneReadScb(uid: string): Promise<{ success: boolean; registers: ScbRegister[]; skipped?: boolean }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/peripherals/core/scb`)
+  return data as { success: boolean; registers: ScbRegister[]; skipped?: boolean }
+}
+
+/** 触发软件中断（STIR.INTID，运行态可操作） */
+export async function zoneTriggerStir(uid: string, intid: number): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/scb/stir`, { intid })
+  return data as { success: boolean }
+}
+
+/** 写入可写 SCB 位域（RMW，运行态可操作） */
+export async function zoneWriteScbField(uid: string, address: number, field: string, value: number): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/scb/field`, { address, field, value })
   return data as { success: boolean }
 }
 
