@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Bell, Usb, ChevronDown, Check, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, ArrowDownToLine, ArrowUpFromLine, Activity, AlertCircle, BugPlay, BugOff } from 'lucide-react'
+import { Bell, Usb, ChevronDown, Check, CheckCircle2, AlertTriangle, XCircle, Info, Loader2, Trash2, X, Copy, ArrowDownToLine, ArrowUpFromLine, Activity, BugPlay, BugOff } from 'lucide-react'
 import { useProbeStore, SPEED_OPTIONS, type DebugInterface } from '@/stores/probe.store'
-import { useNotificationStore } from '@/stores/notification.store'
+import { useNotificationStore, type Notification } from '@/stores/notification.store'
 import { useRttStore } from '@/stores/rtt.store'
 import { useMonitorStore } from '@/stores/monitor.store'
 import { useZoneStore } from '@/stores/zone.store'
@@ -19,6 +19,28 @@ const typeConfig = {
 function formatTime(ts: number): string {
   const d = new Date(ts)
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
+}
+
+/** 复制文本到剪贴板（优先 Clipboard API，失败回退 execCommand） */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      return ok
+    } catch {
+      return false
+    }
+  }
 }
 
 /** 下拉选择器（接口/速度） */
@@ -89,6 +111,8 @@ function DropdownSelector({
 function NotificationHistory() {
   const { history, clearHistory, removeFromHistory, setHistoryVisible } = useNotificationStore()
   const ref = useRef<HTMLDivElement>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -98,10 +122,25 @@ function NotificationHistory() {
     return () => document.removeEventListener('mousedown', handler)
   }, [setHistoryVisible])
 
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+  }, [])
+
+  const flashCopied = (id: string) => {
+    setCopiedId(id)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopiedId(null), 1500)
+  }
+
+  const copyOne = async (n: Notification) => {
+    const text = `${n.title}${n.message ? `\n${n.message}` : ''}\n[${formatTime(n.timestamp)}]`
+    if (await copyText(text)) flashCopied(n.id)
+  }
+
   return (
     <div
       ref={ref}
-      className="absolute bottom-full right-0 mb-1 w-96 max-h-[400px] flex flex-col rounded-md border border-border bg-popover text-popover-foreground shadow-xl z-[100]"
+      className="absolute bottom-full right-0 mb-1 w-96 max-h-[400px] flex flex-col rounded-md border border-border bg-popover text-popover-foreground shadow-xl z-[100] select-text"
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-border">
         <span className="text-sm font-medium">通知历史</span>
@@ -136,13 +175,27 @@ function NotificationHistory() {
                   {n.message && <div className="text-xs text-muted-foreground mt-0.5 break-words">{n.message}</div>}
                   <div className="text-[10px] text-muted-foreground/60 mt-0.5">{formatTime(n.timestamp)}</div>
                 </div>
-                <button
-                  onClick={() => removeFromHistory(n.id)}
-                  className="p-0.5 text-muted-foreground/0 group-hover:text-muted-foreground hover:!text-destructive transition-colors shrink-0"
-                  title="删除此通知"
-                >
-                  <X className="size-3" />
-                </button>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    onClick={() => copyOne(n)}
+                    className={cn(
+                      'p-0.5 transition-colors',
+                      copiedId === n.id
+                        ? 'text-green-500'
+                        : 'text-muted-foreground/0 group-hover:text-muted-foreground hover:!text-foreground'
+                    )}
+                    title="复制此通知"
+                  >
+                    {copiedId === n.id ? <Check className="size-3" /> : <Copy className="size-3" />}
+                  </button>
+                  <button
+                    onClick={() => removeFromHistory(n.id)}
+                    className="p-0.5 text-muted-foreground/0 group-hover:text-muted-foreground hover:!text-destructive transition-colors"
+                    title="删除此通知"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
               </div>
             )
           })
@@ -191,7 +244,6 @@ export function StatusBar() {
   const zoneState = useZoneStore((s) => s.state)
   const zonePc = useZoneStore((s) => s.pc)
   const zoneBusy = useZoneStore((s) => s.busy)
-  const zoneError = useZoneStore((s) => s.error)
   const zoneSession = useZoneStore((s) => s.sessionStatus)
   // 基于会话生命周期描述状态，区分「会话未启动」与「目标已连接」：
   // connecting/busy → 连接中；active → 目标 halted/running；idle → 无会话
@@ -290,12 +342,6 @@ export function StatusBar() {
                 <span className="text-white/80 font-mono">
                   PC=0x{(zonePc ?? 0).toString(16).toUpperCase().padStart(8, '0')}
                 </span>
-              </div>
-            )}
-            {zoneError && (
-              <div className="flex items-center gap-1 px-2" title={zoneError}>
-                <AlertCircle className="size-3 text-red-400" />
-                <span className="max-w-48 truncate text-red-400">{zoneError}</span>
               </div>
             )}
           </>
