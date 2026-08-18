@@ -406,14 +406,6 @@ function CoreRegSection({ uid, connected, title, subtitle, fetchRegisters }: Reg
       return next
     })
   }, [])
-  const toggleGroup = useCallback((group: string) => {
-    setExpandedGroups((prev) => {
-      const next = new Set(prev)
-      if (next.has(group)) next.delete(group)
-      else next.add(group)
-      return next
-    })
-  }, [])
 
   // 写可写位域（RMW，运行态可操作）：写成功后强制刷新以回读更新值与高亮
   const doFieldWrite = useCallback(
@@ -477,23 +469,14 @@ function CoreRegSection({ uid, connected, title, subtitle, fetchRegisters }: Reg
               <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">无寄存器</div>
             ) : (
               <div className="min-h-0 flex-1 overflow-auto">
-                {groupedRegisters.map((grp) => {
-                  const grpOpen = expandedGroups.has(grp.key)
-                  return (
+                {groupedRegisters.map((grp) => (
                     <div key={grp.key}>
-                      <button
-                        onClick={() => toggleGroup(grp.key)}
-                        className="grid w-full grid-cols-[minmax(0,1fr)_minmax(80px,0.7fr)_minmax(0,1fr)] border-b border-border text-left text-xs hover:bg-muted/30"
-                      >
-                        <span className="flex min-w-0 items-center gap-1 px-2 py-1">
-                          <ChevronDown className={cn('size-3.5 shrink-0 text-muted-foreground', !grpOpen && '-rotate-90')} />
-                          <span className="truncate font-medium text-primary">{grp.label}</span>
-                        </span>
-                        <span className="min-w-0 truncate border-l border-border px-2 py-1 font-mono text-muted-foreground">{grp.registers[0]?.name}</span>
-                        <span className="min-w-0 truncate border-l border-border px-2 py-1 text-[10px] text-muted-foreground" title={grp.desc}>{grp.desc}</span>
-                      </button>
-                      {grpOpen &&
-                        grp.registers.map((reg) => {
+                      {/* 分组标题：占一整行，中文解释紧随其后，不分隔 */}
+                      <div className="flex w-full items-baseline gap-2 border-b border-border bg-muted/20 px-2 py-1 text-xs">
+                        <span className="shrink-0 text-foreground" title={grp.label}>{grp.label}</span>
+                        <span className="min-w-0 truncate text-[10px] text-muted-foreground" title={grp.desc}>{grp.desc}</span>
+                      </div>
+                      {grp.registers.map((reg) => {
                           const regOpen = expandedRegs.has(reg.address)
                           return (
                             <div key={reg.address}>
@@ -533,8 +516,7 @@ function CoreRegSection({ uid, connected, title, subtitle, fetchRegisters }: Reg
                           )
                         })}
                     </div>
-                  )
-                })}
+                  ))}
               </div>
             )}
           </div>
