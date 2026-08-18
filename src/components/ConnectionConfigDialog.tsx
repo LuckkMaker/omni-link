@@ -275,7 +275,14 @@ export function ConnectionConfigDialog({
               <SelectContent>
                 {probes.map((probe) => (
                   <SelectItem key={probe.uid} value={probe.uid}>
-                    {formatProbeName(probe.product, probe.vendor)}
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate">{formatProbeName(probe.product, probe.vendor)}</span>
+                      {probe.serial && (
+                        <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                          {probe.serial}
+                        </span>
+                      )}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
