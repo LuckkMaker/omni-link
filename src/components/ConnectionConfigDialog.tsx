@@ -35,6 +35,22 @@ function formatProbeName(product: string, vendor: string): string {
   return 'DAPLink'
 }
 
+/** 超长序列号中间加省略号：既能一眼区分同型号多设备，又不至于把名称挤没（保留头尾便于核对） */
+function shortenSerial(serial: string, max = 13, keep = 4): string {
+  if (!serial) return ''
+  if (serial.length <= max) return serial
+  return `${serial.slice(0, keep)}…${serial.slice(-keep)}`
+}
+
+/** 由设备显示名推导 J-Link 设备查询前缀（去掉逻辑密度的尾缀，如 STM32F407xG → STM32F407） */
+function deriveJlinkPrefix(displayName: string): string {
+  if (!displayName) return ''
+  // ST 约定：'x' + 尾随字母/数字 表示逻辑型号（如 xG / x8），J-Link 设备库按家族基名前缀检索
+  const m = displayName.match(/^(.*)x([A-Za-z0-9]*)$/)
+  if (m && m[1].length >= 3) return m[1]
+  return ''
+}
+
 /** 字节 → 可读容量（J-Link 设备的 Flash/RAM 以字节计） */
 function fmtBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`
@@ -126,8 +142,11 @@ export function ConnectionConfigDialog({
 
   const loadJlinkCandidates = async () => {
     const dev = getDeviceInfo(pendingTarget ?? '')
-    // 前缀优先取内置设备的 jlink_search（如 STM32F407），否则用当前输入值兜底
-    const search = dev?.jlink_search || pendingJlinkDevice?.trim()
+    // 优先取内置设备的 jlink_search 锚点（如 STM32F407）；
+    // 该字段缺失时（旧版设备数据/未标 J-Link 元数据的型号）由显示名推导前缀（STM32F407xG → STM32F407），
+    // 最后才用当前输入值当作用户手写的前缀兜底
+    const search =
+      dev?.jlink_search || deriveJlinkPrefix(dev?.display_name ?? '') || pendingJlinkDevice?.trim()
     if (!search) {
       setJlinkCandidates([])
       return
@@ -136,7 +155,8 @@ export function ConnectionConfigDialog({
     try {
       const list = await listJLinkDevices({
         search,
-        // 用目标设备的容量精确过滤（如 1024KB → IG/VG/ZG）；仅当锚点来自设备时适用
+        // 仅当锚点来自设备自带 jlink_search（容量可信）时按 Flash 精确过滤（如 1024KB → IG/VG/ZG）；
+        // 推导/手输前缀时不过滤，让用户看到该家族所有容量变体（IG/VG/ZG…）自由选择
         flashKb: dev?.jlink_search ? dev.flash_size : undefined,
       })
       setJlinkCandidates(list)
@@ -331,10 +351,16 @@ export function ConnectionConfigDialog({
                 {probes.map((probe) => (
                   <SelectItem key={probe.uid} value={probe.uid}>
                     <span className="flex min-w-0 items-center gap-2">
-                      <span className="truncate">{formatProbeName(probe.product, probe.vendor)}</span>
+                      {/* 名称优先占满可用空间，超长时省略；SN 被压缩成固定短格式，二者互不挤压 */}
+                      <span className="min-w-0 flex-1 truncate font-medium">
+                        {formatProbeName(probe.product, probe.vendor)}
+                      </span>
                       {probe.serial && (
-                        <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                          {probe.serial}
+                        <span
+                          className="shrink-0 font-mono text-xs text-muted-foreground"
+                          title={probe.serial}
+                        >
+                          {shortenSerial(probe.serial)}
                         </span>
                       )}
                     </span>
@@ -393,12 +419,12 @@ export function ConnectionConfigDialog({
           {/* J-Link 设备名（仅 J-Link 探针）：必须在 J-Link 上建立目标连接才能调试 */}
           {isJlink && (
             <div className="min-w-0 space-y-2">
-              <span className="text-sm font-medium">J-Link 设备名</span>
+              <span className="text-sm font-medium">JLink 设备名</span>
               <div className="flex items-center gap-2">
                 <Input
                   value={pendingJlinkDevice ?? ''}
                   onChange={(e) => setPendingJlinkDevice(e.target.value)}
-                  placeholder="如 STM32F407IG"
+                  placeholder="输入 JLink 设备名"
                   className="h-9 min-w-0 flex-1 font-mono text-sm"
                 />
                 <DropdownMenu
@@ -422,7 +448,7 @@ export function ConnectionConfigDialog({
                     {jlinkLoading ? (
                       <DropdownMenuItem disabled>查询中…</DropdownMenuItem>
                     ) : jlinkCandidates.length === 0 ? (
-                      <DropdownMenuItem disabled>无候选（需先选择目标设备或填写前缀）</DropdownMenuItem>
+                      <DropdownMenuItem disabled>无匹配的 J-Link 设备（可修改前缀或手动输入后重试）</DropdownMenuItem>
                     ) : (
                       jlinkCandidates.map((item) => (
                         <DropdownMenuItem
@@ -442,7 +468,7 @@ export function ConnectionConfigDialog({
                 </DropdownMenu>
               </div>
               <p className="text-[10px] leading-relaxed text-muted-foreground">
-                J-Link 必须指定设备名（SEGGER 数据库名称）才能建立目标连接，可用右侧按钮从 J-Link 查询候选（内置 STM32F407xG 会自动匹配 IG/VG/ZG）
+                JLink 须指定设备名才能建立目标连接，可用右侧按钮选择候选项
               </p>
             </div>
           )}
