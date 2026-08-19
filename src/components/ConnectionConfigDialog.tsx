@@ -448,7 +448,7 @@ export function ConnectionConfigDialog({
                     {jlinkLoading ? (
                       <DropdownMenuItem disabled>查询中…</DropdownMenuItem>
                     ) : jlinkCandidates.length === 0 ? (
-                      <DropdownMenuItem disabled>无匹配的 J-Link 设备（可修改前缀或手动输入后重试）</DropdownMenuItem>
+                      <DropdownMenuItem disabled>无匹配的设备名</DropdownMenuItem>
                     ) : (
                       jlinkCandidates.map((item) => (
                         <DropdownMenuItem

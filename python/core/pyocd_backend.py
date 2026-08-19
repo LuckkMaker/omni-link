@@ -57,6 +57,9 @@ class PyOCDBackend(BackendInterface):
     def __init__(self):
         self._sessions: dict[str, ProbeSession] = {}
         self._lock = threading.Lock()
+        # 按探针 UID 记录“关闭中”事件：断开时在后台线程关闭 session，
+        # 供下一次连接等待旧 J-Link 句柄真正释放后再 open，避免并发抢占同一仿真器。
+        self._close_events: dict[str, threading.Event] = {}
         self._known_probe_uids: set[str] = set()
         self._pending_target: str | None = None  # 连接时使用的目标型号
         self._probe_info_cache: dict[str, ProbeInfo] = {}  # 缓存探针初始信息（避免连接后名称变化）
@@ -162,6 +165,11 @@ class PyOCDBackend(BackendInterface):
                 表现为"连不上"，实际是 J-Link 根本没做设备连接）。
         """
         from pyocd.core.helpers import ConnectHelper
+
+        # 等上一次断开的旧句柄真正释放后再重建连接。
+        # 否则 J-Link 等探针会因旧 session.close() 尚未完成（在后台线程）而并发抢占
+        # 同一仿真器，新 open() 报 "No emulator with serial number ... found"。
+        self._wait_for_close(probe_uid)
 
         with self._lock:
             existing = self._sessions.get(probe_uid)
@@ -399,10 +407,16 @@ class PyOCDBackend(BackendInterface):
             event_manager.emit("probe.disconnected", {"uid": probe_uid, "reason": "user"})
 
             # session.close() 耗时取决于底层 USB 通信，可能数秒。
-            # 放入后台线程执行以避免阻塞前端。
+            # 放入后台线程执行以避免阻塞前端，同时登记一个"关闭中"事件，
+            # 供下一次连接（connect）等待旧句柄真正释放后再 open，
+            # 避免 J-Link 等探针跑到一半就重建连接导致 "No emulator found"。
             import threading
             session = session_info.session
-            t = threading.Thread(target=self._close_session, args=(probe_uid, session), daemon=True)
+            close_event = threading.Event()
+            with self._lock:
+                self._close_events[probe_uid] = close_event
+            t = threading.Thread(target=self._close_session,
+                                 args=(probe_uid, session, close_event), daemon=True)
             t.start()
 
         return True
@@ -434,19 +448,68 @@ class PyOCDBackend(BackendInterface):
             except Exception:
                 pass  # 单个回调失败不影响其余
 
-    def _close_session(self, uid, session):
+    def _close_session(self, uid, session, close_event=None):
         """后台关闭 pyOCD session，避免 blocking 前端"""
         try:
-            # 断开时恢复目标运行（resume_on_disconnect=True），让芯片退出会话后 free-run，
-            # 避免芯片停在 halt/低功耗导致下次连接需手动复位。resume() 在本后台线程执行，不阻塞前端。
-            session.options.set('resume_on_disconnect', True)
+            # 断开时恢复目标运行，让芯片退出会话后 free-run，避免停在 halt/低功耗导致下次连接需手动复位。
+            # 刻意不走 board.uninit()/target.disconnect()：它们内部会调 dp.power_down_debug()，
+            # 而该步在本目标（J-Link + STM32F407 等）不响应掉电 ACK，会死等 5 秒超时才放弃，
+            # 直接拖慢“断开→立即重连”。掉电对本目标并非必需，跳过即可。
+            target = getattr(session, 'target', None)
+            if target is not None:
+                cores = list(getattr(target, 'cores', None) or [target.selected_core])
+                for core in cores:
+                    try:
+                        # resume=True：恢复执行 + 清调试控制(DHCSR/DEMCR)，亚秒级
+                        core.disconnect(resume=True)
+                    except Exception:
+                        pass
             # 清除目标上所有硬件断点（FPB），避免 stop session 后芯片残留断点
             self._clear_hw_breakpoints(session)
-            session.close()
-        except Exception:
-            pass  # 后台清理，忽略超时等异常
+            probe = getattr(session, 'probe', None) or getattr(session, '_probe', None)
+            if probe is not None and probe.is_open and probe.wire_protocol is not None:
+                try:
+                    probe.disconnect()
+                except Exception:
+                    pass
+            if probe is not None and probe.is_open:
+                try:
+                    probe.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            event_manager.log("warning", f"close session {uid[:16]} exception: {e}")
         finally:
+            # 无论成败都通知旧句柄已释放，并清掉"关闭中"登记，允许下一次连接 proceed
             self._notify_session_closed(uid)
+            with self._lock:
+                # 仅当仍登记本事件的 event 时移除，避免误删新一次的关闭登记
+                if self._close_events.get(uid) is close_event:
+                    self._close_events.pop(uid, None)
+            if close_event is not None:
+                try:
+                    close_event.set()
+                except Exception:
+                    pass
+
+    def _wait_for_close(self, probe_uid: str, timeout: float = 8.0):
+        """等待该探针上一次断开的后台关闭完成（如仍在进行），避免重建连接时抢占旧句柄。
+
+        仅等待已登记的 close_event；无登记或已结束则立即返回。超时后不再等待，
+        由 connect 的 open 超时兜底（J-Link DLL 会因旧句柄未释放而报错）。
+        """
+        with self._lock:
+            ev = self._close_events.get(probe_uid)
+        if ev is None:
+            return
+        try:
+            ev.wait(timeout=timeout)
+        except Exception:
+            pass
+        # 已不需要该登记，清理（connect 后续 self._lock 保护的新登记不受影响）
+        with self._lock:
+            if self._close_events.get(probe_uid) is ev:
+                self._close_events.pop(probe_uid, None)
 
     def get_state(self, probe_uid: str) -> ProbeState:
         """获取探针连接状态"""
