@@ -10,6 +10,8 @@
     <flash_base_address>0x08000000</flash_base_address>
     <ram_base_address>0x20000000</ram_base_address>
     <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F407IG</jlink_device>
+    <jlink_search>STM32F407</jlink_search>
     <flash_regions>
       <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x400" is_boot_memory="true"/>
       <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x400" is_boot_memory="false"/>

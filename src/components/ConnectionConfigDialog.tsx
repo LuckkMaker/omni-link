@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { RefreshCw, Cpu, FileCode2 } from 'lucide-react'
+import { RefreshCw, Cpu, FileCode2, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -16,7 +17,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { TargetDeviceDialog } from '@/components/TargetDeviceDialog'
+import { listJLinkDevices } from '@/services/device.service'
+import type { JLinkDeviceInfo } from '@shared/types'
 import { useProbeStore, SPEED_OPTIONS, CONNECT_MODE_OPTIONS } from '@/stores/probe.store'
 import { useBackendStatus } from '@/hooks/useBackendStatus'
 
@@ -24,6 +33,12 @@ function formatProbeName(product: string, vendor: string): string {
   if (product && product !== 'Unknown') return product
   if (vendor && vendor !== 'Unknown') return vendor
   return 'DAPLink'
+}
+
+/** 字节 → 可读容量（J-Link 设备的 Flash/RAM 以字节计） */
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
 }
 
 /** localStorage key：记录上一次选择的 ELF 路径，方便下次启动会话时快速确认 */
@@ -78,6 +93,7 @@ export function ConnectionConfigDialog({
     pendingInterface,
     pendingSpeed,
     pendingConnectMode,
+    pendingJlinkDevice,
     fetchProbes,
     fetchDevices,
     selectProbe,
@@ -86,6 +102,7 @@ export function ConnectionConfigDialog({
     setPendingInterface,
     setPendingSpeed,
     setPendingConnectMode,
+    setPendingJlinkDevice,
     getSelectedProbe,
     getSelectedTarget,
     getDeviceInfo,
@@ -95,6 +112,40 @@ export function ConnectionConfigDialog({
   const selectedProbe = getSelectedProbe()
   const target = getSelectedTarget()
   const isConnected = selectedProbe?.state === 'connected'
+
+  // J-Link 探针（product 或 vendor 命中 SEGGER）：需要填写 J-Link 设备名才能建立目标连接
+  const isJlink =
+    /j[- ]?link|segger/i.test(
+      `${selectedProbe?.product ?? ''} ${selectedProbe?.vendor ?? ''}`
+    )
+
+  // J-Link 候选设备下拉状态：从 J-Link 设备库动态查询（按 jlink_search 前缀 / Flash 容量）
+  const [jlinkCandidates, setJlinkCandidates] = useState<JLinkDeviceInfo[]>([])
+  const [jlinkLoading, setJlinkLoading] = useState(false)
+  const [jlinkPopupOpen, setJlinkPopupOpen] = useState(false)
+
+  const loadJlinkCandidates = async () => {
+    const dev = getDeviceInfo(pendingTarget ?? '')
+    // 前缀优先取内置设备的 jlink_search（如 STM32F407），否则用当前输入值兜底
+    const search = dev?.jlink_search || pendingJlinkDevice?.trim()
+    if (!search) {
+      setJlinkCandidates([])
+      return
+    }
+    setJlinkLoading(true)
+    try {
+      const list = await listJLinkDevices({
+        search,
+        // 用目标设备的容量精确过滤（如 1024KB → IG/VG/ZG）；仅当锚点来自设备时适用
+        flashKb: dev?.jlink_search ? dev.flash_size : undefined,
+      })
+      setJlinkCandidates(list)
+    } catch {
+      setJlinkCandidates([])
+    } finally {
+      setJlinkLoading(false)
+    }
+  }
 
   const showElf = mode === 'start'
 
@@ -203,6 +254,10 @@ export function ConnectionConfigDialog({
     }
     if (!pendingTarget) {
       setErrorMsg('请先选择目标设备')
+      return
+    }
+    if (isJlink && !pendingJlinkDevice) {
+      setProbeError('请填写 J-Link 设备名')
       return
     }
     onOpenChange(false)
@@ -335,6 +390,63 @@ export function ConnectionConfigDialog({
             </div>
           </div>
 
+          {/* J-Link 设备名（仅 J-Link 探针）：必须在 J-Link 上建立目标连接才能调试 */}
+          {isJlink && (
+            <div className="min-w-0 space-y-2">
+              <span className="text-sm font-medium">J-Link 设备名</span>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={pendingJlinkDevice ?? ''}
+                  onChange={(e) => setPendingJlinkDevice(e.target.value)}
+                  placeholder="如 STM32F407IG"
+                  className="h-9 min-w-0 flex-1 font-mono text-sm"
+                />
+                <DropdownMenu
+                  open={jlinkPopupOpen}
+                  onOpenChange={(o) => {
+                    setJlinkPopupOpen(o)
+                    if (o) void loadJlinkCandidates()
+                  }}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-9 w-9 shrink-0"
+                      title="从 J-Link 查询候选设备"
+                    >
+                      <ChevronDown className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="z-50 min-w-64">
+                    {jlinkLoading ? (
+                      <DropdownMenuItem disabled>查询中…</DropdownMenuItem>
+                    ) : jlinkCandidates.length === 0 ? (
+                      <DropdownMenuItem disabled>无候选（需先选择目标设备或填写前缀）</DropdownMenuItem>
+                    ) : (
+                      jlinkCandidates.map((item) => (
+                        <DropdownMenuItem
+                          key={item.name}
+                          className="flex items-center justify-between gap-4"
+                          onSelect={() => {
+                            setPendingJlinkDevice(item.name)
+                            setJlinkPopupOpen(false)
+                          }}
+                        >
+                          <span className="font-mono text-sm">{item.name}</span>
+                          <span className="text-xs text-muted-foreground">{fmtBytes(item.flash_size)}</span>
+                        </DropdownMenuItem>
+                      ))
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                J-Link 必须指定设备名（SEGGER 数据库名称）才能建立目标连接，可用右侧按钮从 J-Link 查询候选（内置 STM32F407xG 会自动匹配 IG/VG/ZG）
+              </p>
+            </div>
+          )}
+
           {/* 连接模式 */}
           <div className="min-w-0 space-y-2">
             <div className="flex items-center gap-1">
@@ -460,7 +572,12 @@ export function ConnectionConfigDialog({
         onOpenChange={setDeviceDialogOpen}
         deviceList={deviceList}
         currentPartNumber={pendingTarget}
-        onConfirm={(partNumber) => setPendingTarget(partNumber)}
+        onConfirm={(partNumber) => {
+          setPendingTarget(partNumber)
+          // 选中内置型号时，自动带出其自带的 J-Link 设备名（若探针为 J-Link 则输入框自动就位）
+          const dev = deviceList.find((dd) => dd.part_number === partNumber)
+          if (dev?.jlink_device) setPendingJlinkDevice(dev.jlink_device)
+        }}
       />
     </>
   )

@@ -11,6 +11,20 @@ export function formatSize(kb: number): string {
   return `${kb} KB`
 }
 
+/** 设备来源的展示标签与配色 */
+const SOURCE_META: Record<DeviceInfo['source'], { label: string; cls: string }> = {
+  builtin: { label: '内置', cls: 'text-sky-700 bg-sky-100' },
+  pack: { label: 'Pack', cls: 'text-muted-foreground bg-muted' },
+  flm: { label: 'FLM', cls: 'text-violet-700 bg-violet-100' },
+}
+
+const SOURCE_FILTER_OPTIONS: { value: '' | DeviceInfo['source']; label: string }[] = [
+  { value: '', label: '全部' },
+  { value: 'builtin', label: '内置' },
+  { value: 'pack', label: 'Pack' },
+  { value: 'flm', label: 'FLM' },
+]
+
 /** 列筛选输入框 */
 function ColumnFilter({
   value,
@@ -28,6 +42,30 @@ function ColumnFilter({
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => e.stopPropagation()}
     />
+  )
+}
+
+/** 来源筛选下拉 */
+function SourceFilter({
+  value,
+  onChange,
+}: {
+  value: '' | DeviceInfo['source']
+  onChange: (v: '' | DeviceInfo['source']) => void
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange((e.target.value || '') as '' | DeviceInfo['source'])}
+      onClick={(e) => e.stopPropagation()}
+      className="h-7 w-full rounded-md border border-input bg-background px-1 text-xs text-center"
+    >
+      {SOURCE_FILTER_OPTIONS.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   )
 }
 
@@ -63,10 +101,18 @@ export function DeviceTable({
   showFilters = true,
   showCount = true,
 }: DeviceTableProps) {
-  const [filters, setFilters] = useState({
+  const [filters, setFilters] = useState<{
+    vendor: string
+    device: string
+    core: string
+    source: '' | DeviceInfo['source']
+    flash: string
+    ram: string
+  }>({
     vendor: '',
     device: '',
     core: '',
+    source: '',
     flash: '',
     ram: '',
   })
@@ -80,6 +126,7 @@ export function DeviceTable({
       if (filters.vendor && !d.vendor.toLowerCase().includes(filters.vendor.toLowerCase())) return false
       if (filters.device && !d.display_name.toLowerCase().includes(filters.device.toLowerCase())) return false
       if (filters.core && !d.core.toLowerCase().includes(filters.core.toLowerCase())) return false
+      if (filters.source && d.source !== filters.source) return false
       if (filters.flash && !formatSize(d.flash_size).toLowerCase().includes(filters.flash.toLowerCase())) return false
       const ramKb = totalRamKb(d.ram_regions, d.ram_size)
       if (filters.ram && !formatSize(ramKb).toLowerCase().includes(filters.ram.toLowerCase())) return false
@@ -94,10 +141,11 @@ export function DeviceTable({
           <thead className="sticky top-0 z-10">
             {/* 表头行 — 用 div 包裹确保不透明背景覆盖 */}
             <tr className="bg-muted">
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[18%]">制造商</th>
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[26%]">设备</th>
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[18%]">内核</th>
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[19%]">Flash</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[16%]">制造商</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[22%]">设备</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[12%]">来源</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[13%]">内核</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[18%]">Flash</th>
               <th className="border-b border-border px-2 py-2 text-center font-medium w-[19%]">RAM</th>
             </tr>
             {/* 筛选输入行 */}
@@ -108,6 +156,9 @@ export function DeviceTable({
                 </th>
                 <th className="border-b border-r border-border px-1.5 py-1">
                   <ColumnFilter value={filters.device} onChange={(v) => updateFilter('device', v)} />
+                </th>
+                <th className="border-b border-r border-border px-1.5 py-1">
+                  <SourceFilter value={filters.source} onChange={(v) => updateFilter('source', v)} />
                 </th>
                 <th className="border-b border-r border-border px-1.5 py-1">
                   <ColumnFilter value={filters.core} onChange={(v) => updateFilter('core', v)} />
@@ -124,42 +175,55 @@ export function DeviceTable({
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
                   <Loader2 className="mx-auto size-4 animate-spin" />
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
                   无匹配设备
                 </td>
               </tr>
             ) : (
-              filtered.map((d) => (
-                <tr
-                  key={d.part_number}
-                  onClick={selectable && onSelect ? () => onSelect(d.part_number) : undefined}
-                  onDoubleClick={selectable && onConfirm ? () => onConfirm(d.part_number) : undefined}
-                  className={cn(
-                    'border-b border-border/50 transition-colors',
-                    selectable && 'cursor-pointer',
-                    selectable && selectedPartNumber === d.part_number
-                      ? 'bg-primary/20'
-                      : 'hover:bg-muted/30'
-                  )}
-                >
-                  <td className="border-r border-border/50 px-3 py-2 text-center">{d.vendor}</td>
-                  <td className="border-r border-border/50 px-3 py-2 text-center font-medium">{d.display_name}</td>
-                  <td className="border-r border-border/50 px-3 py-2 text-center text-muted-foreground">{d.core}</td>
-                  <td className="border-r border-border/50 px-3 py-2 text-center tabular-nums">{formatSize(d.flash_size)}</td>
-                  <td
-                    className="px-3 py-2 text-center tabular-nums"
-                    title={ramRegionsTooltip(d.ram_regions)}
+              filtered.map((d) => {
+                const src = SOURCE_META[d.source] ?? SOURCE_META.pack
+                return (
+                  <tr
+                    key={d.part_number}
+                    onClick={selectable && onSelect ? () => onSelect(d.part_number) : undefined}
+                    onDoubleClick={selectable && onConfirm ? () => onConfirm(d.part_number) : undefined}
+                    className={cn(
+                      'border-b border-border/50 transition-colors',
+                      selectable && 'cursor-pointer',
+                      selectable && selectedPartNumber === d.part_number
+                        ? 'bg-primary/20'
+                        : 'hover:bg-muted/30'
+                    )}
                   >
-                    {formatSize(totalRamKb(d.ram_regions, d.ram_size))}
-                  </td>
-                </tr>
-              ))
+                    <td className="border-r border-border/50 px-3 py-2 text-center">{d.vendor}</td>
+                    <td className="border-r border-border/50 px-3 py-2 text-center font-medium">{d.display_name}</td>
+                    <td className="border-r border-border/50 px-3 py-2 text-center">
+                      <span
+                        className={cn(
+                          'inline-block rounded-full px-2 py-0.5 text-[10px] leading-none',
+                          src.cls
+                        )}
+                      >
+                        {src.label}
+                      </span>
+                    </td>
+                    <td className="border-r border-border/50 px-3 py-2 text-center text-muted-foreground">{d.core}</td>
+                    <td className="border-r border-border/50 px-3 py-2 text-center tabular-nums">{formatSize(d.flash_size)}</td>
+                    <td
+                      className="px-3 py-2 text-center tabular-nums"
+                      title={ramRegionsTooltip(d.ram_regions)}
+                    >
+                      {formatSize(totalRamKb(d.ram_regions, d.ram_size))}
+                    </td>
+                  </tr>
+                )
+              })
             )}
           </tbody>
         </table>

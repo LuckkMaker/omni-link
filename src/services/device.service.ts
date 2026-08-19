@@ -1,5 +1,5 @@
 import { api } from './api'
-import type { DeviceInfo, CustomDeviceCreate, SourceSummary } from '@shared/types'
+import type { DeviceInfo, CustomDeviceCreate, SourceSummary, JLinkDeviceInfo } from '@shared/types'
 
 /** 获取完整设备目录（含可用状态） */
 export async function listDevices(): Promise<DeviceInfo[]> {
@@ -41,4 +41,17 @@ export async function reimportDevices(): Promise<number> {
   const client = await api()
   const { data } = await client.post('/api/devices/reimport')
   return data.imported as number
+}
+
+/** 从 J-Link 设备库动态查询候选设备（按前缀/Flash 容量过滤） */
+export async function listJLinkDevices(opts?: {
+  search?: string
+  flashKb?: number
+}): Promise<JLinkDeviceInfo[]> {
+  const client = await api()
+  const params = new URLSearchParams()
+  if (opts?.search) params.set('search', opts.search)
+  if (opts?.flashKb != null) params.set('flash_kb', String(opts.flashKb))
+  const { data } = await client.get(`/api/probes/jlink/devices?${params.toString()}`)
+  return data.devices as JLinkDeviceInfo[]
 }

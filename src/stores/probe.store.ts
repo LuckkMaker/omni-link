@@ -91,6 +91,8 @@ interface ProbeStore {
   pendingSpeed: number
   /** 连接前选择的连接模式 */
   pendingConnectMode: ConnectMode
+  /** J-Link 目标设备名（前端 J-Link 输入框填写，如 G32F463X8） */
+  pendingJlinkDevice: string | null
   /** Flash 配置：选中的扇区索引集合（确定后保存） */
   selectedSectorIndices: Set<number>
 
@@ -116,6 +118,7 @@ interface ProbeStore {
   setPendingInterface: (iface: DebugInterface) => void
   setPendingSpeed: (speed: number) => void
   setPendingConnectMode: (mode: ConnectMode) => void
+  setPendingJlinkDevice: (device: string) => void
   /** 保存 Flash 配置中选中的扇区索引 */
   setSelectedSectorIndices: (indices: Set<number>) => void
   /** 连接仿真器 */
@@ -151,6 +154,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   pendingInterface: 'swd',
   pendingSpeed: 1_000_000,
   pendingConnectMode: 'halt',
+  pendingJlinkDevice: null,
   selectedSectorIndices: new Set(),
 
   // ── 派生获取器 ────────────────────────
@@ -216,10 +220,11 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   setPendingInterface: (iface) => set({ pendingInterface: iface }),
   setPendingSpeed: (speed) => set({ pendingSpeed: speed }),
   setPendingConnectMode: (mode) => set({ pendingConnectMode: mode }),
+  setPendingJlinkDevice: (device) => set({ pendingJlinkDevice: device.trim() || null }),
   setSelectedSectorIndices: (indices) => set({ selectedSectorIndices: new Set(indices) }),
 
   connectProbe: async (uid) => {
-    const { pendingTarget, pendingInterface, pendingSpeed, pendingConnectMode } = get()
+    const { pendingTarget, pendingInterface, pendingSpeed, pendingConnectMode, pendingJlinkDevice } = get()
     set({ connecting: true, error: null })
     // 先将状态标记为 connecting
     set((state) => ({
@@ -233,6 +238,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
         interface: pendingInterface,
         speed: pendingSpeed,
         connect_mode: pendingConnectMode,
+        jlink_device: pendingJlinkDevice ?? undefined,
       })
       // 连接成功，更新仿真器状态和目标信息
       set((state) => ({

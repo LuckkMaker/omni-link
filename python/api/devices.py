@@ -41,6 +41,9 @@ class DeviceCreate(BaseModel):
     ram_size: int  # KB
     flash_base_address: str
     ram_base_address: str
+    device_id_address: str = "0xE0042000"
+    jlink_device: str | None = None
+    jlink_search: str | None = None
     flash_regions: list[FlashRegionCreate] = Field(default_factory=list)
     ram_regions: list[RamRegionCreate] = Field(default_factory=list)
 

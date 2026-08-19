@@ -140,6 +140,10 @@ def _device_dict_to_element(device: dict, parent: ET.Element) -> ET.Element:
     ET.SubElement(dev_elem, "flash_base_address").text = device.get("flash_base_address", "0x00000000")
     ET.SubElement(dev_elem, "ram_base_address").text = device.get("ram_base_address", "0x20000000")
     ET.SubElement(dev_elem, "device_id_address").text = device.get("device_id_address", "0xE0042000")
+    if device.get("jlink_device"):
+        ET.SubElement(dev_elem, "jlink_device").text = device["jlink_device"]
+    if device.get("jlink_search"):
+        ET.SubElement(dev_elem, "jlink_search").text = device["jlink_search"]
 
     regions_elem = ET.SubElement(dev_elem, "flash_regions")
     for r in device.get("flash_regions", []):
@@ -197,6 +201,12 @@ def _element_to_device_dict(elem: ET.Element) -> dict:
         "ram_base_address": _get_text(elem, "ram_base_address", "0x20000000"),
         "device_id_address": _get_text(elem, "device_id_address", "0xE0042000"),
     }
+    jlink_device = _get_text(elem, "jlink_device", "")
+    if jlink_device:
+        device["jlink_device"] = jlink_device
+    jlink_search = _get_text(elem, "jlink_search", "")
+    if jlink_search:
+        device["jlink_search"] = jlink_search
 
     if elem.get("pack"):
         device["pack"] = elem.get("pack")

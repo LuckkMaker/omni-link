@@ -28,6 +28,8 @@ export async function connectProbe(
     connect_mode?: ConnectMode
     /** 为 True 时即使已连接也按新 connect_mode 强制重连 */
     force?: boolean
+    /** J-Link 目标设备名（如 G32F463X8）：J-Link 探针必须设置才能建立目标连接 */
+    jlink_device?: string
   }
 ): Promise<{ connected: boolean; uid: string; target: TargetInfo | null }> {
   const client = await api()

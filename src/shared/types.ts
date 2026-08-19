@@ -87,6 +87,10 @@ export interface DeviceInfo {
   ram_regions?: DeviceRamRegion[]
   /** 设备 ID 寄存器地址 */
   device_id_address?: string
+  /** SEGGER J-Link 设备名（source='builtin' 且适配 J-Link 时有值，如 STM32F407IGTx） */
+  jlink_device?: string
+  /** J-Link 设备名查询锚点/前缀（如 STM32F407）：运行时向 J-Link 动态查询候选设备名（IG/VG/ZG…） */
+  jlink_search?: string
   /** 来源 Pack 名称（source='pack' 时有值） */
   pack?: string
   /** FLM 文件路径（source='flm' 时有值） */
@@ -101,6 +105,20 @@ export interface DeviceInfo {
 export interface DeviceOverrides {
   flash_regions: { start: string; is_boot_memory?: boolean; length?: string }[]
   debug_sequences: { name: string; enabled: boolean }[]
+}
+
+/** J-Link 设备库中的候选设备（来自 /api/probes/jlink/devices 动态查询） */
+export interface JLinkDeviceInfo {
+  /** J-Link 设备名（即 -device/ jlink.device 参数值，如 STM32F407IG） */
+  name: string
+  /** Flash 容量（字节） */
+  flash_size: number
+  /** RAM 容量（字节） */
+  ram_size: number
+  /** 内核描述（J-Link 原始代号） */
+  core: string
+  /** 制造商 */
+  manufacturer: string
 }
 
 /** device_info.json 中的 Flash 区域（所有数值字段均为十六进制字符串） */

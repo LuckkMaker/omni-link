@@ -140,7 +140,8 @@ class PyOCDBackend(BackendInterface):
 
     def connect(self, probe_uid: str, target: str | None = None,
                 interface: str = "swd", speed: int | None = None,
-                connect_mode: str | None = None, force: bool = False) -> bool:
+                connect_mode: str | None = None, force: bool = False,
+                device: str | None = None) -> bool:
         """连接指定探针
 
         Args:
@@ -155,6 +156,10 @@ class PyOCDBackend(BackendInterface):
                 - under-reset: 拉低复位线时连接（用于深度睡眠/被锁目标）
             force: 是否强制重连。为 True 时即使已连接也会关闭旧会话并以新参数重连
                 （用于切换连接模式，如 Zone 会话的 attach/halt 绑定）。
+            device: J-Link 目标设备名（如 G32F463X8），None 则不用或走接口默认。
+                对 J-Link 探针，SWD 也必须设置 jlink.device 才会建立目标连接
+                （否则 pyOCD 只调 coresight_configure()，目标 target_connected=False，
+                表现为"连不上"，实际是 J-Link 根本没做设备连接）。
         """
         from pyocd.core.helpers import ConnectHelper
 
@@ -212,6 +217,16 @@ class PyOCDBackend(BackendInterface):
         # 接口协议通过 dap_protocol 选项设置
         if interface == 'jtag':
             options['dap_protocol'] = 'jtag'
+        else:
+            options['dap_protocol'] = 'swd'
+        # J-Link 设备名：显式传入优先；JTAG 走历史兼容的 STM32F4 配置。
+        # 关键：SWD 下 J-Link 也必须设置 jlink.device 才会调用 JLink.connect(device)
+        # 建立目标连接，否则 pyOCD 只调 pylink 的 coresight_configure()，
+        # 目标 target_connected=False（表现为连不上，但探针/软件层都正常）。
+        # SWD 的 device 名由前端 J-Link 输入框提供（如 G32F463X8）。
+        if device:
+            options['jlink.device'] = device
+        elif interface == 'jtag':
             # JTAG 模式必须设置 jlink.device,触发 J-Link 固件执行完整 JTAG 链扫描和 DP 初始化。
             # 否则 pyOCD 走 low-level CoreSight 路径,pylink 的 coresight_configure() 会破坏
             # JTAG DP 访问(实测 DP IDR 变 0x00000000,内存读全零)。
@@ -219,8 +234,6 @@ class PyOCDBackend(BackendInterface):
             # JTAG 链结构相同,可借用 STM32F4 设备配置。
             # 配合 jlink_probe.py 中对 coresight_configure() 的条件跳过使用。
             options['jlink.device'] = 'STM32F407VG'
-        else:
-            options['dap_protocol'] = 'swd'
 
         # 连接超时（秒）。目标未 reset 或无响应时，pyOCD 内部 DP 连接会重试 4 次 SWJ 序列，
         # 可能阻塞数秒到数十秒。用线程池 + future.result(timeout) 强制中断。
