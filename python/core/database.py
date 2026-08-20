@@ -1,53 +1,51 @@
-"""XML 设备目录管理
+"""设备目录管理（内置库 + 用户库双层存储）
 
-提供设备目录数据的持久化存储，使用人类可读的 XML 格式，替代 SQLite。
+采用「两份数据库文件」方案，解决内置型号升级时会覆盖用户数据的问题：
 
-用户可直接编辑 XML 文件来自定义芯片列表。支持三种来源：
-- builtin：内置芯片（有 pyOCD Python 驱动）
-- pack：CMSIS-Pack 导入的芯片（运行时动态注册）
-- flm：FLM 自定义芯片（FLM 文件 + 元数据）
+- 内置库（只读）：源码/打包内 `data/OMNILinkDevices.xml`，存放 `source="builtin"` 的设备。
+  随应用版本发布更新，只读；升级时替换文件即可，绝不影响用户库。
+- 用户库（可写）：`<OMNI_DATA_DIR>/user-devices.xml`，存放用户自建的
+  `source="custom"` / `"pack"` / `"flm"` 设备。随用户操作增删改，永不因升级而变化。
 
-支持 overrides 覆盖层，用于修正 Pack 导入芯片的默认行为。
+兼容性迁移：首次启动时会扫描旧式单一文件 `OMNILinkDevices.xml`（开发模式下可能与内置
+seed 同一路径），把其中 `source != "builtin"` 的用户设备一次性迁入用户库；内置设备一律
+以 seed 为准。迁移通过目录下的 `.omnilink_migrated` 标记防止重复执行。
 
 路径解析：
-- 开发模式：使用源码目录下 data/OMNILinkDevices.xml（可被 OMNI_DATA_DIR 覆盖）
-- 生产模式（PyInstaller frozen）：XML 写入 OMNI_DATA_DIR 指向的用户目录，
-  种子文件来自 sys._MEIPASS 或 exe 目录下 data/OMNILinkDevices.xml（随 --add-data 打包）
+- 开发模式：内置 seed = 源码 `data/OMNILinkDevices.xml`；用户库 = OMNI_DATA_DIR 或源码
+  `data/` 下的 `user-devices.xml`。
+- 生产模式（PyInstaller frozen）：内置 seed = 打包内 `data/OMNILinkDevices.xml`（随
+  --add-data 打包）；用户库 = OMNI_DATA_DIR 或 exe 同级的 `user-devices.xml`。
 """
 
 import json
 import os
-import shutil
 import sys
 import threading
 import xml.etree.ElementTree as ET
 from typing import Optional
 from xml.dom import minidom
 
-# 线程锁（保护 XML 文件读写）
-_lock = threading.Lock()
+# 线程锁（保护用户库文件读写；RLock 以支持 ensure_initialized 重入）
+_lock = threading.RLock()
 
 # XML schema 版本
 _XML_VERSION = 1
 
+# 迁移标记文件名（放在用户数据目录下，防止旧文件重复迁移）
+_MIGRATE_MARKER = ".omnilink_migrated"
 
-def _resolve_paths() -> tuple[str, str, str]:
-    """解析 XML、种子 XML、JSON 文件的路径。
+# 用户库文件名
+_USER_FILENAME = "user-devices.xml"
 
-    返回 (xml_path, seed_xml_path, json_path)：
-    - xml_path：实际使用的 XML 文件路径（必须可写）
-    - seed_xml_path：打包内/源码内的种子 XML 路径（仅首次复制用，只读）
-    - json_path：device_info.json 路径（旧格式导入回退用，只读）
+# 旧式单一文件文件名（兼容性迁移来源）
+_LEGACY_FILENAME = "OMNILinkDevices.xml"
 
-    优先级：
-    1. 生产模式（getattr(sys, 'frozen', False) 为 True）：
-       - xml_path = OMNI_DATA_DIR 环境变量指向目录下 OMNILinkDevices.xml
-       - seed_xml_path / json_path = sys._MEIPASS 下 data/ 子目录
-         若 _MEIPASS 不可用或文件不存在，回退到 exe 同级目录下 data/
-    2. 开发模式（非 frozen）：
-       - xml_path = 源码目录下 data/OMNILinkDevices.xml
-       - 若设置了 OMNI_DATA_DIR，则 xml_path 指向该目录
-       - seed_xml_path / json_path 始终指向源码目录下 data/
+
+def _resolve_paths() -> tuple[str, str, str, str, str]:
+    """解析内置库 / 用户库 / 旧文件 / JSON / 数据目录 路径。
+
+    返回 (builtin_xml, user_xml, legacy_xml, json_path, data_dir)
     """
     src_dir = os.path.dirname(os.path.abspath(__file__))
     src_data_dir = os.path.normpath(os.path.join(src_dir, "..", "data"))
@@ -56,70 +54,121 @@ def _resolve_paths() -> tuple[str, str, str]:
         meipass = getattr(sys, "_MEIPASS", None)
         bundled_data_dir = (
             os.path.join(meipass, "data")
-            if meipass and os.path.exists(os.path.join(meipass, "data", "OMNILinkDevices.xml"))
+            if meipass and os.path.exists(os.path.join(meipass, "data", _LEGACY_FILENAME))
             else os.path.join(os.path.dirname(sys.executable), "data")
         )
-        seed_xml_path = os.path.join(bundled_data_dir, "OMNILinkDevices.xml")
+        builtin_xml = os.path.join(bundled_data_dir, _LEGACY_FILENAME)
         json_path = os.path.join(bundled_data_dir, "device_info.json")
-
         data_dir = os.environ.get("OMNI_DATA_DIR") or os.path.dirname(sys.executable)
-        xml_path = os.path.join(data_dir, "OMNILinkDevices.xml")
     else:
-        seed_xml_path = os.path.join(src_data_dir, "OMNILinkDevices.xml")
+        builtin_xml = os.path.join(src_data_dir, _LEGACY_FILENAME)
         json_path = os.path.join(src_data_dir, "device_info.json")
+        data_dir = os.environ.get("OMNI_DATA_DIR") or src_data_dir
 
-        omni_data_dir = os.environ.get("OMNI_DATA_DIR")
-        xml_path = (
-            os.path.join(omni_data_dir, "OMNILinkDevices.xml")
-            if omni_data_dir
-            else os.path.join(src_data_dir, "OMNILinkDevices.xml")
-        )
-
-    return xml_path, seed_xml_path, json_path
+    user_xml = os.path.join(data_dir, _USER_FILENAME)
+    legacy_xml = os.path.join(data_dir, _LEGACY_FILENAME)
+    return builtin_xml, user_xml, legacy_xml, json_path, data_dir
 
 
-_XML_PATH, _SEED_XML_PATH, _JSON_PATH = _resolve_paths()
+_BUILTIN_XML, _USER_XML, _LEGACY_XML, _JSON_PATH, _DATA_DIR = _resolve_paths()
 
 
-def _init_xml_file() -> None:
-    """首次启动时初始化 XML 文件。
+# ── 生命周期 ─────────────────────────────
 
-    优先从种子 XML 复制；若种子不存在则从 device_info.json 转换生成。
-    """
-    if os.path.exists(_XML_PATH):
+
+def _do_init() -> None:
+    """确保用户数据目录存在，并执行一次性旧文件迁移。"""
+    if _DATA_DIR:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+
+    marker = os.path.join(_DATA_DIR, _MIGRATE_MARKER)
+    if os.path.exists(marker):
         return
 
-    xml_dir = os.path.dirname(_XML_PATH)
-    if xml_dir:
-        os.makedirs(xml_dir, exist_ok=True)
+    if not os.path.exists(_USER_XML):
+        _write_user([])
 
-    # 优先从种子 XML 复制
-    if _SEED_XML_PATH and os.path.exists(_SEED_XML_PATH):
-        try:
-            shutil.copy2(_SEED_XML_PATH, _XML_PATH)
+    # 迁移旧式单一文件中的用户设备（source != builtin），内置一律以 seed 为准
+    if _LEGACY_XML and os.path.exists(_LEGACY_XML):
+        if os.path.abspath(_LEGACY_XML) != os.path.abspath(_USER_XML):
+            legacy = _scan_file(_LEGACY_XML)
+            movable = [d for d in legacy if (d.get("source", "builtin")) != "builtin"]
+            if movable:
+                merged = {d["part_number"]: d for d in _scan_file(_USER_XML)}
+                for d in movable:
+                    merged.setdefault(d["part_number"], _normalize_source(d))
+                _write_user(list(merged.values()))
+
+    # 写入迁移标记，避免重复迁移
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("migrated")
+    except Exception:
+        pass
+
+
+def ensure_initialized() -> None:
+    """惰性初始化（目录创建 + 旧文件迁移），线程安全。"""
+    global _initialized
+    with _lock:
+        if _initialized:
             return
-        except Exception:
-            pass
-
-    # 回退：从 device_info.json 转换
-    if os.path.exists(_JSON_PATH):
-        _convert_json_to_xml(_JSON_PATH, _XML_PATH)
-        return
-
-    # 最终兜底：创建空 XML
-    root = ET.Element("devices", {"version": str(_XML_VERSION)})
-    _write_xml(root, _XML_PATH)
+        _do_init()
+        _initialized = True
 
 
-def _convert_json_to_xml(json_path: str, xml_path: str) -> None:
-    """将 device_info.json 转换为 OMNILinkDevices.xml"""
-    with open(json_path, "r", encoding="utf-8") as f:
-        devices = json.load(f)
+_initialized = False
 
-    root = ET.Element("devices", {"version": str(_XML_VERSION)})
-    for d in devices:
-        _device_dict_to_element(d, root)
-    _write_xml(root, xml_path)
+
+# ── 底层读写 ─────────────────────────────
+
+
+def _scan_file(path: str) -> list[dict]:
+    """解析 XML 文件为设备 dict 列表；文件不存在或出错返回 []。"""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        return [_element_to_device_dict(elem) for elem in root.findall("device")]
+    except Exception:
+        return []
+
+
+def _read_builtin() -> list[dict]:
+    """读取内置库（只读），仅返回 source='builtin' 的设备。"""
+    ensure_initialized()
+    return [d for d in _scan_file(_BUILTIN_XML) if d.get("source", "builtin") == "builtin"]
+
+
+def _read_user() -> list[dict]:
+    """读取用户库全部设备。"""
+    ensure_initialized()
+    return _scan_file(_USER_XML)
+
+
+def _read_all() -> list[dict]:
+    """合并内置库 + 用户库；part_number 冲突时内置优先。"""
+    bmap = {d["part_number"]: d for d in _read_builtin()}
+    umap = {d["part_number"]: d for d in _read_user()}
+    merged = dict(umap)
+    merged.update(bmap)  # 内置覆盖同名用户设备
+    return list(merged.values())
+
+
+def _normalize_source(device: dict) -> dict:
+    """用户库不允许出现 builtin 类型；缺省/误标为 builtin 的强制改为 custom。"""
+    d = dict(device)
+    if (d.get("source", "builtin")) == "builtin":
+        d["source"] = "custom"
+    return d
+
+
+def _is_builtin_name(part_number: str) -> bool:
+    return part_number in {d["part_number"] for d in _read_builtin()}
+
+
+# ── XML 序列化 ───────────────────────────
 
 
 def _device_dict_to_element(device: dict, parent: ET.Element) -> ET.Element:
@@ -155,7 +204,6 @@ def _device_dict_to_element(device: dict, parent: ET.Element) -> ET.Element:
             "is_boot_memory": "true" if r.get("is_boot_memory") else "false",
         })
 
-    # 写入 ram_regions（如果有）
     ram_regions = device.get("ram_regions")
     if ram_regions:
         ram_regions_elem = ET.SubElement(dev_elem, "ram_regions")
@@ -166,7 +214,6 @@ def _device_dict_to_element(device: dict, parent: ET.Element) -> ET.Element:
                 "is_default": "true" if r.get("is_default") else "false",
             })
 
-    # 写入 overrides（如果有）
     overrides = device.get("overrides")
     if overrides:
         overrides_elem = ET.SubElement(dev_elem, "overrides")
@@ -211,7 +258,6 @@ def _element_to_device_dict(elem: ET.Element) -> dict:
     if elem.get("pack"):
         device["pack"] = elem.get("pack")
 
-    # 解析 flash_regions
     device["flash_regions"] = []
     regions_elem = elem.find("flash_regions")
     if regions_elem is not None:
@@ -224,9 +270,6 @@ def _element_to_device_dict(elem: ET.Element) -> dict:
                 "is_boot_memory": r.get("is_boot_memory", "false").lower() == "true",
             })
 
-    # 解析 ram_regions
-    # 若 XML 中存在 <ram_regions>，按其内容加载；
-    # 否则从 ram_base_address + ram_size 向后兼容合成一个默认区域。
     device["ram_regions"] = []
     ram_regions_elem = elem.find("ram_regions")
     if ram_regions_elem is not None:
@@ -244,7 +287,6 @@ def _element_to_device_dict(elem: ET.Element) -> dict:
             "is_default": True,
         })
 
-    # 解析 overrides
     overrides_elem = elem.find("overrides")
     if overrides_elem is not None:
         overrides = {"flash_regions": [], "debug_sequences": []}
@@ -271,17 +313,6 @@ def _get_text(elem: ET.Element, tag: str, default: str = "") -> str:
     return child.text if child is not None and child.text is not None else default
 
 
-def _read_xml() -> list[dict]:
-    """读取 XML 文件，返回设备列表"""
-    _init_xml_file()
-    try:
-        tree = ET.parse(_XML_PATH)
-        root = tree.getroot()
-        return [_element_to_device_dict(elem) for elem in root.findall("device")]
-    except Exception:
-        return []
-
-
 def _write_xml(root: ET.Element, path: str) -> None:
     """写入 XML 文件（pretty print）"""
     rough = ET.tostring(root, encoding="unicode")
@@ -290,31 +321,51 @@ def _write_xml(root: ET.Element, path: str) -> None:
         f.write(pretty)
 
 
-def _save_all(devices: list[dict]) -> None:
-    """将设备列表保存到 XML 文件"""
+def _write_user(devices: list[dict]) -> None:
+    """将设备列表保存到用户库文件"""
     root = ET.Element("devices", {"version": str(_XML_VERSION)})
     for d in devices:
-        _device_dict_to_element(d, root)
-    _write_xml(root, _XML_PATH)
+        _device_dict_to_element(_normalize_source(d), root)
+    _write_xml(root, _USER_XML)
+
+
+def _upsert_user(device: dict) -> None:
+    """在用户库中插入或更新设备（不校验内置冲突）"""
+    devices = _read_user()
+    found = False
+    for i, d in enumerate(devices):
+        if d["part_number"] == device["part_number"]:
+            devices[i] = _normalize_source(device)
+            found = True
+            break
+    if not found:
+        devices.append(_normalize_source(device))
+    _write_user(devices)
+
+
+# ── 公共查询 ─────────────────────────────
 
 
 def get_db_path() -> str:
-    """返回 XML 文件路径（保持向后兼容命名）"""
-    return _XML_PATH
+    """返回用户库可写文件的路径"""
+    ensure_initialized()
+    return _USER_XML
+
+
+def get_builtin_path() -> str:
+    """返回内置库（只读 seed）的路径"""
+    ensure_initialized()
+    return _BUILTIN_XML
 
 
 def get_db_version() -> int:
-    """返回 XML schema 版本号"""
     return _XML_VERSION
 
 
-# ── CRUD 操作 ─────────────────────────────
-
-
 def list_devices() -> list[dict]:
-    """列出所有设备（含 flash_regions）"""
+    """列出所有设备（内置 + 用户，含 flash_regions）"""
     with _lock:
-        devices = _read_xml()
+        devices = _read_all()
         devices.sort(key=lambda d: (d.get("vendor", ""), d.get("display_name", "")))
         return devices
 
@@ -322,95 +373,22 @@ def list_devices() -> list[dict]:
 def get_device(part_number: str) -> Optional[dict]:
     """获取指定设备（含 flash_regions）"""
     with _lock:
-        devices = _read_xml()
-        for d in devices:
+        for d in _read_all():
             if d["part_number"] == part_number:
                 return d
         return None
 
 
-def upsert_device(device: dict) -> None:
-    """插入或更新设备（含 flash_regions）"""
-    with _lock:
-        devices = _read_xml()
-        # 查找并替换，或追加
-        found = False
-        for i, d in enumerate(devices):
-            if d["part_number"] == device["part_number"]:
-                devices[i] = device
-                found = True
-                break
-        if not found:
-            devices.append(device)
-        _save_all(devices)
-
-
-def add_device(device: dict) -> dict:
-    """新增设备"""
-    upsert_device(device)
-    return get_device(device["part_number"])
-
-
-def update_device(part_number: str, device: dict) -> Optional[dict]:
-    """更新设备（part_number 不可变）"""
-    with _lock:
-        devices = _read_xml()
-        existing = None
-        for d in devices:
-            if d["part_number"] == part_number:
-                existing = d
-                break
-        if existing is None:
-            return None
-        device["part_number"] = part_number
-        upsert_device(device)
-    return get_device(part_number)
-
-
-def delete_device(part_number: str) -> bool:
-    """删除设备"""
-    with _lock:
-        devices = _read_xml()
-        new_devices = [d for d in devices if d["part_number"] != part_number]
-        if len(new_devices) == len(devices):
-            return False
-        _save_all(new_devices)
-        return True
-
-
-def reimport_from_json() -> int:
-    """从 device_info.json 重新导入数据（覆盖同名设备）
-
-    Returns: 导入的设备数量
-    """
-    if not os.path.exists(_JSON_PATH):
-        return 0
-
-    with open(_JSON_PATH, "r", encoding="utf-8") as f:
-        devices = json.load(f)
-
-    with _lock:
-        existing = _read_xml()
-        existing_map = {d["part_number"]: d for d in existing}
-        for d in devices:
-            d["source"] = "builtin"
-            existing_map[d["part_number"]] = d
-        _save_all(list(existing_map.values()))
-
-    return len(devices)
-
-
 def list_devices_by_source(source: str) -> list[dict]:
     """按来源筛选设备"""
     with _lock:
-        devices = _read_xml()
-        return [d for d in devices if d.get("source", "builtin") == source]
+        return [d for d in _read_all() if d.get("source", "builtin") == source]
 
 
 def get_source_summary() -> dict:
     """获取各来源的设备数量统计"""
     with _lock:
-        devices = _read_xml()
+        devices = _read_all()
         summary = {"builtin": 0, "pack": 0, "flm": 0, "total": len(devices)}
         for d in devices:
             source = d.get("source", "builtin")
@@ -419,14 +397,92 @@ def get_source_summary() -> dict:
         return summary
 
 
-def is_target_registered(part_number: str) -> bool:
-    """检查设备是否可实际烧录。
+def is_builtin(part_number: str) -> bool:
+    """判断设备是否为只读内置型号"""
+    with _lock:
+        return _is_builtin_name(part_number)
 
-    根据 source 字段判断：
-    - builtin：内置芯片，有 pyOCD Python 驱动，始终可用
-    - pack：CMSIS-Pack 导入，检查 Pack 是否已安装
-    - flm：FLM 自定义芯片，检查 FLM 文件是否存在
+
+# ── CRUD（仅作用于用户库；内置只读） ─────────────
+
+
+def add_device(device: dict) -> dict:
+    """新增设备（写入用户库；内置型号同名时拒绝）"""
+    with _lock:
+        ensure_initialized()
+        if _is_builtin_name(device["part_number"]):
+            raise ValueError(f"内置型号只读：{device['part_number']}")
+        _upsert_user(_normalize_source(device))
+    return get_device(device["part_number"])
+
+
+def upsert_device(device: dict) -> None:
+    """插入或更新设备（写入用户库；内置型号同名时忽略）"""
+    with _lock:
+        ensure_initialized()
+        if _is_builtin_name(device["part_number"]):
+            return
+        _upsert_user(_normalize_source(device))
+
+
+def update_device(part_number: str, device: dict) -> Optional[dict]:
+    """更新设备（part_number 不可变；内置型号只读，返回 None）"""
+    with _lock:
+        ensure_initialized()
+        if _is_builtin_name(part_number):
+            return None
+        if not any(d["part_number"] == part_number for d in _read_user()):
+            return None
+        device["part_number"] = part_number
+        _upsert_user(_normalize_source(device))
+    return get_device(part_number)
+
+
+def delete_device(part_number: str) -> bool:
+    """删除设备（内置型号只读，返回 False）"""
+    with _lock:
+        ensure_initialized()
+        if _is_builtin_name(part_number):
+            return False
+        devices = _read_user()
+        new_devices = [d for d in devices if d["part_number"] != part_number]
+        if len(new_devices) == len(devices):
+            return False
+        _write_user(new_devices)
+        return True
+
+
+def reimport_from_json() -> int:
+    """从 device_info.json 把历史用户设备（source != builtin）导入用户库。
+
+    内置设备一律以 seed 为准，不再从 JSON 导入。
+    Returns: 导入的设备数量
     """
+    if not os.path.exists(_JSON_PATH):
+        return 0
+
+    with open(_JSON_PATH, "r", encoding="utf-8") as f:
+        devices = json.load(f)
+
+    movable = [d for d in devices if (d.get("source", "builtin")) != "builtin"]
+    if not movable:
+        return 0
+
+    with _lock:
+        ensure_initialized()
+        merged = {d["part_number"]: d for d in _read_user()}
+        for d in movable:
+            merged.setdefault(d["part_number"], _normalize_source(d))
+        _write_user(list(merged.values()))
+
+    return len(movable)
+
+
+# ── 可用性与烧录 ─────────────────────────
+
+
+def is_target_registered(part_number: str) -> bool:
+    """检查设备是否可实际烧录。"""
     device = get_device(part_number)
     if device is None:
         return False
@@ -459,12 +515,7 @@ def is_target_registered(part_number: str) -> bool:
 
 
 def get_device_availability(part_number: str) -> str:
-    """获取设备的可用状态
-
-    返回值：
-    - "available"：已注册到 TARGET，可直接烧录
-    - "metadata_only"：仅有元数据，未注册到 TARGET
-    """
+    """获取设备的可用状态"""
     if is_target_registered(part_number):
         return "available"
     return "metadata_only"
