@@ -10,9 +10,9 @@
 支持 overrides 覆盖层，用于修正 Pack 导入芯片的默认行为。
 
 路径解析：
-- 开发模式：使用源码目录下 data/devices.xml（可被 OMNI_DATA_DIR 覆盖）
+- 开发模式：使用源码目录下 data/OMNILinkDevices.xml（可被 OMNI_DATA_DIR 覆盖）
 - 生产模式（PyInstaller frozen）：XML 写入 OMNI_DATA_DIR 指向的用户目录，
-  种子文件来自 sys._MEIPASS 或 exe 目录下 data/devices.xml（随 --add-data 打包）
+  种子文件来自 sys._MEIPASS 或 exe 目录下 data/OMNILinkDevices.xml（随 --add-data 打包）
 """
 
 import json
@@ -41,11 +41,11 @@ def _resolve_paths() -> tuple[str, str, str]:
 
     优先级：
     1. 生产模式（getattr(sys, 'frozen', False) 为 True）：
-       - xml_path = OMNI_DATA_DIR 环境变量指向目录下 devices.xml
+       - xml_path = OMNI_DATA_DIR 环境变量指向目录下 OMNILinkDevices.xml
        - seed_xml_path / json_path = sys._MEIPASS 下 data/ 子目录
          若 _MEIPASS 不可用或文件不存在，回退到 exe 同级目录下 data/
     2. 开发模式（非 frozen）：
-       - xml_path = 源码目录下 data/devices.xml
+       - xml_path = 源码目录下 data/OMNILinkDevices.xml
        - 若设置了 OMNI_DATA_DIR，则 xml_path 指向该目录
        - seed_xml_path / json_path 始终指向源码目录下 data/
     """
@@ -56,23 +56,23 @@ def _resolve_paths() -> tuple[str, str, str]:
         meipass = getattr(sys, "_MEIPASS", None)
         bundled_data_dir = (
             os.path.join(meipass, "data")
-            if meipass and os.path.exists(os.path.join(meipass, "data", "devices.xml"))
+            if meipass and os.path.exists(os.path.join(meipass, "data", "OMNILinkDevices.xml"))
             else os.path.join(os.path.dirname(sys.executable), "data")
         )
-        seed_xml_path = os.path.join(bundled_data_dir, "devices.xml")
+        seed_xml_path = os.path.join(bundled_data_dir, "OMNILinkDevices.xml")
         json_path = os.path.join(bundled_data_dir, "device_info.json")
 
         data_dir = os.environ.get("OMNI_DATA_DIR") or os.path.dirname(sys.executable)
-        xml_path = os.path.join(data_dir, "devices.xml")
+        xml_path = os.path.join(data_dir, "OMNILinkDevices.xml")
     else:
-        seed_xml_path = os.path.join(src_data_dir, "devices.xml")
+        seed_xml_path = os.path.join(src_data_dir, "OMNILinkDevices.xml")
         json_path = os.path.join(src_data_dir, "device_info.json")
 
         omni_data_dir = os.environ.get("OMNI_DATA_DIR")
         xml_path = (
-            os.path.join(omni_data_dir, "devices.xml")
+            os.path.join(omni_data_dir, "OMNILinkDevices.xml")
             if omni_data_dir
-            else os.path.join(src_data_dir, "devices.xml")
+            else os.path.join(src_data_dir, "OMNILinkDevices.xml")
         )
 
     return xml_path, seed_xml_path, json_path
@@ -112,7 +112,7 @@ def _init_xml_file() -> None:
 
 
 def _convert_json_to_xml(json_path: str, xml_path: str) -> None:
-    """将 device_info.json 转换为 devices.xml"""
+    """将 device_info.json 转换为 OMNILinkDevices.xml"""
     with open(json_path, "r", encoding="utf-8") as f:
         devices = json.load(f)
 
