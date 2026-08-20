@@ -141,12 +141,12 @@ export function DeviceTable({
           <thead className="sticky top-0 z-10">
             {/* 表头行 — 用 div 包裹确保不透明背景覆盖 */}
             <tr className="bg-muted">
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[16%]">制造商</th>
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[22%]">设备</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[22%]">制造商</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[24%]">设备</th>
               <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[12%]">来源</th>
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[13%]">内核</th>
-              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[18%]">Flash</th>
-              <th className="border-b border-border px-2 py-2 text-center font-medium w-[19%]">RAM</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[12%]">内核</th>
+              <th className="border-b border-r border-border px-2 py-2 text-center font-medium w-[15%]">Flash</th>
+              <th className="border-b border-border px-2 py-2 text-center font-medium w-[15%]">RAM</th>
             </tr>
             {/* 筛选输入行 */}
             {showFilters && (
@@ -201,7 +201,9 @@ export function DeviceTable({
                         : 'hover:bg-muted/30'
                     )}
                   >
-                    <td className="border-r border-border/50 px-3 py-2 text-center">{d.vendor}</td>
+                    <td className="border-r border-border/50 px-3 py-2 text-center">
+                      <span className="inline-block w-full truncate align-middle" title={d.vendor}>{d.vendor}</span>
+                    </td>
                     <td className="border-r border-border/50 px-3 py-2 text-center font-medium">{d.display_name}</td>
                     <td className="border-r border-border/50 px-3 py-2 text-center">
                       <span

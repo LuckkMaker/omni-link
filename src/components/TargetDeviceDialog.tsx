@@ -32,7 +32,7 @@ export function TargetDeviceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-5xl">
         <DialogHeader>
           <DialogTitle>选择目标设备</DialogTitle>
         </DialogHeader>
