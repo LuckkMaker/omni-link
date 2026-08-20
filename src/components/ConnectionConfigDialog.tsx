@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { RefreshCw, Cpu, FileCode2, ChevronDown } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { RefreshCw, Cpu, FileCode2, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -9,7 +9,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -17,15 +16,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { TargetDeviceDialog } from '@/components/TargetDeviceDialog'
-import { listJLinkDevices } from '@/services/device.service'
-import type { JLinkDeviceInfo } from '@shared/types'
+import { JLinkDeviceDialog } from '@/components/JLinkDeviceDialog'
 import { useProbeStore, SPEED_OPTIONS, CONNECT_MODE_OPTIONS } from '@/stores/probe.store'
 import { useBackendStatus } from '@/hooks/useBackendStatus'
 
@@ -40,15 +32,6 @@ function shortenSerial(serial: string, max = 13, keep = 4): string {
   if (!serial) return ''
   if (serial.length <= max) return serial
   return `${serial.slice(0, keep)}…${serial.slice(-keep)}`
-}
-
-/** 由设备显示名推导 J-Link 设备查询前缀（去掉逻辑密度的尾缀，如 STM32F407xG → STM32F407） */
-function deriveJlinkPrefix(displayName: string): string {
-  if (!displayName) return ''
-  // ST 约定：'x' + 尾随字母/数字 表示逻辑型号（如 xG / x8），J-Link 设备库按家族基名前缀检索
-  const m = displayName.match(/^(.*)x([A-Za-z0-9]*)$/)
-  if (m && m[1].length >= 3) return m[1]
-  return ''
 }
 
 /** 字节 → 可读容量（J-Link 设备的 Flash/RAM 以字节计） */
@@ -103,6 +86,8 @@ export function ConnectionConfigDialog({
     probes,
     selectedUid,
     deviceList,
+    jlinkDevices,
+    loadingJlinkDevices,
     connecting,
     loadingProbes,
     pendingTarget,
@@ -112,6 +97,7 @@ export function ConnectionConfigDialog({
     pendingJlinkDevice,
     fetchProbes,
     fetchDevices,
+    fetchJlinkDevices,
     selectProbe,
     connectProbe,
     setPendingTarget,
@@ -135,37 +121,14 @@ export function ConnectionConfigDialog({
       `${selectedProbe?.product ?? ''} ${selectedProbe?.vendor ?? ''}`
     )
 
-  // J-Link 候选设备下拉状态：从 J-Link 设备库动态查询（按 jlink_search 前缀 / Flash 容量）
-  const [jlinkCandidates, setJlinkCandidates] = useState<JLinkDeviceInfo[]>([])
-  const [jlinkLoading, setJlinkLoading] = useState(false)
-  const [jlinkPopupOpen, setJlinkPopupOpen] = useState(false)
+  // J-Link 设备名选择弹窗开关：点击下方的只读输入框打开模态窗，在其中搜索并选择
+  const [jlinkDialogOpen, setJlinkDialogOpen] = useState(false)
 
-  const loadJlinkCandidates = async () => {
-    const dev = getDeviceInfo(pendingTarget ?? '')
-    // 优先取内置设备的 jlink_search 锚点（如 STM32F407）；
-    // 该字段缺失时（旧版设备数据/未标 J-Link 元数据的型号）由显示名推导前缀（STM32F407xG → STM32F407），
-    // 最后才用当前输入值当作用户手写的前缀兜底
-    const search =
-      dev?.jlink_search || deriveJlinkPrefix(dev?.display_name ?? '') || pendingJlinkDevice?.trim()
-    if (!search) {
-      setJlinkCandidates([])
-      return
-    }
-    setJlinkLoading(true)
-    try {
-      const list = await listJLinkDevices({
-        search,
-        // 仅当锚点来自设备自带 jlink_search（容量可信）时按 Flash 精确过滤（如 1024KB → IG/VG/ZG）；
-        // 推导/手输前缀时不过滤，让用户看到该家族所有容量变体（IG/VG/ZG…）自由选择
-        flashKb: dev?.jlink_search ? dev.flash_size : undefined,
-      })
-      setJlinkCandidates(list)
-    } catch {
-      setJlinkCandidates([])
-    } finally {
-      setJlinkLoading(false)
-    }
-  }
+  /** 自动匹配 J-Link 设备名的结果（用于提示；none=未匹配到，ambiguous=多候选已取首个） */
+  const [jlinkMatch, setJlinkMatch] = useState<{
+    none: boolean
+    ambiguous: boolean
+  }>({ none: false, ambiguous: false })
 
   const showElf = mode === 'start'
 
@@ -206,6 +169,62 @@ export function ConnectionConfigDialog({
       setElfError(null)
     }
   }, [open, status, initialError, startOnConfirm, startConnected, fetchProbes, fetchDevices, deviceList.length])
+
+  // 打开且为 J-Link 探针时，确保全量设备库已加载（MainLayout 启动时已预取，此处兜底补拉）
+  useEffect(() => {
+    if (open && isJlink) void fetchJlinkDevices()
+  }, [open, isJlink, fetchJlinkDevices])
+
+  // 自动匹配 J-Link 设备名：仅在新选/切换目标设备时触发，避免覆盖用户改动；设备库就绪后首次会补算。
+  const lastAutoTargetRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!isJlink || !pendingTarget) return
+    if (jlinkDevices.length === 0 && loadingJlinkDevices) return
+    if (lastAutoTargetRef.current === pendingTarget) return
+    lastAutoTargetRef.current = pendingTarget
+
+    const dev = getDeviceInfo(pendingTarget)
+    let name: string | null = null
+    let none = false
+    let ambiguous = false
+
+    if (dev?.jlink_device) {
+      // 内置型号自带明确设备名，直接采用
+      name = dev.jlink_device
+    } else if (jlinkDevices.length > 0) {
+      const up = pendingTarget.toUpperCase()
+      const exact = jlinkDevices.find((d) => d.name.toUpperCase() === up)
+      if (exact) {
+        name = exact.name
+      } else {
+        // 精确无匹配：按前缀在库中检索候选（依赖锚点向前缀优先，其次 jlink_search）
+        const pickAnchor = (anchor: string): void => {
+          const au = anchor.toUpperCase()
+          const hits = jlinkDevices.filter((d) => d.name.toUpperCase().startsWith(au))
+          if (hits.length === 1) name = hits[0].name
+          else if (hits.length > 1) {
+            name = hits[0].name
+            ambiguous = true
+          } else {
+            none = true
+          }
+        }
+        const hasPrefix = jlinkDevices.some((d) => d.name.toUpperCase().startsWith(up))
+        if (hasPrefix) pickAnchor(pendingTarget)
+        else if (dev?.jlink_search) pickAnchor(dev.jlink_search)
+        else none = true
+      }
+    } else {
+      none = true
+    }
+
+    setJlinkMatch({ none, ambiguous })
+    if (name) {
+      setPendingJlinkDevice(name)
+    } else if (dev?.jlink_device === undefined) {
+      setPendingJlinkDevice(null)
+    }
+  }, [isJlink, pendingTarget, jlinkDevices, loadingJlinkDevices])
 
   // 打开 start 模式时，预填上一次选择的 ELF 路径（作为默认值，用户仍可重新选择或确认使用）
   useEffect(() => {
@@ -372,8 +391,31 @@ export function ConnectionConfigDialog({
 
           {/* 目标设备 */}
           <div className="min-w-0 space-y-2">
-            <span className="text-sm font-medium">目标设备</span>
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">目标设备</span>
+              {isJlink && (
+                <button
+                  type="button"
+                  onClick={() => setJlinkDialogOpen(true)}
+                  title="选择 / 修改 J-Link 设备名"
+                  className={cn(
+                    'inline-flex min-w-0 max-w-[14rem] items-center gap-1.5 rounded-md border border-input bg-background px-2 py-0.5 text-[11px] font-mono text-muted-foreground transition-colors hover:bg-accent',
+                    jlinkMatch.none && !pendingJlinkDevice && 'border-red-400 text-red-500'
+                  )}
+                >
+                  <Settings2 className="size-3.5 shrink-0" />
+                  <span className="truncate">
+                    {pendingJlinkDevice
+                      ? pendingJlinkDevice
+                      : loadingJlinkDevices
+                        ? '设备库加载中…'
+                        : '选择设备名'}
+                  </span>
+                </button>
+              )}
+            </div>
             <button
+              type="button"
               onClick={() => { setDeviceDialogOpen(true); setErrorMsg(null) }}
               className="flex w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm transition-colors hover:bg-accent"
             >
@@ -382,6 +424,21 @@ export function ConnectionConfigDialog({
               </span>
               <Cpu className="size-4 text-muted-foreground" />
             </button>
+            {isJlink && !loadingJlinkDevices && pendingTarget ? (
+              jlinkMatch.ambiguous ? (
+                <p className="text-xs text-amber-600">
+                  匹配到多个 J-Link 设备，已选 {pendingJlinkDevice}，可点齿轮调整
+                </p>
+              ) : jlinkMatch.none ? (
+                <p className="text-xs text-red-500">
+                  未在 J-Link 库中匹配到设备名，请点齿轮选择
+                </p>
+              ) : pendingJlinkDevice ? (
+                <p className="text-xs text-muted-foreground">
+                  已自动匹配 J-Link 设备名：{pendingJlinkDevice}
+                </p>
+              ) : null
+            ) : null}
             {errorMsg && (
               <p className="text-xs text-red-500">{errorMsg}</p>
             )}
@@ -415,63 +472,6 @@ export function ConnectionConfigDialog({
               </Select>
             </div>
           </div>
-
-          {/* J-Link 设备名（仅 J-Link 探针）：必须在 J-Link 上建立目标连接才能调试 */}
-          {isJlink && (
-            <div className="min-w-0 space-y-2">
-              <span className="text-sm font-medium">JLink 设备名</span>
-              <div className="flex items-center gap-2">
-                <Input
-                  value={pendingJlinkDevice ?? ''}
-                  onChange={(e) => setPendingJlinkDevice(e.target.value)}
-                  placeholder="输入 JLink 设备名"
-                  className="h-9 min-w-0 flex-1 font-mono text-sm"
-                />
-                <DropdownMenu
-                  open={jlinkPopupOpen}
-                  onOpenChange={(o) => {
-                    setJlinkPopupOpen(o)
-                    if (o) void loadJlinkCandidates()
-                  }}
-                >
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-9 w-9 shrink-0"
-                      title="从 J-Link 查询候选设备"
-                    >
-                      <ChevronDown className="size-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent className="z-50 min-w-64">
-                    {jlinkLoading ? (
-                      <DropdownMenuItem disabled>查询中…</DropdownMenuItem>
-                    ) : jlinkCandidates.length === 0 ? (
-                      <DropdownMenuItem disabled>无匹配的设备名</DropdownMenuItem>
-                    ) : (
-                      jlinkCandidates.map((item) => (
-                        <DropdownMenuItem
-                          key={item.name}
-                          className="flex items-center justify-between gap-4"
-                          onSelect={() => {
-                            setPendingJlinkDevice(item.name)
-                            setJlinkPopupOpen(false)
-                          }}
-                        >
-                          <span className="font-mono text-sm">{item.name}</span>
-                          <span className="text-xs text-muted-foreground">{fmtBytes(item.flash_size)}</span>
-                        </DropdownMenuItem>
-                      ))
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-              <p className="text-[10px] leading-relaxed text-muted-foreground">
-                JLink 须指定设备名才能建立目标连接，可用右侧按钮选择候选项
-              </p>
-            </div>
-          )}
 
           {/* 连接模式 */}
           <div className="min-w-0 space-y-2">
@@ -600,9 +600,18 @@ export function ConnectionConfigDialog({
         currentPartNumber={pendingTarget}
         onConfirm={(partNumber) => {
           setPendingTarget(partNumber)
-          // 选中内置型号时，自动带出其自带的 J-Link 设备名（若探针为 J-Link 则输入框自动就位）
-          const dev = deviceList.find((dd) => dd.part_number === partNumber)
-          if (dev?.jlink_device) setPendingJlinkDevice(dev.jlink_device)
+        }}
+      />
+    {/* J-Link 设备名选择弹窗（二级，仅 J-Link 探针） */}
+      <JLinkDeviceDialog
+        open={jlinkDialogOpen}
+        onOpenChange={setJlinkDialogOpen}
+        devices={jlinkDevices}
+        loading={loadingJlinkDevices && jlinkDevices.length === 0}
+        value={pendingJlinkDevice ?? ''}
+        onConfirm={(name) => {
+          setPendingJlinkDevice(name)
+          setJlinkMatch({ none: false, ambiguous: false })
         }}
       />
     </>

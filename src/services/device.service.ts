@@ -55,3 +55,10 @@ export async function listJLinkDevices(opts?: {
   const { data } = await client.get(`/api/probes/jlink/devices?${params.toString()}`)
   return data.devices as JLinkDeviceInfo[]
 }
+
+/** 获取 J-Link 设备库全量列表（应用加载时预取，前端本地检索选择） */
+export async function listAllJLinkDevices(): Promise<JLinkDeviceInfo[]> {
+  const client = await api()
+  const { data } = await client.get('/api/probes/jlink/devices/all')
+  return data.devices as JLinkDeviceInfo[]
+}

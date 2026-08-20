@@ -61,7 +61,7 @@ export default function MainLayout() {
   useProbeWs(port)
   useRttSession()  // 全局 RTT 会话管理（切换页面不停止）
 
-  const { fetchProbes, fetchTargets } = useProbeStore()
+  const { fetchProbes, fetchTargets, fetchJlinkDevices } = useProbeStore()
   const location = useLocation()
   const isToolsActive = location.pathname.startsWith('/tools')
   const [toolsExpanded, setToolsExpanded] = useState(isToolsActive)
@@ -129,8 +129,9 @@ export default function MainLayout() {
       resetApiClient()
       fetchProbes()
       fetchTargets()
+      fetchJlinkDevices()
     }
-  }, [status, fetchProbes, fetchTargets])
+  }, [status, fetchProbes, fetchTargets, fetchJlinkDevices])
 
   return (
     <div className="flex h-screen w-full flex-col">

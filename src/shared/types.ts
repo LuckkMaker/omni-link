@@ -115,8 +115,6 @@ export interface JLinkDeviceInfo {
   flash_size: number
   /** RAM 容量（字节） */
   ram_size: number
-  /** 内核描述（J-Link 原始代号） */
-  core: string
   /** 制造商 */
   manufacturer: string
 }

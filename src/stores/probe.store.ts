@@ -1,9 +1,9 @@
 import { create } from 'zustand'
-import type { ProbeWithState, TargetInfo, DeviceInfo } from '@shared/types'
+import type { ProbeWithState, TargetInfo, DeviceInfo, JLinkDeviceInfo } from '@shared/types'
 import * as probeService from '@/services/probe.service'
 import type { ConnectMode } from '@/services/probe.service'
 import { listTargets } from '@/services/target.service'
-import { listDevices } from '@/services/device.service'
+import { listDevices, listAllJLinkDevices } from '@/services/device.service'
 import { useNotificationStore } from './notification.store'
 import { useLogStore } from './log.store'
 
@@ -75,8 +75,12 @@ interface ProbeStore {
   targetList: string[]
   /** 设备目录（来自 device_info.json） */
   deviceList: DeviceInfo[]
+  /** J-Link 设备库全量列表（应用加载时预取，选择 J-Link 设备名时本地检索） */
+  jlinkDevices: JLinkDeviceInfo[]
   /** 加载仿真器中 */
   loadingProbes: boolean
+  /** 加载 J-Link 设备库中 */
+  loadingJlinkDevices: boolean
   /** 连接/断开操作中 */
   connecting: boolean
   /** 错误信息 */
@@ -111,6 +115,8 @@ interface ProbeStore {
   fetchTargets: () => Promise<void>
   /** 拉取设备目录 */
   fetchDevices: () => Promise<void>
+  /** 拉取 J-Link 设备库全量列表（应用加载时调用一次） */
+  fetchJlinkDevices: () => Promise<void>
   /** 选中仿真器 */
   selectProbe: (uid: string | null) => void
   /** 设置连接前配置 */
@@ -145,7 +151,9 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   selectedUid: null,
   targetList: [],
   deviceList: [],
+  jlinkDevices: [],
   loadingProbes: false,
+  loadingJlinkDevices: false,
   connecting: false,
   error: null,
 
@@ -211,6 +219,19 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
       set({ deviceList: devices })
     } catch (err) {
       console.error('[probe.store] fetchDevices failed:', err)
+    }
+  },
+
+  fetchJlinkDevices: async () => {
+    // 已加载则跳过，避免重复拉取全量设备库
+    if (get().jlinkDevices.length > 0) return
+    set({ loadingJlinkDevices: true })
+    try {
+      const devices = await listAllJLinkDevices()
+      set({ jlinkDevices: devices, loadingJlinkDevices: false })
+    } catch (err) {
+      console.error('[probe.store] fetchJlinkDevices failed:', err)
+      set({ loadingJlinkDevices: false })
     }
   },
 

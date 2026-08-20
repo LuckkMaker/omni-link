@@ -180,6 +180,26 @@ def _get_jlink_devices() -> list[dict]:
         return devices
 
 
+@router.get("/jlink/devices/all")
+async def jlink_devices_all():
+    """返回 J-Link 设备库全量列表（应用加载时预取到前端，选择设备时本地检索）。
+
+    实测 ~9882 个设备，仅返回名称与容量（精简字段），单次 <0.2s（进程级缓存）。
+    """
+    devices = _get_jlink_devices()
+    return {
+        "devices": [
+            {
+                "name": d["name"],
+                "flash_size": d["flash_size"],
+                "ram_size": d["ram_size"],
+                "manufacturer": d["manufacturer"],
+            }
+            for d in devices
+        ]
+    }
+
+
 @router.get("/jlink/devices")
 async def jlink_devices(
     search: str = "",
