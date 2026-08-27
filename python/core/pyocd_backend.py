@@ -18,6 +18,11 @@ from core.events import event_manager
 
 logger = logging.getLogger(__name__)
 
+# 拔出判定所需的连续缺失轮询次数（去抖）：CMSIS-DAP 探针连接成功后可能短暂
+# 重新枚举（USB reset），并非真正拔出，需连续缺失多轮才判定为拔出。
+# 每次轮询间隔 2s，2 轮=约 4s 确认时间。
+REMOVAL_GRACE_POLLS = 2
+
 
 class ProbeState(Enum):
     """探针连接状态"""
@@ -61,6 +66,10 @@ class PyOCDBackend(BackendInterface):
         # 供下一次连接等待旧 J-Link 句柄真正释放后再 open，避免并发抢占同一仿真器。
         self._close_events: dict[str, threading.Event] = {}
         self._known_probe_uids: set[str] = set()
+        # 探针连续缺失轮询次数计数：CMSIS-DAP 探针（如 Geehy Link V2）连接成功后
+        # 会在 USB 总线上短暂重新枚举（USB reset），导致误判为拔出。只有连续缺失
+        # REMOVAL_GRACE_POLLS 次才真正判定拔出，避免误拆刚建立的会话。
+        self._missing_polls: dict[str, int] = {}
         self._pending_target: str | None = None  # 连接时使用的目标型号
         self._probe_info_cache: dict[str, ProbeInfo] = {}  # 缓存探针初始信息（避免连接后名称变化）
         self._cancel_flag: threading.Event = threading.Event()
@@ -85,13 +94,20 @@ class PyOCDBackend(BackendInterface):
         return False
 
     def list_probes(self) -> list[ProbeInfo]:
-        """扫描所有已连接的 CMSIS-DAP 探针（缓存初始信息，避免连接后名称变化）"""
+        """返回所有可见探针（缓存初始信息，避免连接后名称变化）。
+
+        Windows 上 WinUSB 探针被 pyOCD 会话独占打开后，ConnectHelper 枚举会
+        看不到它（详见 detect_probe_changes 注释）。因此这里把"正持有活动会话
+        但仍插着的探针"补充进来，避免会话建立后探针从设备列表/拔出检测中消失。
+        """
         from pyocd.core.helpers import ConnectHelper
 
         probes = ConnectHelper.get_all_connected_probes(blocking=False)
         result = []
+        seen = set()
         for probe in probes:
             uid = probe.unique_id
+            seen.add(uid)
             # 首次发现时缓存探针信息；已连接的探针 product_name 会变化，用缓存保持一致
             if uid not in self._probe_info_cache:
                 info = ProbeInfo(
@@ -104,6 +120,15 @@ class PyOCDBackend(BackendInterface):
                 )
                 self._probe_info_cache[uid] = info
             result.append(self._probe_info_cache[uid])
+
+        # 补上"我们正持有活动会话、但被枚举隐藏"的探针（用缓存的初始信息）
+        with self._lock:
+            session_ids = {uid for uid, s in self._sessions.items()
+                           if s.state == ProbeState.CONNECTED}
+        for uid in session_ids - seen:
+            if uid in self._probe_info_cache:
+                result.append(self._probe_info_cache[uid])
+
         return result
 
     def get_probe_states(self) -> list[dict]:
@@ -125,17 +150,47 @@ class PyOCDBackend(BackendInterface):
     # ── 热插拔检测 ──────────────────────────────────────────────
 
     def detect_probe_changes(self) -> tuple[list[ProbeInfo], list[str]]:
-        """检测探针变化，返回 (新增探针列表, 消失探针uid列表)"""
+        """检测探针变化，返回 (新增探针列表, 消失探针uid列表)
+
+        关键约束：Windows 上 WinUSB 探针被 pyOCD 会话独占打开后，
+        ConnectHelper.get_all_connected_probes() 枚举不到它（实测验证：会话
+        打开期间探针从枚举中消失，关闭会话后恢复）。因此：
+          1. 我们正持有活动会话的探针一律视为"存在"，绝不判为拔出；
+             否则刚建立的会话会被误拆（连接图标回退未连接）。
+          2. 无会话的探针做去抖（debounce）：需连续缺失 REMOVAL_GRACE_POLLS
+             次轮询才判为真正拔出，避免个别轮询的偶发抖动误报。
+        """
         current_probes = self.list_probes()
         current_uids = {p.uid for p in current_probes}
 
         with self._lock:
-            added = [p for p in current_probes if p.uid not in self._known_probe_uids]
-            removed = [uid for uid in self._known_probe_uids if uid not in current_uids]
-            self._known_probe_uids = current_uids
-            # 清理已拔出探针的信息缓存
-            for uid in removed:
-                self._probe_info_cache.pop(uid, None)
+            # 正持有活动会话的探针 = 物理上仍存在，即使枚举看不到
+            engaged = {uid for uid, s in self._sessions.items()
+                       if s.state == ProbeState.CONNECTED}
+            present = current_uids | engaged
+
+            added = []
+            removed = []
+
+            # 1) 新出现的探针：本次存在且此前既不已知也非待确认拔除
+            for p in current_probes:
+                if p.uid not in self._known_probe_uids and p.uid not in self._missing_polls:
+                    added.append(p)
+                    self._known_probe_uids.add(p.uid)
+
+            # 2) 处理缺失/重新出现
+            for uid in list(self._known_probe_uids):
+                if uid in present:
+                    # 存在（被枚举或由活跃会话持有）：恢复，清除待确认拔除计数
+                    self._missing_polls.pop(uid, None)
+                else:
+                    # 本次缺失：累计缺失轮次，达阈值才确认拔出
+                    self._missing_polls[uid] = self._missing_polls.get(uid, 0) + 1
+                    if self._missing_polls[uid] >= REMOVAL_GRACE_POLLS:
+                        removed.append(uid)
+                        self._known_probe_uids.discard(uid)
+                        self._missing_polls.pop(uid, None)
+                        self._probe_info_cache.pop(uid, None)
 
         return added, removed
 
