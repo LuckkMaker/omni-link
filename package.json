@@ -12,7 +12,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "python:dev": "cd python && ..\\.venv\\Scripts\\python.exe server.py --port 8765",
+    "python:dev": "cd python && ..\\.venv\\Scripts\\python.exe server.py",
     "python:install": "python -m venv .venv && .venv\\Scripts\\pip.exe install -r python/requirements.txt",
     "package": "powershell -ExecutionPolicy Bypass -File build.ps1",
     "package:clean": "powershell -ExecutionPolicy Bypass -File build.ps1 -Clean"

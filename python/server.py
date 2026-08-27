@@ -9,6 +9,7 @@ OMNI Link - Python 后端入口
 """
 
 import sys
+import os
 import json
 import asyncio
 import argparse
@@ -113,9 +114,22 @@ async def health():
     }
 
 
+def load_config_port():
+    """从项目根目录的 backend.config.json 读取后端端口，未配置则返回 None。"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend.config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        port = cfg.get("backendPort")
+        return int(port) if port else None
+    except Exception:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="OMNI Link Backend Server")
-    parser.add_argument("--port", type=int, default=0, help="监听端口 (0=自动分配)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="监听端口 (默认读取 backend.config.json，未配置则自动分配)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="监听地址")
     parser.add_argument("--log-level", type=str, default="info",
                         choices=["debug", "info", "warning", "error"],
@@ -130,9 +144,11 @@ def main():
     )
 
     actual_port = args.port
+    if actual_port is None:
+        actual_port = load_config_port()
 
-    # 如果端口为 0（自动分配），先绑定一个 socket 获取可用端口
-    if actual_port == 0:
+    # 如果端口未配置或为 0（自动分配），先绑定一个 socket 获取可用端口
+    if actual_port is None or actual_port == 0:
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind((args.host, 0))
