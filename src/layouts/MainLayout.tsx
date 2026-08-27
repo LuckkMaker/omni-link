@@ -71,8 +71,12 @@ export default function MainLayout() {
     (s) => s.probes.find((p) => p.uid === s.selectedUid)?.state === 'connected'
   )
   const [sidebarOpen, setSidebarOpen] = useState(!isConnected)
+  // 折叠态下 hover 临时展开状态（仅当基础状态为折叠时生效）
+  const [sidebarHovered, setSidebarHovered] = useState(false)
+  const effectiveSidebarOpen = sidebarOpen || (sidebarHovered && !sidebarOpen)
   useEffect(() => {
     setSidebarOpen(!isConnected)
+    setSidebarHovered(false)
   }, [isConnected])
 
   // Commander keep-alive：首次进入 /commander 才挂载，之后切走仅隐藏（display:none），
@@ -136,10 +140,13 @@ export default function MainLayout() {
   return (
     <div className="flex h-screen w-full flex-col">
       <div className="flex flex-1 min-h-0">
-        <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen}>
-          <Sidebar>
+        <SidebarProvider open={effectiveSidebarOpen} onOpenChange={setSidebarOpen}>
+          <Sidebar
+            onMouseEnter={() => setSidebarHovered(true)}
+            onMouseLeave={() => setSidebarHovered(false)}
+          >
             <SidebarHeader>
-              <DeviceSwitcher collapsed={!sidebarOpen} />
+              <DeviceSwitcher collapsed={!effectiveSidebarOpen} />
             </SidebarHeader>
 
             <SidebarContent>
@@ -162,7 +169,7 @@ export default function MainLayout() {
 
                   {/* 工具 — 可展开的二级菜单 */}
                   <SidebarMenuItem>
-                    {!sidebarOpen ? (
+                    {!effectiveSidebarOpen ? (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <SidebarMenuButton isActive={isToolsActive} collapseIconOnly={false}>
@@ -231,7 +238,7 @@ export default function MainLayout() {
               </SidebarGroup>
             </SidebarContent>
 
-            {!sidebarOpen ? null : (
+            {!effectiveSidebarOpen ? null : (
               <SidebarFooter className="max-h-[45%] overflow-y-auto border-t border-border">
                 <InfoPanel />
               </SidebarFooter>
