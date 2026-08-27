@@ -821,9 +821,16 @@ async def zone_source_search(uid: str, query: str, limit: int = 200):
 
 
 def _resolve_source_path(uid: str, file: str) -> str | None:
-    """将源码文件标识（可能为 basename）解析为磁盘绝对路径；无法解析或不存在时返回 None"""
-    file_path = file
-    if not os.path.isabs(file_path):
+    """将源码文件标识（可能为 basename）解析为磁盘绝对路径；无法解析或不存在时返回 None。
+
+    优先快速路径（绝对值 / comp_dir 拼接）；失败时走 elf_backend 的兜底同名文件
+    有界搜索，规避部分 Keil/armclang 工程在 DWARF 里记录的过冲包含路径。
+    """
+    if os.path.isabs(file):
+        fp = os.path.normpath(file)
+        if os.path.isfile(fp):
+            return fp
+    else:
         comp_dir = None
         with elf_backend._lock:
             entry = elf_backend._entries.get(uid)
@@ -835,10 +842,10 @@ def _resolve_source_path(uid: str, file: str) -> str | None:
                     comp_dir = info.comp_dir
                     break
         if comp_dir:
-            file_path = os.path.join(comp_dir, file)
-    if not os.path.isfile(file_path):
-        return None
-    return os.path.normpath(file_path)
+            fp = os.path.normpath(os.path.join(comp_dir, file))
+            if os.path.isfile(fp):
+                return fp
+    return elf_backend.resolve_source_file(uid, file)
 
 
 @router.get("/probes/{uid}/zone/source/content")
