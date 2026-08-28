@@ -40,8 +40,6 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(0)} KB`
 }
 
-/** localStorage key：记录上一次选择的 ELF 路径，方便下次启动会话时快速确认 */
-const ELF_LAST_PATH_KEY = 'omni_link_last_elf_path'
 /** localStorage key：记录「运行到 main()」开关，跨会话保持一致（含已连接快速启动路径） */
 export const RUN_TO_MAIN_KEY = 'omni_link_run_to_main'
 
@@ -226,15 +224,7 @@ export function ConnectionConfigDialog({
     }
   }, [isJlink, pendingTarget, jlinkDevices, loadingJlinkDevices])
 
-  // 打开 start 模式时，预填上一次选择的 ELF 路径（作为默认值，用户仍可重新选择或确认使用）
-  useEffect(() => {
-    if (open && mode === 'start') {
-      const last = localStorage.getItem(ELF_LAST_PATH_KEY)
-      if (last) setElfPath(last)
-    }
-  }, [open, mode])
-
-  // 选择 ELF 文件（仅 start 模式）
+  // 选择 ELF 文件（仅 start 模式；每次启动会话都须重新选择，不复用/不记住上次路径）
   const handlePickElf = async () => {
     const path = await window.electron?.openFileDialog?.({
       extensions: ['elf', 'axf'],
@@ -243,7 +233,6 @@ export function ConnectionConfigDialog({
     if (path) {
       setElfPath(path)
       setElfError(null)
-      localStorage.setItem(ELF_LAST_PATH_KEY, path)
     }
   }
 
@@ -427,11 +416,11 @@ export function ConnectionConfigDialog({
             {isJlink && !loadingJlinkDevices && pendingTarget ? (
               jlinkMatch.ambiguous ? (
                 <p className="text-xs text-amber-600">
-                  匹配到多个 J-Link 设备，已选 {pendingJlinkDevice}，可点齿轮调整
+                  匹配到多个 J-Link 设备，已选 {pendingJlinkDevice}，可点击调整
                 </p>
               ) : jlinkMatch.none ? (
                 <p className="text-xs text-red-500">
-                  未在 J-Link 库中匹配到设备名，请点齿轮选择
+                  未在 J-Link 库中匹配到设备名，请点击选择
                 </p>
               ) : pendingJlinkDevice ? (
                 <p className="text-xs text-muted-foreground">

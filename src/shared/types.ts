@@ -257,6 +257,7 @@ export interface SourceSummary {
   builtin: number
   pack: number
   flm: number
+  custom: number
   total: number
   available: number
   metadata_only: number

@@ -389,7 +389,8 @@ def get_source_summary() -> dict:
     """获取各来源的设备数量统计"""
     with _lock:
         devices = _read_all()
-        summary = {"builtin": 0, "pack": 0, "flm": 0, "total": len(devices)}
+        # custom 为手动新增、不带 FLM 算法的自定义芯片（source=custom）
+        summary = {"builtin": 0, "pack": 0, "flm": 0, "custom": 0, "total": len(devices)}
         for d in devices:
             source = d.get("source", "builtin")
             if source in summary:

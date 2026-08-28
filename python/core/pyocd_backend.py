@@ -18,6 +18,11 @@ from core.events import event_manager
 
 logger = logging.getLogger(__name__)
 
+
+class FlashOperationCancelled(Exception):
+    """内部信号：烧录/擦除途中用户请求取消，由操作外层 except 捕获转成 FlashResult。"""
+
+
 # 拔出判定所需的连续缺失轮询次数（去抖）：CMSIS-DAP 探针连接成功后可能短暂
 # 重新枚举（USB reset），并非真正拔出，需连续缺失多轮才判定为拔出。
 # 每次轮询间隔 2s，2 轮=约 4s 确认时间。
@@ -167,7 +172,6 @@ class PyOCDBackend(BackendInterface):
             # 正持有活动会话的探针 = 物理上仍存在，即使枚举看不到
             engaged = {uid for uid, s in self._sessions.items()
                        if s.state == ProbeState.CONNECTED}
-            present = current_uids | engaged
 
             added = []
             removed = []
@@ -180,19 +184,52 @@ class PyOCDBackend(BackendInterface):
 
             # 2) 处理缺失/重新出现
             for uid in list(self._known_probe_uids):
-                if uid in present:
-                    # 存在（被枚举或由活跃会话持有）：恢复，清除待确认拔除计数
+                if uid in current_uids:
+                    # 枚举可见：存在，恢复，清除待确认拔除计数
                     self._missing_polls.pop(uid, None)
-                else:
-                    # 本次缺失：累计缺失轮次，达阈值才确认拔出
-                    self._missing_polls[uid] = self._missing_polls.get(uid, 0) + 1
-                    if self._missing_polls[uid] >= REMOVAL_GRACE_POLLS:
-                        removed.append(uid)
-                        self._known_probe_uids.discard(uid)
+                elif uid in engaged:
+                    # 枚举隐藏但会话仍 CONNECTED：可能是 WinUSB 独占（在线）。
+                    # 做一次轻量健康探测以区分"独占隐藏（仍在线）"与"物理拔出（失联）"：
+                    #   - 存活 → 独占隐藏，恢复，绝不判拔出（保留既有修复）
+                    #   - 失联 → 落入下方去抖累计，达阈值才确认拔出（修复"物理拔出永不判 removed"）
+                    if self._probe_alive(uid):
                         self._missing_polls.pop(uid, None)
-                        self._probe_info_cache.pop(uid, None)
+                        continue
+                # 枚举缺失且（无会话 或 健康探测失联）：累计去抖，达阈值才确认拔出
+                self._missing_polls[uid] = self._missing_polls.get(uid, 0) + 1
+                if self._missing_polls[uid] >= REMOVAL_GRACE_POLLS:
+                    removed.append(uid)
+                    self._known_probe_uids.discard(uid)
+                    self._missing_polls.pop(uid, None)
+                    self._probe_info_cache.pop(uid, None)
 
         return added, removed
+
+    def _probe_alive(self, probe_uid: str) -> bool:
+        """轻量健康探测：区分 WinUSB 独占隐藏（仍在线）与物理拔出（失联）。
+
+        仅对"枚举缺失但会话仍 CONNECTED"的探针调用。借助 op_lock 非阻塞加锁做一次
+        寄存器读（避免与 API 调试操作并发污染 DAP）；探测失败视为失联。
+        """
+        with self._lock:
+            session_info = self._sessions.get(probe_uid)
+        if session_info is None or session_info.state != ProbeState.CONNECTED:
+            return False
+        py_session = getattr(session_info, "session", None)
+        target = getattr(py_session, "target", None) if py_session else None
+        if target is None:
+            return False
+        op_lock = self.get_op_lock(probe_uid)
+        if op_lock is None or not op_lock.acquire(blocking=False):
+            # 正被 API 使用（大概率仍在枚举/操作中）：保守视为在线，避免误拆正常会话
+            return True
+        try:
+            target.read_core_registers(["pc"])
+            return True
+        except Exception:
+            return False
+        finally:
+            op_lock.release()
 
     # ── 连接管理 ──────────────────────────────────────────────
 
@@ -873,6 +910,8 @@ class PyOCDBackend(BackendInterface):
                         sector_size = getattr(region, 'sector_size', 0) or 16384
                         total_sectors = region.length // sector_size
                         for i in range(total_sectors):
+                            if self._check_cancel():
+                                raise FlashOperationCancelled()
                             flash.erase_sector(region.start + i * sector_size)
                             event_manager.emit("flash.progress", {
                                 "phase": "erase", "current": i + 1, "total": total_sectors,
@@ -937,6 +976,8 @@ class PyOCDBackend(BackendInterface):
                     flash.init(Flash.Operation.ERASE)
                     try:
                         for addr in sector_addrs:
+                            if self._check_cancel():
+                                raise FlashOperationCancelled()
                             flash.erase_sector(addr)
                             erased += 1
                             event_manager.emit("flash.progress", {
@@ -971,6 +1012,10 @@ class PyOCDBackend(BackendInterface):
             duration = int((time.time() - start_time) * 1000)
             event_manager.log("info", f"Erase complete ({duration}ms)")
             return FlashResult(success=True, duration_ms=duration)
+        except FlashOperationCancelled:
+            canceled_ms = int((time.time() - start_time) * 1000)
+            event_manager.log("warning", f"Erase cancelled ({canceled_ms}ms)")
+            return FlashResult(success=False, error="Operation cancelled by user", duration_ms=canceled_ms)
         except Exception as e:
             logger.exception("Erase failed")
             event_manager.log("error", f"Erase failed: {e}")
@@ -1055,11 +1100,15 @@ class PyOCDBackend(BackendInterface):
 
             def progress_callback(percent: float):
                 # FlashLoader 报告的是 0.0-1.0 的浮点数，前端需要 0-100 的百分比
+                if self._check_cancel():
+                    raise FlashOperationCancelled()
                 progress_pct = round(percent * 100, 2)
+                # current/total 统一用实际写入量 actual_data_size，与 erase 相位口径一致，
+                # 避免 HEX/ELF 下 file_size 与实际数据段大小不符导致前后相位进度不一致。
                 event_manager.emit("flash.progress", {
                     "phase": "program",
-                    "current": int(file_size * percent),
-                    "total": file_size,
+                    "current": int(actual_data_size * percent),
+                    "total": actual_data_size,
                     "percent": progress_pct,
                 })
 
@@ -1109,6 +1158,10 @@ class PyOCDBackend(BackendInterface):
                 bytes_written=actual_data_size,
                 duration_ms=duration,
             )
+        except FlashOperationCancelled:
+            canceled_ms = int((time.time() - start_time) * 1000)
+            event_manager.log("warning", f"Programming cancelled ({canceled_ms}ms)")
+            return FlashResult(success=False, error="Operation cancelled by user", duration_ms=canceled_ms)
         except Exception as e:
             logger.exception("Programming failed")
             event_manager.log("error", f"Programming failed: {e}")
@@ -1177,6 +1230,8 @@ class PyOCDBackend(BackendInterface):
             chunk_size = 32768
             for seg_addr, seg_data in segments:
                 for offset in range(0, len(seg_data), chunk_size):
+                    if self._check_cancel():
+                        raise FlashOperationCancelled()
                     read_len = min(chunk_size, len(seg_data) - offset)
                     addr = seg_addr + offset
 
@@ -1218,6 +1273,8 @@ class PyOCDBackend(BackendInterface):
             duration = int((time.time() - start_time) * 1000)
             event_manager.log("info", f"Verify OK ({total_bytes} bytes, {duration}ms)")
             return FlashResult(success=True, duration_ms=duration)
+        except FlashOperationCancelled:
+            return FlashResult(success=False, error="Operation cancelled by user")
         except Exception as e:
             logger.exception("Verify failed")
             event_manager.log("error", f"Verify failed: {e}")

@@ -132,8 +132,12 @@ export function ChipManagement() {
               <p className="text-lg font-semibold tabular-nums">{summary?.pack ?? 0}</p>
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">自定义</p>
+              <p className="text-xs text-muted-foreground">FLM</p>
               <p className="text-lg font-semibold tabular-nums">{summary?.flm ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">自定义</p>
+              <p className="text-lg font-semibold tabular-nums">{summary?.custom ?? 0}</p>
             </div>
           </div>
 

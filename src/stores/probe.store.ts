@@ -124,7 +124,7 @@ interface ProbeStore {
   setPendingInterface: (iface: DebugInterface) => void
   setPendingSpeed: (speed: number) => void
   setPendingConnectMode: (mode: ConnectMode) => void
-  setPendingJlinkDevice: (device: string) => void
+  setPendingJlinkDevice: (device: string | null) => void
   /** 保存 Flash 配置中选中的扇区索引 */
   setSelectedSectorIndices: (indices: Set<number>) => void
   /** 连接仿真器 */
@@ -241,7 +241,8 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   setPendingInterface: (iface) => set({ pendingInterface: iface }),
   setPendingSpeed: (speed) => set({ pendingSpeed: speed }),
   setPendingConnectMode: (mode) => set({ pendingConnectMode: mode }),
-  setPendingJlinkDevice: (device) => set({ pendingJlinkDevice: device.trim() || null }),
+  setPendingJlinkDevice: (device) =>
+    set({ pendingJlinkDevice: device ? device.trim() || null : null }),
   setSelectedSectorIndices: (indices) => set({ selectedSectorIndices: new Set(indices) }),
 
   connectProbe: async (uid) => {
