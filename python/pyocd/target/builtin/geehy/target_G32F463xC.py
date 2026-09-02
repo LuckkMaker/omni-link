@@ -21,6 +21,7 @@
 
 from ....coresight.coresight_target import CoreSightTarget
 from ....core.memory_map import (FlashRegion, RamRegion, MemoryMap)
+from ....debug.svd.loader import SVDFile
 
 CHIP_ERASE_WEIGHT = 15.0
 
@@ -77,7 +78,7 @@ FLASH_ALGO = {
 }
 
 
-class G32F463x8(CoreSightTarget):
+class G32F463xC(CoreSightTarget):
     """G32F463: 256KB Flash, 128KB SRAM."""
 
     VENDOR = "Geehy"
@@ -93,3 +94,4 @@ class G32F463x8(CoreSightTarget):
 
     def __init__(self, session):
         super().__init__(session, self.MEMORY_MAP)
+        self._svd_location = SVDFile.from_builtin("G32F463.svd")

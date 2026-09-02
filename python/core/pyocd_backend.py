@@ -251,7 +251,7 @@ class PyOCDBackend(BackendInterface):
                 - under-reset: 拉低复位线时连接（用于深度睡眠/被锁目标）
             force: 是否强制重连。为 True 时即使已连接也会关闭旧会话并以新参数重连
                 （用于切换连接模式，如 Zone 会话的 attach/halt 绑定）。
-            device: J-Link 目标设备名（如 G32F463X8），None 则不用或走接口默认。
+            device: J-Link 目标设备名（如 G32F463XC），None 则不用或走接口默认。
                 对 J-Link 探针，SWD 也必须设置 jlink.device 才会建立目标连接
                 （否则 pyOCD 只调 coresight_configure()，目标 target_connected=False，
                 表现为"连不上"，实际是 J-Link 根本没做设备连接）。
@@ -323,7 +323,7 @@ class PyOCDBackend(BackendInterface):
         # 关键：SWD 下 J-Link 也必须设置 jlink.device 才会调用 JLink.connect(device)
         # 建立目标连接，否则 pyOCD 只调 pylink 的 coresight_configure()，
         # 目标 target_connected=False（表现为连不上，但探针/软件层都正常）。
-        # SWD 的 device 名由前端 J-Link 输入框提供（如 G32F463X8）。
+        # SWD 的 device 名由前端 J-Link 输入框提供（如 G32F463XC）。
         if device:
             options['jlink.device'] = device
         elif interface == 'jtag':

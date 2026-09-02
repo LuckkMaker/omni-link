@@ -148,7 +148,8 @@ from .st import target_STM32F407xx
 # from . import target_Air32F103xx
 # from . import target_AMA3B1KK
 
-from .geehy import target_G32F463x8
+from .geehy import target_G32F401x8
+from .geehy import target_G32F463xC
 
 ## @brief Dictionary of all builtin targets.
 #
@@ -160,5 +161,6 @@ BUILTIN_TARGETS = {
           'stm32f103rc' : target_STM32F103RC.STM32F103RC,
           'stm32f407xg' : target_STM32F407xx.STM32F407xG,
           'stm32f429xg' : target_STM32F429xx.STM32F429xG,
-          'g32f463x8' : target_G32F463x8.G32F463x8,
+          'g32f463xc' : target_G32F463xC.G32F463xC,
+          'g32f401x8' : target_G32F401x8.G32F401x8,
          }

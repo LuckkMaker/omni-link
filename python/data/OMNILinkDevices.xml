@@ -34,9 +34,23 @@
       <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x400" is_boot_memory="false"/>
     </flash_regions>
   </device>
-  <device part_number="g32f463x8" source="builtin">
+  <device part_number="g32f401x8" source="builtin">
     <vendor>Geehy</vendor>
-    <display_name>G32F463x8</display_name>
+    <display_name>G32F401x8</display_name>
+    <core>Cortex-M4F</core>
+    <num_cores>1</num_cores>
+    <flash_size>64</flash_size>
+    <ram_size>16</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x200" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="g32f463xc" source="builtin">
+    <vendor>Geehy</vendor>
+    <display_name>G32F463xC</display_name>
     <core>Cortex-M4F</core>
     <num_cores>1</num_cores>
     <flash_size>256</flash_size>

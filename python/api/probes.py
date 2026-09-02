@@ -23,7 +23,7 @@ class ConnectRequest(BaseModel):
     connect_mode: str | None = None
     # 是否强制重连：为 True 时即使已连接也按新 connect_mode 重连（用于切换会话连接模式）
     force: bool = False
-    # J-Link 目标设备名（如 G32F463X8）：J-Link 探针必须设置才能建立目标连接（SWD/JTAG 均依赖）
+    # J-Link 目标设备名（如 G32F463XC）：J-Link 探针必须设置才能建立目标连接（SWD/JTAG 均依赖）
     jlink_device: str | None = None
 
 

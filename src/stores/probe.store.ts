@@ -95,7 +95,7 @@ interface ProbeStore {
   pendingSpeed: number
   /** 连接前选择的连接模式 */
   pendingConnectMode: ConnectMode
-  /** J-Link 目标设备名（前端 J-Link 输入框填写，如 G32F463X8） */
+  /** J-Link 目标设备名（前端 J-Link 输入框填写，如 G32F463XC） */
   pendingJlinkDevice: string | null
   /** Flash 配置：选中的扇区索引集合（确定后保存） */
   selectedSectorIndices: Set<number>
