@@ -37,6 +37,7 @@ include = ["pyocd*"]
 [tool.setuptools.package-data]
 pyocd = [
     "debug/svd/svd_data.zip",
-    "debug/sequences/default_sequences.yaml",
+    "debug/sequences/*.lark",
+    "debug/sequences/*.yaml",
     "LICENSE",
 ]
