@@ -34,6 +34,491 @@
       <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x400" is_boot_memory="false"/>
     </flash_regions>
   </device>
+  <device part_number="stm32f103rc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103RC</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103RC</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x80000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f103c8" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103C8</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>64</flash_size>
+    <ram_size>20</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103C8</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f103cb" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103CB</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>20</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103CB</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f103rb" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103RB</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>20</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103RB</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f103ve" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103VE</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103VE</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x80000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f103ze" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103ZE</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103ZE</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x80000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f103zg" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F103ZG</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>1024</flash_size>
+    <ram_size>96</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F103ZG</jlink_device>
+    <jlink_search>STM32F103</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x100000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f105rb" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F105RB</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F105RB</jlink_device>
+    <jlink_search>STM32F105</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f105rc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F105RC</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>256</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F105RC</jlink_device>
+    <jlink_search>STM32F105</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f105vc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F105VC</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>256</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F105VC</jlink_device>
+    <jlink_search>STM32F105</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f107rb" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F107RB</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F107RB</jlink_device>
+    <jlink_search>STM32F107</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f107rc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F107RC</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>256</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F107RC</jlink_device>
+    <jlink_search>STM32F107</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f107vc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F107VC</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>256</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F107VC</jlink_device>
+    <jlink_search>STM32F107</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f051" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F051</display_name>
+    <core>Cortex-M0</core>
+    <num_cores>1</num_cores>
+    <flash_size>64</flash_size>
+    <ram_size>8</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0x40015800</device_id_address>
+    <jlink_device>STM32F051T8</jlink_device>
+    <jlink_search>STM32F0xx</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f412xe" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F412xE</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>256</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F412RE</jlink_device>
+    <jlink_search>STM32F412</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="true"/>
+      <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08020000" length="0x60000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f412xg" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F412xG</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>1024</flash_size>
+    <ram_size>256</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F412RG</jlink_device>
+    <jlink_search>STM32F412</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="true"/>
+      <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f429xi" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F429xI</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>2048</flash_size>
+    <ram_size>192</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F429ZI</jlink_device>
+    <jlink_search>STM32F429</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="true"/>
+      <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08100000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08110000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08120000" length="0xE0000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f439xg" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F439xG</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>256</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F439VG</jlink_device>
+    <jlink_search>STM32F439</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="true"/>
+      <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08020000" length="0x60000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f439xi" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F439xI</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>2048</flash_size>
+    <ram_size>192</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F439ZI</jlink_device>
+    <jlink_search>STM32F439</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="true"/>
+      <region start="0x08010000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08020000" length="0xE0000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08100000" length="0x10000" sector_size="0x4000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08110000" length="0x10000" sector_size="0x10000" page_size="0x1000" is_boot_memory="false"/>
+      <region start="0x08120000" length="0xE0000" sector_size="0x20000" page_size="0x1000" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32f767xx" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32F767xx</display_name>
+    <core>Cortex-M7</core>
+    <num_cores>1</num_cores>
+    <flash_size>2048</flash_size>
+    <ram_size>512</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32F767ZI</jlink_device>
+    <jlink_search>STM32F767</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x8000" page_size="0x400" is_boot_memory="true"/>
+      <region start="0x08020000" length="0x20000" sector_size="0x20000" page_size="0x400" is_boot_memory="false"/>
+      <region start="0x08040000" length="0x1C0000" sector_size="0x40000" page_size="0x400" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32h723xx" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32H723xx</display_name>
+    <core>Cortex-M7</core>
+    <num_cores>1</num_cores>
+    <flash_size>1024</flash_size>
+    <ram_size>176</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0x5C001000</device_id_address>
+    <jlink_device>STM32H723VE</jlink_device>
+    <jlink_search>STM32H723</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x100000" sector_size="0x20000" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32h743xx" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32H743xx</display_name>
+    <core>Cortex-M7</core>
+    <num_cores>1</num_cores>
+    <flash_size>2048</flash_size>
+    <ram_size>480</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0x5C001000</device_id_address>
+    <jlink_device>STM32H743ZI</jlink_device>
+    <jlink_search>STM32H743</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x100000" sector_size="0x20000" page_size="0x400" is_boot_memory="true"/>
+      <region start="0x08100000" length="0x100000" sector_size="0x20000" page_size="0x400" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32h750xx" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32H750xx</display_name>
+    <core>Cortex-M7</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>480</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0x5C001000</device_id_address>
+    <jlink_device>STM32H750VB</jlink_device>
+    <jlink_search>STM32H750</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x20000" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32h7b0xx" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32H7B0xx</display_name>
+    <core>Cortex-M7</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>1280</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0x5C001000</device_id_address>
+    <jlink_device>STM32H7B0RB</jlink_device>
+    <jlink_search>STM32H7B0</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x2000" page_size="0x8000" is_boot_memory="true"/>
+      <region start="0x08100000" length="0x40000" sector_size="0x2000" page_size="0x8000" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32l031x6" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32L031x6</display_name>
+    <core>Cortex-M0+</core>
+    <num_cores>1</num_cores>
+    <flash_size>32</flash_size>
+    <ram_size>8</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0x40015800</device_id_address>
+    <jlink_device>STM32L031K6</jlink_device>
+    <jlink_search>STM32L031</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x8000" sector_size="0x80" page_size="0x400" is_boot_memory="true"/>
+      <region start="0x08080000" length="0x400" sector_size="0x400" page_size="0x400" is_boot_memory="false"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32l432xc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32L432xC</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>256</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32L432KC</jlink_device>
+    <jlink_search>STM32L432</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32l475xc" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32L475xC</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>256</flash_size>
+    <ram_size>128</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32L475CC</jlink_device>
+    <jlink_search>STM32L475</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x40000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32l475xe" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32L475xE</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>128</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32L475VE</jlink_device>
+    <jlink_search>STM32L475</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x80000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
+  <device part_number="stm32l475xg" source="builtin">
+    <vendor>ST</vendor>
+    <display_name>STM32L475xG</display_name>
+    <core>Cortex-M4</core>
+    <num_cores>1</num_cores>
+    <flash_size>1024</flash_size>
+    <ram_size>128</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <jlink_device>STM32L475ZG</jlink_device>
+    <jlink_search>STM32L475</jlink_search>
+    <flash_regions>
+      <region start="0x08000000" length="0x100000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+  </device>
   <device part_number="g32f401x8" source="builtin">
     <vendor>Geehy</vendor>
     <display_name>G32F401x8</display_name>

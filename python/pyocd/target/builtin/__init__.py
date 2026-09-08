@@ -65,16 +65,23 @@ from ...coresight.coresight_target import CoreSightTarget
 # from . import target_nRF54L15
 # from . import target_nRF91xx
 # from . import target_S32K344
+from .st import target_STM32F051T8
 from .st import target_STM32F103RC
-# from . import target_STM32F051T8
-# from . import target_STM32F412xx
+from .st import target_STM32F103xx
+from .st import target_STM32F105xx
+from .st import target_STM32F107xx
+from .st import target_STM32F412xx
 from .st import target_STM32F429xx
 from .st import target_STM32F407xx
-# from . import target_STM32F439xx
-# from . import target_STM32L432xx
-# from . import target_STM32L475xx
-# from . import target_STM32L031x6
-# from . import target_STM32F767xx
+from .st import target_STM32F439xx
+from .st import target_STM32F767xx
+from .st import target_STM32H723xx
+from .st import target_STM32H743xx
+from .st import target_STM32H750xx
+from .st import target_STM32H7B0xx
+from .st import target_STM32L031x6
+from .st import target_STM32L432xx
+from .st import target_STM32L475xx
 # from . import target_MAX32600
 # from . import target_MAX32620
 # from . import target_MAX32625
@@ -158,9 +165,37 @@ from .geehy import target_G32F463xC
 #   normalises user-provided target type names for comparison with these.
 BUILTIN_TARGETS = {
           'cortex_m': CoreSightTarget,
+          'stm32f051' : target_STM32F051T8.STM32F051,
           'stm32f103rc' : target_STM32F103RC.STM32F103RC,
+          'stm32f103c8' : target_STM32F103xx.STM32F103C8,
+          'stm32f103cb' : target_STM32F103xx.STM32F103CB,
+          'stm32f103rb' : target_STM32F103xx.STM32F103RB,
+          'stm32f103ve' : target_STM32F103xx.STM32F103VE,
+          'stm32f103ze' : target_STM32F103xx.STM32F103ZE,
+          'stm32f103zg' : target_STM32F103xx.STM32F103ZG,
+          'stm32f105rb' : target_STM32F105xx.STM32F105RB,
+          'stm32f105rc' : target_STM32F105xx.STM32F105RC,
+          'stm32f105vc' : target_STM32F105xx.STM32F105VC,
+          'stm32f107rb' : target_STM32F107xx.STM32F107RB,
+          'stm32f107rc' : target_STM32F107xx.STM32F107RC,
+          'stm32f107vc' : target_STM32F107xx.STM32F107VC,
+          'stm32f412xe' : target_STM32F412xx.STM32F412xE,
+          'stm32f412xg' : target_STM32F412xx.STM32F412xG,
           'stm32f407xg' : target_STM32F407xx.STM32F407xG,
           'stm32f429xg' : target_STM32F429xx.STM32F429xG,
+          'stm32f429xi' : target_STM32F429xx.STM32F429xI,
+          'stm32f439xg' : target_STM32F439xx.STM32F439xG,
+          'stm32f439xi' : target_STM32F439xx.STM32F439xI,
+          'stm32f767xx' : target_STM32F767xx.STM32F767xx,
+          'stm32h723xx' : target_STM32H723xx.STM32H723xx,
+          'stm32h743xx' : target_STM32H743xx.STM32H743xx,
+          'stm32h750xx' : target_STM32H750xx.STM32H750xx,
+          'stm32h7b0xx' : target_STM32H7B0xx.STM32H7B0xx,
+          'stm32l031x6' : target_STM32L031x6.STM32L031x6,
+          'stm32l432xc' : target_STM32L432xx.STM32L432xC,
+          'stm32l475xc' : target_STM32L475xx.STM32L475xC,
+          'stm32l475xe' : target_STM32L475xx.STM32L475xE,
+          'stm32l475xg' : target_STM32L475xx.STM32L475xG,
           'g32f463xc' : target_G32F463xC.G32F463xC,
           'g32f401x8' : target_G32F401x8.G32F401x8,
          }
