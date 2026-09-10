@@ -862,12 +862,20 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
           default: {
             // 可打印字符
             if (ch >= ' ' || ch === '\t') {
-              inputBuf.current =
-                inputBuf.current.slice(0, cursorPos.current) +
-                ch +
-                inputBuf.current.slice(cursorPos.current)
-              cursorPos.current++
-              redrawInputLine()
+              // 光标在行尾：直接写出单个字符即可，避免每次按键整段重绘
+              // （长输入/超宽换行后整段闪动，正是由于反复清空重绘整个输入区）
+              if (cursorPos.current === inputBuf.current.length) {
+                inputBuf.current += ch
+                cursorPos.current++
+                t.write(ch)
+              } else {
+                inputBuf.current =
+                  inputBuf.current.slice(0, cursorPos.current) +
+                  ch +
+                  inputBuf.current.slice(cursorPos.current)
+                cursorPos.current++
+                redrawInputLine()
+              }
             }
           }
         }
