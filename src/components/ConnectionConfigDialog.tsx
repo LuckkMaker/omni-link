@@ -98,6 +98,7 @@ export function ConnectionConfigDialog({
     fetchJlinkDevices,
     selectProbe,
     connectProbe,
+    disconnectProbe,
     setPendingTarget,
     setPendingInterface,
     setPendingSpeed,
@@ -293,6 +294,16 @@ export function ConnectionConfigDialog({
     setProbeError(null)
     setElfError(null)
     void connectProbe(selectedProbe.uid)
+  }
+
+  /** [断开连接]：config 模式且已连接时，断开当前仿真器并关闭弹窗 */
+  const handleDisconnect = () => {
+    if (!selectedProbe) return
+    disconnectProbe(selectedProbe.uid)
+    onOpenChange(false)
+    setErrorMsg(null)
+    setProbeError(null)
+    setElfError(null)
   }
 
   return (
@@ -558,13 +569,24 @@ export function ConnectionConfigDialog({
                     <Button variant="outline" onClick={handleConfirm} disabled={connecting}>
                       确认
                     </Button>
-                    <Button
-                      className="gap-2"
-                      onClick={handleConnect}
-                      disabled={!selectedProbe || connecting || selectedProbe.state === 'connecting'}
-                    >
-                      确认并连接
-                    </Button>
+                    {isConnected ? (
+                      <Button
+                        variant="destructive"
+                        className="gap-2"
+                        disabled={connecting || selectedProbe?.state === 'connecting'}
+                        onClick={handleDisconnect}
+                      >
+                        断开连接
+                      </Button>
+                    ) : (
+                      <Button
+                        className="gap-2"
+                        onClick={handleConnect}
+                        disabled={!selectedProbe || connecting || selectedProbe.state === 'connecting'}
+                      >
+                        确认并连接
+                      </Button>
+                    )}
                   </>
                 )}
                 {showElf && (

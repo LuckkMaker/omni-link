@@ -926,20 +926,21 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
     }
   }, [terminalTheme])
 
-  // 连接状态变化时显示提示（跳过首次挂载）
+  // 连接状态变化时刷新输入行（跳过首次挂载）
   const isFirstMount = useRef(true)
   useEffect(() => {
     const term = termRef.current
     if (!term) return
 
-    // 首次挂载时跳过，不显示 "[Probe disconnected]"
+    // 首次挂载时跳过
     if (isFirstMount.current) {
       isFirstMount.current = false
       return
     }
 
     if (!connected) {
-      term.write(`\r\n${COLOR.yellow}[Probe disconnected]${COLOR.reset}\r\n`)
+      // 回到行首并清除当前行，再画一个干净 prompt，避免反复断开/连接时在同一行叠加成一段 prompt
+      term.write('\r\x1b[2K')
       term.write(PROMPT)
       markInputStart()
       inputBuf.current = ''
