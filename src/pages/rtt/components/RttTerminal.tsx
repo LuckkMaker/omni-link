@@ -380,7 +380,10 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
     }, [tabId])
 
     return (
-      <div ref={containerRef} className="h-full w-full overflow-hidden pl-2" />
+      <>
+        <div ref={containerRef} className="rtt-terminal h-full w-full overflow-hidden" />
+        <style>{`.rtt-terminal .xterm { padding-left: 8px; }`}</style>
+      </>
     )
   }
 )
