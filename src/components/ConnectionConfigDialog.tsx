@@ -20,6 +20,7 @@ import { TargetDeviceDialog } from '@/components/TargetDeviceDialog'
 import { JLinkDeviceDialog } from '@/components/JLinkDeviceDialog'
 import { useProbeStore, SPEED_OPTIONS, CONNECT_MODE_OPTIONS } from '@/stores/probe.store'
 import { useBackendStatus } from '@/hooks/useBackendStatus'
+import type { JLinkDeviceInfo } from '@shared/types'
 
 function formatProbeName(product: string, vendor: string): string {
   if (product && product !== 'Unknown') return product
@@ -38,6 +39,36 @@ function shortenSerial(serial: string, max = 13, keep = 4): string {
 function fmtBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`
   return `${(bytes / 1024).toFixed(0)} KB`
+}
+
+/**
+ * 型号名 → 家族前缀：通配型号（如 APM32F407xG）在 J-Link 库中只有具体型号
+ * （APM32F407IGT6…），取第一个 `x` 之前的字符作前缀锚点。返回大写形式。
+ */
+function familyPrefixOf(partUpper: string): string | null {
+  const idx = partUpper.indexOf('X')
+  if (idx <= 0) return null
+  const prefix = partUpper.slice(0, idx).replace(/[_-]+$/, '')
+  return prefix.length >= 4 ? prefix : null
+}
+
+/**
+ * 设备 core → J-Link 通用核心设备名（如 Cortex-M4F → Cortex-M4）。
+ * 找不到对应通用核心名时返回 null。
+ */
+function genericCoreName(devices: JLinkDeviceInfo[], core: string | undefined | null): string | null {
+  if (!core) return null
+  const uppercore = core.toUpperCase()
+  if (!uppercore.startsWith('CORTEX-M')) return null
+  let num = ''
+  for (const ch of uppercore.slice('CORTEX-M'.length)) {
+    if (ch >= '0' && ch <= '9') num += ch
+    else if (ch === '+') num += ch
+    else break
+  }
+  if (!num) return null
+  const cand = `Cortex-M${num}`
+  return devices.some((d) => d.name.toUpperCase() === cand.toUpperCase()) ? cand : null
 }
 
 /** localStorage key：记录「运行到 main()」开关，跨会话保持一致（含已连接快速启动路径） */
@@ -123,11 +154,13 @@ export function ConnectionConfigDialog({
   // J-Link 设备名选择弹窗开关：点击下方的只读输入框打开模态窗，在其中搜索并选择
   const [jlinkDialogOpen, setJlinkDialogOpen] = useState(false)
 
-  /** 自动匹配 J-Link 设备名的结果（用于提示；none=未匹配到，ambiguous=多候选已取首个） */
+  /** 自动匹配 J-Link 设备名的结果（用于提示；manual=由用户手动选择，none=未匹配到，ambiguous=多候选已取首个，generic=回退通用核心名） */
   const [jlinkMatch, setJlinkMatch] = useState<{
+    manual: boolean
     none: boolean
     ambiguous: boolean
-  }>({ none: false, ambiguous: false })
+    generic: boolean
+  }>({ manual: false, none: false, ambiguous: false, generic: false })
 
   const showElf = mode === 'start'
 
@@ -186,6 +219,7 @@ export function ConnectionConfigDialog({
     let name: string | null = null
     let none = false
     let ambiguous = false
+    let generic = false
 
     if (dev?.jlink_device) {
       // 内置型号自带明确设备名，直接采用
@@ -196,28 +230,37 @@ export function ConnectionConfigDialog({
       if (exact) {
         name = exact.name
       } else {
-        // 精确无匹配：按前缀在库中检索候选（依赖锚点向前缀优先，其次 jlink_search）
-        const pickAnchor = (anchor: string): void => {
+        // 精确无匹配：按锚点依次在库中检索候选，命中第一个即采用。
+        // 锚点优先级: 型号前缀 → jlink_search → 家族前缀(去 x 通配) → 通用核心名(兜底)。
+        // 仅当锚点为通用核心名时才视为 generic 回退，并同样标记 ambiguous 提示可调。
+        const pickAnchor = (anchor: string, isGeneric: boolean): void => {
           const au = anchor.toUpperCase()
           const hits = jlinkDevices.filter((d) => d.name.toUpperCase().startsWith(au))
-          if (hits.length === 1) name = hits[0].name
-          else if (hits.length > 1) {
-            name = hits[0].name
-            ambiguous = true
-          } else {
-            none = true
-          }
+          if (hits.length === 0) return
+          name = hits[0].name
+          ambiguous = hits.length > 1 || isGeneric
+          generic = isGeneric
         }
-        const hasPrefix = jlinkDevices.some((d) => d.name.toUpperCase().startsWith(up))
-        if (hasPrefix) pickAnchor(pendingTarget)
-        else if (dev?.jlink_search) pickAnchor(dev.jlink_search)
-        else none = true
+        const tryAnchor = (anchor: string | null | undefined, isGeneric = false): boolean => {
+          if (!anchor) return false
+          pickAnchor(anchor, isGeneric)
+          return name !== null
+        }
+        const family = familyPrefixOf(up)
+        if (
+          !tryAnchor(up) &&
+          !tryAnchor(dev?.jlink_search) &&
+          !tryAnchor(family) &&
+          !tryAnchor(genericCoreName(jlinkDevices, dev?.core), true)
+        ) {
+          none = true
+        }
       }
     } else {
       none = true
     }
 
-    setJlinkMatch({ none, ambiguous })
+    setJlinkMatch({ manual: false, none, ambiguous, generic })
     if (name) {
       setPendingJlinkDevice(name)
     } else if (dev?.jlink_device === undefined) {
@@ -425,7 +468,15 @@ export function ConnectionConfigDialog({
               <Cpu className="size-4 text-muted-foreground" />
             </button>
             {isJlink && !loadingJlinkDevices && pendingTarget ? (
-              jlinkMatch.ambiguous ? (
+              jlinkMatch.manual ? (
+                <p className="text-xs text-muted-foreground">
+                  已选择 J-Link 设备名：{pendingJlinkDevice}
+                </p>
+              ) : jlinkMatch.generic ? (
+                <p className="text-xs text-amber-600">
+                  未匹配到具体 J-Link 型号，已回退通用核心 {pendingJlinkDevice}，可点击调整
+                </p>
+              ) : jlinkMatch.ambiguous ? (
                 <p className="text-xs text-amber-600">
                   匹配到多个 J-Link 设备，已选 {pendingJlinkDevice}，可点击调整
                 </p>
@@ -622,7 +673,7 @@ export function ConnectionConfigDialog({
         value={pendingJlinkDevice ?? ''}
         onConfirm={(name) => {
           setPendingJlinkDevice(name)
-          setJlinkMatch({ none: false, ambiguous: false })
+          setJlinkMatch({ manual: true, none: false, ambiguous: false, generic: false })
         }}
       />
     </>
