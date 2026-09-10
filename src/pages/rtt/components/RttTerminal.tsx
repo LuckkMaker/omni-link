@@ -326,6 +326,13 @@ export const RttTerminal = forwardRef<RttTerminalApi, RttTerminalProps>(
       const term = termRef.current
       if (!term) return
 
+      // 数据缓冲被清空（停止/重新启动会话会整表重建为空缓冲）时，
+      // 增量写入游标也必须复位，否则旧会话的游标会静默跳过新会话前 N 个数据块。
+      if (tabDataBuffer.length === 0 && writtenBufferCountRef.current > 0) {
+        writtenBufferCountRef.current = 0
+        writtenBytesRef.current = 0
+      }
+
       // 从上次写入位置开始，写入新增的缓冲块
       while (writtenBufferCountRef.current < tabDataBuffer.length) {
         const buf = tabDataBuffer[writtenBufferCountRef.current]
