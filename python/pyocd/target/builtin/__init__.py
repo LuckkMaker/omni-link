@@ -157,6 +157,17 @@ from .st import target_STM32L475xx
 
 from .geehy import target_G32F401x8
 from .geehy import target_G32F463xC
+from .geehy import target_APM32F402xx
+from .geehy import target_APM32F403xx
+from .geehy import target_APM32F405xx
+from .geehy import target_APM32F407xx
+from .geehy import target_APM32F411xx
+from .geehy import target_APM32F415xx
+from .geehy import target_APM32F417xx
+from .geehy import target_APM32F423xx
+from .geehy import target_APM32F425xx
+from .geehy import target_APM32F427xx
+from .geehy import target_APM32F465xx
 
 ## @brief Dictionary of all builtin targets.
 #
@@ -198,4 +209,18 @@ BUILTIN_TARGETS = {
           'stm32l475xg' : target_STM32L475xx.STM32L475xG,
           'g32f463xc' : target_G32F463xC.G32F463xC,
           'g32f401x8' : target_G32F401x8.G32F401x8,
+          'apm32f402xb' : target_APM32F402xx.APM32F402xB,
+          'apm32f403xb' : target_APM32F403xx.APM32F403xB,
+          'apm32f405xg' : target_APM32F405xx.APM32F405xG,
+          'apm32f407xe' : target_APM32F407xx.APM32F407xE,
+          'apm32f407xg' : target_APM32F407xx.APM32F407xG,
+          'apm32f411xc' : target_APM32F411xx.APM32F411xC,
+          'apm32f411xe' : target_APM32F411xx.APM32F411xE,
+          'apm32f415xg' : target_APM32F415xx.APM32F415xG,
+          'apm32f417xe' : target_APM32F417xx.APM32F417xE,
+          'apm32f417xg' : target_APM32F417xx.APM32F417xG,
+          'apm32f423xg' : target_APM32F423xx.APM32F423xG,
+          'apm32f425xg' : target_APM32F425xx.APM32F425xG,
+          'apm32f427xg' : target_APM32F427xx.APM32F427xG,
+          'apm32f465xe' : target_APM32F465xx.APM32F465xE,
          }

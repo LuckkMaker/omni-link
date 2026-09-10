@@ -13,11 +13,114 @@ OMNI Link 是一站式嵌入式开发工作台，提供 Zone 代码和性能调�
 |------|------|
 | Zone 调试工作台 | 源码调试、汇编窗口、寄存器、外设、调用栈、Watch 变量监视与内存查看整合于一个视图，全链路可视化调试 |
 | Flash 烧录工具 | 固件烧录、擦除（chip/sector）、校验、回读、Hex 查看器、Fill Memory、Compare |
-| Commander 命令行 | 交互式 REPL，复用 pyOCD Commander，支持 `source` 命令配置源码路径 |
+| Commander 命令行 | 交互式 REPL，`source` 命令配置源码路径 |
 | RTT Viewer | RTT 实时数据收发，多 tab 通道管理，文件发送/录制 |
 | Monitor 变量监控 | DWARF 符号解析、SWD/RTT 传输、uPlot 波形图、触发、游标测量 |
 | Tools 工具集 | Fault Analyzer、Map Analyzer、Number Converter、File Checksum |
 | Settings | 终端主题、版本信息、增加芯片支持 |
+
+## 内置芯片支持
+
+内置支持以下芯片型号：
+
+### ST
+
+**STM32F0 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32F051 | Cortex-M0 | 64 KB | 8 KB |
+
+**STM32F1 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32F103C8 | Cortex-M3 | 64 KB | 20 KB |
+| STM32F103CB | Cortex-M3 | 128 KB | 20 KB |
+| STM32F103RB | Cortex-M3 | 128 KB | 20 KB |
+| STM32F103RC | Cortex-M3 | 512 KB | 64 KB |
+| STM32F103VE | Cortex-M3 | 512 KB | 64 KB |
+| STM32F103ZE | Cortex-M3 | 512 KB | 64 KB |
+| STM32F103ZG | Cortex-M3 | 1 MB | 96 KB |
+| STM32F105RB | Cortex-M3 | 128 KB | 64 KB |
+| STM32F105RC | Cortex-M3 | 256 KB | 64 KB |
+| STM32F105VC | Cortex-M3 | 256 KB | 64 KB |
+| STM32F107RB | Cortex-M3 | 128 KB | 64 KB |
+| STM32F107RC | Cortex-M3 | 256 KB | 64 KB |
+| STM32F107VC | Cortex-M3 | 256 KB | 64 KB |
+
+**STM32F4 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32F407xG | Cortex-M4 | 1 MB | 192 KB |
+| STM32F412xE | Cortex-M4 | 512 KB | 256 KB |
+| STM32F412xG | Cortex-M4 | 1 MB | 256 KB |
+| STM32F429xG | Cortex-M4 | 1 MB | 256 KB |
+| STM32F429xI | Cortex-M4 | 2 MB | 192 KB |
+| STM32F439xG | Cortex-M4 | 512 KB | 256 KB |
+| STM32F439xI | Cortex-M4 | 2 MB | 192 KB |
+
+**STM32F7 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32F767xx | Cortex-M7 | 2 MB | 512 KB |
+
+**STM32H7 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32H723xx | Cortex-M7 | 1 MB | 176 KB |
+| STM32H743xx | Cortex-M7 | 2 MB | 480 KB |
+| STM32H750xx | Cortex-M7 | 128 KB | 480 KB |
+| STM32H7B0xx | Cortex-M7 | 512 KB | 1.25 MB |
+
+**STM32L0 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32L031x6 | Cortex-M0+ | 32 KB | 8 KB |
+
+**STM32L4 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| STM32L432xC | Cortex-M4 | 256 KB | 64 KB |
+| STM32L475xC | Cortex-M4 | 256 KB | 128 KB |
+| STM32L475xE | Cortex-M4 | 512 KB | 128 KB |
+| STM32L475xG | Cortex-M4 | 1 MB | 128 KB |
+
+### Geehy
+
+**APM32F4 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| APM32F402xB | Cortex-M4F | 128 KB | 32 KB |
+| APM32F403xB | Cortex-M4F | 128 KB | 32 KB |
+| APM32F405xG | Cortex-M4F | 1 MB | 192 KB |
+| APM32F407xE | Cortex-M4F | 512 KB | 192 KB |
+| APM32F407xG | Cortex-M4F | 1 MB | 192 KB |
+| APM32F411xC | Cortex-M4F | 256 KB | 128 KB |
+| APM32F411xE | Cortex-M4F | 512 KB | 128 KB |
+| APM32F415xG | Cortex-M4F | 1 MB | 192 KB |
+| APM32F417xE | Cortex-M4F | 512 KB | 192 KB |
+| APM32F417xG | Cortex-M4F | 1 MB | 192 KB |
+| APM32F423xG | Cortex-M4F | 1 MB | 384 KB |
+| APM32F425xG | Cortex-M4F | 1 MB | 192 KB |
+| APM32F427xG | Cortex-M4F | 1 MB | 448 KB |
+| APM32F465xE | Cortex-M4F | 512 KB | 192 KB |
+
+**G32F4 系列**
+
+| 型号 | 内核 | Flash | RAM |
+|------|------|-------|-----|
+| G32F401x8 | Cortex-M4F | 64 KB | 16 KB |
+| G32F463xC | Cortex-M4F | 256 KB | 128 KB |
+
+> APM32F4xx 系列按 Flash 容量合并为通用型号：xB=128 KB、xC=256 KB、xE=512 KB、xG=1 MB，覆盖同容量不同封装的细分型号（如 APM32F407xE 覆盖 APM32F407RE/VE/ZE/IE）。
+
 
 ## Keil Pack 扩展芯片支持
 
