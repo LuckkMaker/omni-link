@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { RefreshCw, Cpu, FileCode2 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { RefreshCw, Cpu, FileCode2, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -17,8 +17,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { TargetDeviceDialog } from '@/components/TargetDeviceDialog'
+import { JLinkDeviceDialog } from '@/components/JLinkDeviceDialog'
 import { useProbeStore, SPEED_OPTIONS, CONNECT_MODE_OPTIONS } from '@/stores/probe.store'
 import { useBackendStatus } from '@/hooks/useBackendStatus'
+import type { JLinkDeviceInfo } from '@shared/types'
 
 function formatProbeName(product: string, vendor: string): string {
   if (product && product !== 'Unknown') return product
@@ -26,8 +28,49 @@ function formatProbeName(product: string, vendor: string): string {
   return 'DAPLink'
 }
 
-/** localStorage key：记录上一次选择的 ELF 路径，方便下次启动会话时快速确认 */
-const ELF_LAST_PATH_KEY = 'omni_link_last_elf_path'
+/** 超长序列号中间加省略号：既能一眼区分同型号多设备，又不至于把名称挤没（保留头尾便于核对） */
+function shortenSerial(serial: string, max = 13, keep = 4): string {
+  if (!serial) return ''
+  if (serial.length <= max) return serial
+  return `${serial.slice(0, keep)}…${serial.slice(-keep)}`
+}
+
+/** 字节 → 可读容量（J-Link 设备的 Flash/RAM 以字节计） */
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
+}
+
+/**
+ * 型号名 → 家族前缀：通配型号（如 APM32F407xG）在 J-Link 库中只有具体型号
+ * （APM32F407IGT6…），取第一个 `x` 之前的字符作前缀锚点。返回大写形式。
+ */
+function familyPrefixOf(partUpper: string): string | null {
+  const idx = partUpper.indexOf('X')
+  if (idx <= 0) return null
+  const prefix = partUpper.slice(0, idx).replace(/[_-]+$/, '')
+  return prefix.length >= 4 ? prefix : null
+}
+
+/**
+ * 设备 core → J-Link 通用核心设备名（如 Cortex-M4F → Cortex-M4）。
+ * 找不到对应通用核心名时返回 null。
+ */
+function genericCoreName(devices: JLinkDeviceInfo[], core: string | undefined | null): string | null {
+  if (!core) return null
+  const uppercore = core.toUpperCase()
+  if (!uppercore.startsWith('CORTEX-M')) return null
+  let num = ''
+  for (const ch of uppercore.slice('CORTEX-M'.length)) {
+    if (ch >= '0' && ch <= '9') num += ch
+    else if (ch === '+') num += ch
+    else break
+  }
+  if (!num) return null
+  const cand = `Cortex-M${num}`
+  return devices.some((d) => d.name.toUpperCase() === cand.toUpperCase()) ? cand : null
+}
+
 /** localStorage key：记录「运行到 main()」开关，跨会话保持一致（含已连接快速启动路径） */
 export const RUN_TO_MAIN_KEY = 'omni_link_run_to_main'
 
@@ -72,20 +115,26 @@ export function ConnectionConfigDialog({
     probes,
     selectedUid,
     deviceList,
+    jlinkDevices,
+    loadingJlinkDevices,
     connecting,
     loadingProbes,
     pendingTarget,
     pendingInterface,
     pendingSpeed,
     pendingConnectMode,
+    pendingJlinkDevice,
     fetchProbes,
     fetchDevices,
+    fetchJlinkDevices,
     selectProbe,
     connectProbe,
+    disconnectProbe,
     setPendingTarget,
     setPendingInterface,
     setPendingSpeed,
     setPendingConnectMode,
+    setPendingJlinkDevice,
     getSelectedProbe,
     getSelectedTarget,
     getDeviceInfo,
@@ -95,6 +144,23 @@ export function ConnectionConfigDialog({
   const selectedProbe = getSelectedProbe()
   const target = getSelectedTarget()
   const isConnected = selectedProbe?.state === 'connected'
+
+  // J-Link 探针（product 或 vendor 命中 SEGGER）：需要填写 J-Link 设备名才能建立目标连接
+  const isJlink =
+    /j[- ]?link|segger/i.test(
+      `${selectedProbe?.product ?? ''} ${selectedProbe?.vendor ?? ''}`
+    )
+
+  // J-Link 设备名选择弹窗开关：点击下方的只读输入框打开模态窗，在其中搜索并选择
+  const [jlinkDialogOpen, setJlinkDialogOpen] = useState(false)
+
+  /** 自动匹配 J-Link 设备名的结果（用于提示；manual=由用户手动选择，none=未匹配到，ambiguous=多候选已取首个，generic=回退通用核心名） */
+  const [jlinkMatch, setJlinkMatch] = useState<{
+    manual: boolean
+    none: boolean
+    ambiguous: boolean
+    generic: boolean
+  }>({ manual: false, none: false, ambiguous: false, generic: false })
 
   const showElf = mode === 'start'
 
@@ -136,15 +202,73 @@ export function ConnectionConfigDialog({
     }
   }, [open, status, initialError, startOnConfirm, startConnected, fetchProbes, fetchDevices, deviceList.length])
 
-  // 打开 start 模式时，预填上一次选择的 ELF 路径（作为默认值，用户仍可重新选择或确认使用）
+  // 打开且为 J-Link 探针时，确保全量设备库已加载（MainLayout 启动时已预取，此处兜底补拉）
   useEffect(() => {
-    if (open && mode === 'start') {
-      const last = localStorage.getItem(ELF_LAST_PATH_KEY)
-      if (last) setElfPath(last)
-    }
-  }, [open, mode])
+    if (open && isJlink) void fetchJlinkDevices()
+  }, [open, isJlink, fetchJlinkDevices])
 
-  // 选择 ELF 文件（仅 start 模式）
+  // 自动匹配 J-Link 设备名：仅在新选/切换目标设备时触发，避免覆盖用户改动；设备库就绪后首次会补算。
+  const lastAutoTargetRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!isJlink || !pendingTarget) return
+    if (jlinkDevices.length === 0 && loadingJlinkDevices) return
+    if (lastAutoTargetRef.current === pendingTarget) return
+    lastAutoTargetRef.current = pendingTarget
+
+    const dev = getDeviceInfo(pendingTarget)
+    let name: string | null = null
+    let none = false
+    let ambiguous = false
+    let generic = false
+
+    if (dev?.jlink_device) {
+      // 内置型号自带明确设备名，直接采用
+      name = dev.jlink_device
+    } else if (jlinkDevices.length > 0) {
+      const up = pendingTarget.toUpperCase()
+      const exact = jlinkDevices.find((d) => d.name.toUpperCase() === up)
+      if (exact) {
+        name = exact.name
+      } else {
+        // 精确无匹配：按锚点依次在库中检索候选，命中第一个即采用。
+        // 锚点优先级: 型号前缀 → jlink_search → 家族前缀(去 x 通配) → 通用核心名(兜底)。
+        // 仅当锚点为通用核心名时才视为 generic 回退，并同样标记 ambiguous 提示可调。
+        const pickAnchor = (anchor: string, isGeneric: boolean): void => {
+          const au = anchor.toUpperCase()
+          const hits = jlinkDevices.filter((d) => d.name.toUpperCase().startsWith(au))
+          if (hits.length === 0) return
+          name = hits[0].name
+          ambiguous = hits.length > 1 || isGeneric
+          generic = isGeneric
+        }
+        const tryAnchor = (anchor: string | null | undefined, isGeneric = false): boolean => {
+          if (!anchor) return false
+          pickAnchor(anchor, isGeneric)
+          return name !== null
+        }
+        const family = familyPrefixOf(up)
+        if (
+          !tryAnchor(up) &&
+          !tryAnchor(dev?.jlink_search) &&
+          !tryAnchor(family) &&
+          !tryAnchor(genericCoreName(jlinkDevices, dev?.core), true)
+        ) {
+          none = true
+        }
+      }
+    } else {
+      none = true
+    }
+
+    setJlinkMatch({ manual: false, none, ambiguous, generic })
+    if (name) {
+      setPendingJlinkDevice(name)
+    } else if (dev?.jlink_device === undefined) {
+      setPendingJlinkDevice(null)
+    }
+  }, [isJlink, pendingTarget, jlinkDevices, loadingJlinkDevices])
+
+  // 选择 ELF 文件（仅 start 模式；每次启动会话都须重新选择，不复用/不记住上次路径）
   const handlePickElf = async () => {
     const path = await window.electron?.openFileDialog?.({
       extensions: ['elf', 'axf'],
@@ -153,7 +277,6 @@ export function ConnectionConfigDialog({
     if (path) {
       setElfPath(path)
       setElfError(null)
-      localStorage.setItem(ELF_LAST_PATH_KEY, path)
     }
   }
 
@@ -205,11 +328,25 @@ export function ConnectionConfigDialog({
       setErrorMsg('请先选择目标设备')
       return
     }
+    if (isJlink && !pendingJlinkDevice) {
+      setProbeError('请填写 J-Link 设备名')
+      return
+    }
     onOpenChange(false)
     setErrorMsg(null)
     setProbeError(null)
     setElfError(null)
     void connectProbe(selectedProbe.uid)
+  }
+
+  /** [断开连接]：config 模式且已连接时，断开当前仿真器并关闭弹窗 */
+  const handleDisconnect = () => {
+    if (!selectedProbe) return
+    disconnectProbe(selectedProbe.uid)
+    onOpenChange(false)
+    setErrorMsg(null)
+    setProbeError(null)
+    setElfError(null)
   }
 
   return (
@@ -275,7 +412,20 @@ export function ConnectionConfigDialog({
               <SelectContent>
                 {probes.map((probe) => (
                   <SelectItem key={probe.uid} value={probe.uid}>
-                    {formatProbeName(probe.product, probe.vendor)}
+                    <span className="flex min-w-0 items-center gap-2">
+                      {/* 名称优先占满可用空间，超长时省略；SN 被压缩成固定短格式，二者互不挤压 */}
+                      <span className="min-w-0 flex-1 truncate font-medium">
+                        {formatProbeName(probe.product, probe.vendor)}
+                      </span>
+                      {probe.serial && (
+                        <span
+                          className="shrink-0 font-mono text-xs text-muted-foreground"
+                          title={probe.serial}
+                        >
+                          {shortenSerial(probe.serial)}
+                        </span>
+                      )}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -284,8 +434,31 @@ export function ConnectionConfigDialog({
 
           {/* 目标设备 */}
           <div className="min-w-0 space-y-2">
-            <span className="text-sm font-medium">目标设备</span>
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">目标设备</span>
+              {isJlink && (
+                <button
+                  type="button"
+                  onClick={() => setJlinkDialogOpen(true)}
+                  title="选择 / 修改 J-Link 设备名"
+                  className={cn(
+                    'inline-flex min-w-0 max-w-[14rem] items-center gap-1.5 rounded-md border border-input bg-background px-2 py-0.5 text-[11px] font-mono text-muted-foreground transition-colors hover:bg-accent',
+                    jlinkMatch.none && !pendingJlinkDevice && 'border-red-400 text-red-500'
+                  )}
+                >
+                  <Settings2 className="size-3.5 shrink-0" />
+                  <span className="truncate">
+                    {pendingJlinkDevice
+                      ? pendingJlinkDevice
+                      : loadingJlinkDevices
+                        ? '设备库加载中…'
+                        : '选择设备名'}
+                  </span>
+                </button>
+              )}
+            </div>
             <button
+              type="button"
               onClick={() => { setDeviceDialogOpen(true); setErrorMsg(null) }}
               className="flex w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm transition-colors hover:bg-accent"
             >
@@ -294,6 +467,29 @@ export function ConnectionConfigDialog({
               </span>
               <Cpu className="size-4 text-muted-foreground" />
             </button>
+            {isJlink && !loadingJlinkDevices && pendingTarget ? (
+              jlinkMatch.manual ? (
+                <p className="text-xs text-muted-foreground">
+                  已选择 J-Link 设备名：{pendingJlinkDevice}
+                </p>
+              ) : jlinkMatch.generic ? (
+                <p className="text-xs text-amber-600">
+                  未匹配到具体 J-Link 型号，已回退通用核心 {pendingJlinkDevice}，可点击调整
+                </p>
+              ) : jlinkMatch.ambiguous ? (
+                <p className="text-xs text-amber-600">
+                  匹配到多个 J-Link 设备，已选 {pendingJlinkDevice}，可点击调整
+                </p>
+              ) : jlinkMatch.none ? (
+                <p className="text-xs text-red-500">
+                  未在 J-Link 库中匹配到设备名，请点击选择
+                </p>
+              ) : pendingJlinkDevice ? (
+                <p className="text-xs text-muted-foreground">
+                  已自动匹配 J-Link 设备名：{pendingJlinkDevice}
+                </p>
+              ) : null
+            ) : null}
             {errorMsg && (
               <p className="text-xs text-red-500">{errorMsg}</p>
             )}
@@ -424,13 +620,24 @@ export function ConnectionConfigDialog({
                     <Button variant="outline" onClick={handleConfirm} disabled={connecting}>
                       确认
                     </Button>
-                    <Button
-                      className="gap-2"
-                      onClick={handleConnect}
-                      disabled={!selectedProbe || connecting || selectedProbe.state === 'connecting'}
-                    >
-                      确认并连接
-                    </Button>
+                    {isConnected ? (
+                      <Button
+                        variant="destructive"
+                        className="gap-2"
+                        disabled={connecting || selectedProbe?.state === 'connecting'}
+                        onClick={handleDisconnect}
+                      >
+                        断开连接
+                      </Button>
+                    ) : (
+                      <Button
+                        className="gap-2"
+                        onClick={handleConnect}
+                        disabled={!selectedProbe || connecting || selectedProbe.state === 'connecting'}
+                      >
+                        确认并连接
+                      </Button>
+                    )}
                   </>
                 )}
                 {showElf && (
@@ -453,7 +660,21 @@ export function ConnectionConfigDialog({
         onOpenChange={setDeviceDialogOpen}
         deviceList={deviceList}
         currentPartNumber={pendingTarget}
-        onConfirm={(partNumber) => setPendingTarget(partNumber)}
+        onConfirm={(partNumber) => {
+          setPendingTarget(partNumber)
+        }}
+      />
+    {/* J-Link 设备名选择弹窗（二级，仅 J-Link 探针） */}
+      <JLinkDeviceDialog
+        open={jlinkDialogOpen}
+        onOpenChange={setJlinkDialogOpen}
+        devices={jlinkDevices}
+        loading={loadingJlinkDevices && jlinkDevices.length === 0}
+        value={pendingJlinkDevice ?? ''}
+        onConfirm={(name) => {
+          setPendingJlinkDevice(name)
+          setJlinkMatch({ manual: true, none: false, ambiguous: false, generic: false })
+        }}
       />
     </>
   )

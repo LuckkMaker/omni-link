@@ -1,9 +1,9 @@
 import { create } from 'zustand'
-import type { ProbeWithState, TargetInfo, DeviceInfo } from '@shared/types'
+import type { ProbeWithState, TargetInfo, DeviceInfo, JLinkDeviceInfo } from '@shared/types'
 import * as probeService from '@/services/probe.service'
 import type { ConnectMode } from '@/services/probe.service'
 import { listTargets } from '@/services/target.service'
-import { listDevices } from '@/services/device.service'
+import { listDevices, listAllJLinkDevices } from '@/services/device.service'
 import { useNotificationStore } from './notification.store'
 import { useLogStore } from './log.store'
 
@@ -75,8 +75,12 @@ interface ProbeStore {
   targetList: string[]
   /** 设备目录（来自 device_info.json） */
   deviceList: DeviceInfo[]
+  /** J-Link 设备库全量列表（应用加载时预取，选择 J-Link 设备名时本地检索） */
+  jlinkDevices: JLinkDeviceInfo[]
   /** 加载仿真器中 */
   loadingProbes: boolean
+  /** 加载 J-Link 设备库中 */
+  loadingJlinkDevices: boolean
   /** 连接/断开操作中 */
   connecting: boolean
   /** 错误信息 */
@@ -91,6 +95,8 @@ interface ProbeStore {
   pendingSpeed: number
   /** 连接前选择的连接模式 */
   pendingConnectMode: ConnectMode
+  /** J-Link 目标设备名（前端 J-Link 输入框填写，如 G32F463XC） */
+  pendingJlinkDevice: string | null
   /** Flash 配置：选中的扇区索引集合（确定后保存） */
   selectedSectorIndices: Set<number>
 
@@ -109,6 +115,8 @@ interface ProbeStore {
   fetchTargets: () => Promise<void>
   /** 拉取设备目录 */
   fetchDevices: () => Promise<void>
+  /** 拉取 J-Link 设备库全量列表（应用加载时调用一次） */
+  fetchJlinkDevices: () => Promise<void>
   /** 选中仿真器 */
   selectProbe: (uid: string | null) => void
   /** 设置连接前配置 */
@@ -116,6 +124,7 @@ interface ProbeStore {
   setPendingInterface: (iface: DebugInterface) => void
   setPendingSpeed: (speed: number) => void
   setPendingConnectMode: (mode: ConnectMode) => void
+  setPendingJlinkDevice: (device: string | null) => void
   /** 保存 Flash 配置中选中的扇区索引 */
   setSelectedSectorIndices: (indices: Set<number>) => void
   /** 连接仿真器 */
@@ -142,7 +151,9 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   selectedUid: null,
   targetList: [],
   deviceList: [],
+  jlinkDevices: [],
   loadingProbes: false,
+  loadingJlinkDevices: false,
   connecting: false,
   error: null,
 
@@ -151,6 +162,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
   pendingInterface: 'swd',
   pendingSpeed: 1_000_000,
   pendingConnectMode: 'halt',
+  pendingJlinkDevice: null,
   selectedSectorIndices: new Set(),
 
   // ── 派生获取器 ────────────────────────
@@ -210,16 +222,31 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
     }
   },
 
+  fetchJlinkDevices: async () => {
+    // 已加载则跳过，避免重复拉取全量设备库
+    if (get().jlinkDevices.length > 0) return
+    set({ loadingJlinkDevices: true })
+    try {
+      const devices = await listAllJLinkDevices()
+      set({ jlinkDevices: devices, loadingJlinkDevices: false })
+    } catch (err) {
+      console.error('[probe.store] fetchJlinkDevices failed:', err)
+      set({ loadingJlinkDevices: false })
+    }
+  },
+
   selectProbe: (uid) => set({ selectedUid: uid }),
 
   setPendingTarget: (partNumber) => set({ pendingTarget: partNumber }),
   setPendingInterface: (iface) => set({ pendingInterface: iface }),
   setPendingSpeed: (speed) => set({ pendingSpeed: speed }),
   setPendingConnectMode: (mode) => set({ pendingConnectMode: mode }),
+  setPendingJlinkDevice: (device) =>
+    set({ pendingJlinkDevice: device ? device.trim() || null : null }),
   setSelectedSectorIndices: (indices) => set({ selectedSectorIndices: new Set(indices) }),
 
   connectProbe: async (uid) => {
-    const { pendingTarget, pendingInterface, pendingSpeed, pendingConnectMode } = get()
+    const { pendingTarget, pendingInterface, pendingSpeed, pendingConnectMode, pendingJlinkDevice } = get()
     set({ connecting: true, error: null })
     // 先将状态标记为 connecting
     set((state) => ({
@@ -233,6 +260,7 @@ export const useProbeStore = create<ProbeStore>((set, get) => ({
         interface: pendingInterface,
         speed: pendingSpeed,
         connect_mode: pendingConnectMode,
+        jlink_device: pendingJlinkDevice ?? undefined,
       })
       // 连接成功，更新仿真器状态和目标信息
       set((state) => ({

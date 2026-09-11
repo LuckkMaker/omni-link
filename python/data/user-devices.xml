@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<devices version="1">
+  <device part_number="stm32f103c8" source="pack" pack="Keil.STM32F1xx_DFP">
+    <vendor>STMicroelectronics</vendor>
+    <display_name>STM32F103C8</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>64</flash_size>
+    <ram_size>20</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x10000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+    <ram_regions>
+      <region start="0x20000000" length="0x5000" is_default="true"/>
+    </ram_regions>
+  </device>
+  <device part_number="stm32f103cb" source="pack" pack="Keil.STM32F1xx_DFP">
+    <vendor>STMicroelectronics</vendor>
+    <display_name>STM32F103CB</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>20</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+    <ram_regions>
+      <region start="0x20000000" length="0x5000" is_default="true"/>
+    </ram_regions>
+  </device>
+  <device part_number="stm32f103rb" source="pack" pack="Keil.STM32F1xx_DFP">
+    <vendor>STMicroelectronics</vendor>
+    <display_name>STM32F103RB</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>128</flash_size>
+    <ram_size>20</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x20000" sector_size="0x400" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+    <ram_regions>
+      <region start="0x20000000" length="0x5000" is_default="true"/>
+    </ram_regions>
+  </device>
+  <device part_number="stm32f103ve" source="pack" pack="Keil.STM32F1xx_DFP">
+    <vendor>STMicroelectronics</vendor>
+    <display_name>STM32F103VE</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x80000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+    <ram_regions>
+      <region start="0x20000000" length="0x10000" is_default="true"/>
+    </ram_regions>
+  </device>
+  <device part_number="stm32f103ze" source="pack" pack="Keil.STM32F1xx_DFP">
+    <vendor>STMicroelectronics</vendor>
+    <display_name>STM32F103ZE</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>512</flash_size>
+    <ram_size>64</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x80000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+    <ram_regions>
+      <region start="0x20000000" length="0x10000" is_default="true"/>
+    </ram_regions>
+  </device>
+  <device part_number="stm32f103zg" source="pack" pack="Keil.STM32F1xx_DFP">
+    <vendor>STMicroelectronics</vendor>
+    <display_name>STM32F103ZG</display_name>
+    <core>Cortex-M3</core>
+    <num_cores>1</num_cores>
+    <flash_size>1024</flash_size>
+    <ram_size>96</ram_size>
+    <flash_base_address>0x08000000</flash_base_address>
+    <ram_base_address>0x20000000</ram_base_address>
+    <device_id_address>0xE0042000</device_id_address>
+    <flash_regions>
+      <region start="0x08000000" length="0x100000" sector_size="0x800" page_size="0x400" is_boot_memory="true"/>
+    </flash_regions>
+    <ram_regions>
+      <region start="0x20000000" length="0x18000" is_default="true"/>
+    </ram_regions>
+  </device>
+</devices>

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug } from 'lucide-react'
+import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import appIcon from '../../assets/images/icon.png'
 import { cn } from '@/lib/utils'
 import {
   SidebarProvider,
@@ -61,7 +62,7 @@ export default function MainLayout() {
   useProbeWs(port)
   useRttSession()  // 全局 RTT 会话管理（切换页面不停止）
 
-  const { fetchProbes, fetchTargets } = useProbeStore()
+  const { fetchProbes, fetchTargets, fetchJlinkDevices } = useProbeStore()
   const location = useLocation()
   const isToolsActive = location.pathname.startsWith('/tools')
   const [toolsExpanded, setToolsExpanded] = useState(isToolsActive)
@@ -71,6 +72,8 @@ export default function MainLayout() {
     (s) => s.probes.find((p) => p.uid === s.selectedUid)?.state === 'connected'
   )
   const [sidebarOpen, setSidebarOpen] = useState(!isConnected)
+  // 展开/收起只由显式点击触发（去掉边缘 hover，避免操作页面时鼠标扫过侧栏边误展开）
+  const effectiveSidebarOpen = sidebarOpen
   useEffect(() => {
     setSidebarOpen(!isConnected)
   }, [isConnected])
@@ -129,16 +132,45 @@ export default function MainLayout() {
       resetApiClient()
       fetchProbes()
       fetchTargets()
+      fetchJlinkDevices()
     }
-  }, [status, fetchProbes, fetchTargets])
+  }, [status, fetchProbes, fetchTargets, fetchJlinkDevices])
 
   return (
     <div className="flex h-screen w-full flex-col">
       <div className="flex flex-1 min-h-0">
-        <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen}>
+        <SidebarProvider open={effectiveSidebarOpen} onOpenChange={setSidebarOpen}>
           <Sidebar>
             <SidebarHeader>
-              <DeviceSwitcher collapsed={!sidebarOpen} />
+              {effectiveSidebarOpen ? (
+                <div className="mb-1 flex items-center gap-1">
+                  <button
+                    onClick={() => setSidebarOpen(false)}
+                    title="收起侧边栏"
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent"
+                  >
+                    <img src={appIcon} alt="OMNI Link" className="size-5 shrink-0" />
+                    <span className="truncate text-sm font-semibold">OMNI Link</span>
+                  </button>
+                  <button
+                    onClick={() => setSidebarOpen(false)}
+                    title="收起侧边栏"
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <PanelLeftClose className="size-4" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  title="展开侧边栏"
+                  className="group mx-auto mb-1 flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent"
+                >
+                  <img src={appIcon} alt="OMNI Link" className="size-5 group-hover:hidden" />
+                  <PanelLeftOpen className="hidden size-5 text-muted-foreground group-hover:block" />
+                </button>
+              )}
+              <DeviceSwitcher collapsed={!effectiveSidebarOpen} />
             </SidebarHeader>
 
             <SidebarContent>
@@ -161,7 +193,7 @@ export default function MainLayout() {
 
                   {/* 工具 — 可展开的二级菜单 */}
                   <SidebarMenuItem>
-                    {!sidebarOpen ? (
+                    {!effectiveSidebarOpen ? (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <SidebarMenuButton isActive={isToolsActive} collapseIconOnly={false}>
@@ -230,7 +262,7 @@ export default function MainLayout() {
               </SidebarGroup>
             </SidebarContent>
 
-            {!sidebarOpen ? null : (
+            {!effectiveSidebarOpen ? null : (
               <SidebarFooter className="max-h-[45%] overflow-y-auto border-t border-border">
                 <InfoPanel />
               </SidebarFooter>

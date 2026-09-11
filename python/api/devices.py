@@ -41,6 +41,9 @@ class DeviceCreate(BaseModel):
     ram_size: int  # KB
     flash_base_address: str
     ram_base_address: str
+    device_id_address: str = "0xE0042000"
+    jlink_device: str | None = None
+    jlink_search: str | None = None
     flash_regions: list[FlashRegionCreate] = Field(default_factory=list)
     ram_regions: list[RamRegionCreate] = Field(default_factory=list)
 
@@ -101,14 +104,18 @@ async def get_device(part_number: str):
 
 @router.post("")
 async def create_device(req: DeviceCreate):
-    """新增设备"""
+    """新增设备（写入用户库；内置型号只读，不允许覆盖）"""
+    if database.is_builtin(req.part_number):
+        raise HTTPException(status_code=409, detail=f"内置型号只读: {req.part_number}")
     device = database.add_device(req.model_dump())
     return device
 
 
 @router.put("/{part_number}")
 async def update_device(part_number: str, req: DeviceCreate):
-    """更新设备信息"""
+    """更新设备信息（内置型号只读，不允许修改）"""
+    if database.is_builtin(part_number):
+        raise HTTPException(status_code=409, detail=f"内置型号只读: {part_number}")
     device = database.update_device(part_number, req.model_dump())
     if device is None:
         raise HTTPException(status_code=404, detail=f"Unknown device: {part_number}")
@@ -117,7 +124,9 @@ async def update_device(part_number: str, req: DeviceCreate):
 
 @router.delete("/{part_number}")
 async def delete_device(part_number: str):
-    """删除设备"""
+    """删除设备（内置型号只读，不允许删除）"""
+    if database.is_builtin(part_number):
+        raise HTTPException(status_code=409, detail=f"内置型号只读: {part_number}")
     success = database.delete_device(part_number)
     if not success:
         raise HTTPException(status_code=404, detail=f"Unknown device: {part_number}")

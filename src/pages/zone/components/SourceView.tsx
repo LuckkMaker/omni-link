@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
-import { Loader2, AlertCircle, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
+import { Loader2, X, ChevronLeft, ChevronRight, Save, Undo2, Pencil } from 'lucide-react'
 import { useZoneStore } from '../store'
 import { useNotificationStore } from '@/stores/notification.store'
 import * as zoneService from '@/services/zone.service'
@@ -285,7 +285,6 @@ export function SourceView({ uid }: SourceViewProps) {
 
   // ── 渲染 / 交互状态 ──────────────────────────────
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [pcLine, setPcLine] = useState<number | null>(null)
   const [executableLines, setExecutableLines] = useState<Set<number>>(new Set())
   // Monaco 主题：跟随文档明暗（浅色 UI 用 omni-light，深色用 omni-dark）
@@ -1074,7 +1073,6 @@ export function SourceView({ uid }: SourceViewProps) {
   // 加载选中的源文件（创建/复用 model 并 setModel）
   useEffect(() => {
     if (!uid || !activeSourceFile) {
-      setError(null)
       setLoading(false)
       if (editorRef.current) editorRef.current.setModel(null)
       setPcLine(null)
@@ -1087,7 +1085,6 @@ export function SourceView({ uid }: SourceViewProps) {
     }
     let cancelled = false
     setLoading(true)
-    setError(null)
     zoneService
       .zoneSourceContent(uid, activeSourceFile)
       .then((res) => {
@@ -1207,12 +1204,26 @@ export function SourceView({ uid }: SourceViewProps) {
           }
           applyDecorations()
         } else {
-          setError(res.error ?? '源码读取失败')
+          // 源文件不可读（如 ELF 来自其他机器，路径在本机不存在）：源码窗保持空白，
+          // 通过全局通知提示，不显示红色错误覆盖层
+          useNotificationStore.getState().push({
+            type: 'warning',
+            title: '源文件不可用',
+            message: res.error ?? '源码读取失败',
+            autoClose: true,
+            autoCloseDelay: 5000,
+          })
         }
       })
       .catch((e) => {
         if (cancelled) return
-        setError(e instanceof Error ? e.message : '源码读取失败')
+        useNotificationStore.getState().push({
+          type: 'warning',
+          title: '源码读取失败',
+          message: e instanceof Error ? e.message : '源码读取失败',
+          autoClose: true,
+          autoCloseDelay: 5000,
+        })
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -1627,12 +1638,6 @@ export function SourceView({ uid }: SourceViewProps) {
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
             加载中...
-          </div>
-        )}
-        {error && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 text-red-500">
-            <AlertCircle className="size-4" />
-            <span className="max-w-md truncate">{error}</span>
           </div>
         )}
       </div>

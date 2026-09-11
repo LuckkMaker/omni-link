@@ -15,8 +15,8 @@
 # limitations under the License.
 
 #
-# APM32F403 generic target: 128KB Flash, 32KB RAM.
-# Replaces APM32F403TB/CB/RB (same flash capacity).
+# APM32F402 generic target: 128KB Flash, 32KB RAM.
+# Replaces APM32F402TB/CB/RB (same flash capacity).
 #
 
 from ....coresight.coresight_target import CoreSightTarget
@@ -25,8 +25,8 @@ from ....debug.svd.loader import SVDFile
 from .target_APM32F4xx_flash import FLASH_ALGO_128K
 
 
-class APM32F403xB(CoreSightTarget):
-    """APM32F403: 128KB Flash, 32KB RAM."""
+class APM32F402xB(CoreSightTarget):
+    """APM32F402: 128KB Flash, 32KB RAM."""
 
     VENDOR = "Geehy"
 
@@ -38,4 +38,4 @@ class APM32F403xB(CoreSightTarget):
 
     def __init__(self, session):
         super().__init__(session, self.MEMORY_MAP)
-        self._svd_location = SVDFile.from_builtin("APM32F403.svd")
+        self._svd_location = SVDFile.from_builtin("APM32F402.svd")

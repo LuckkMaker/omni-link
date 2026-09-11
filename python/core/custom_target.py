@@ -8,9 +8,12 @@ FLM 文件是 ARM 编译的 Flash 算法库（ELF 格式），包含擦除/编�
 """
 
 import os
+import logging
 from typing import Optional
 
 from core import database
+
+logger = logging.getLogger(__name__)
 
 
 # 内核名称到 pyOCD Core 类的映射
@@ -102,9 +105,10 @@ def create_custom_target(
         ram_regions=normalized_ram_regions,
     )
 
-    # 注册到 TARGET 字典
-    from pyocd.target import TARGET
-    TARGET[part_number] = target_class
+    # 内置型号只读：不允许与内置同名创建自定义芯片，否则 database.upsert_device 会被
+    # 静默忽略（写不进设备目录），却已在 TARGET 注册、FLM 已复制，形成下次启动即丢失的孤儿状态。
+    if database.is_builtin(part_number):
+        raise ValueError(f"内置型号只读: {part_number}")
 
     # 写入 XML 设备目录
     device_info = {
@@ -140,6 +144,10 @@ def create_custom_target(
     device_info["flm_path"] = flm_dest
 
     database.upsert_device(device_info)
+
+    # 设备目录写入成功后再注册到 TARGET，避免注册了却未落库的孤儿状态
+    from pyocd.target import TARGET
+    TARGET[part_number] = target_class
 
     return device_info
 
@@ -323,7 +331,8 @@ def load_custom_targets() -> int:
             from pyocd.target import TARGET
             TARGET[dev["part_number"]] = target_class
             count += 1
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to load custom FLM target %s: %s", dev.get("part_number"), e)
             continue
     return count
 

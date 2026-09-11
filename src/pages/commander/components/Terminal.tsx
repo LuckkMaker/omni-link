@@ -115,6 +115,10 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
   // 避免事件注入与 runCommand 各画一次 prompt 导致 omni link> omni link> 叠加
   const promptDrawnRef = useRef(false)
 
+  // 输入区起始行在屏幕上的行号（cursorY）：输入超宽自动换行后用于回到起始行多行清除。
+  // -1 表示尚未定位（首次重绘时用当前行自对齐）。
+  const inputStartYRef = useRef(-1)
+
   // uid/running/commands 同步到 ref（供 onData 闭包访问最新值）
   const uidRef = useRef<string | null>(uid)
   uidRef.current = uid
@@ -156,18 +160,56 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
   }, [])
 
   // ── 终端输出辅助 ──────────────────────
-  /** 重绘当前输入行（清除当前行并重写，光标回到正确位置） */
+  /** 把输入区起始行记到当前光标所在行（每个新 prompt 行开始时应调用） */
+  const markInputStart = useCallback(() => {
+    const t = termRef.current
+    if (!t) return
+    inputStartYRef.current = t.buffer.active.cursorY
+  }, [])
+
+  /**
+   * 清除「输入区起始行→当前光标行」的所有行，并把光标放回起始行行首。
+   * 相比原来的 \r\x1b[2K，能正确处理输入超宽自动换行（光标落在续行）的情况：
+   * 原来的实现只清除当前行，续行上会残留/重新画出一个 prompt。
+   */
+  const clearInputBlock = useCallback(() => {
+    const t = termRef.current
+    if (!t) return
+    const buf = t.buffer.active
+    const curY = buf.cursorY
+    if (inputStartYRef.current < 0) inputStartYRef.current = curY
+    const up = curY - inputStartYRef.current
+    if (up > 0) {
+      // 回到起始行，清除起始行及往下的 up 行
+      t.write(`\x1b[${up}A\r\x1b[2K`)
+      for (let i = 0; i < up; i++) {
+        t.write('\x1b[1B\x1b[2K')
+      }
+      t.write(`\x1b[${up}A\r`)
+    } else {
+      t.write('\r\x1b[2K')
+    }
+  }, [])
+
+  /** 重绘当前输入行（清除整个输入区并重写，光标回到正确位置） */
   const redrawInputLine = useCallback(() => {
     const term = termRef.current
     if (!term) return
-    term.write('\r\x1b[2K')
+    const cols = term.cols
+    clearInputBlock()
     term.write(PROMPT + inputBuf.current)
-    const targetCol = PROMPT_VISIBLE_LEN + cursorPos.current
-    const currentCol = PROMPT_VISIBLE_LEN + inputBuf.current.length
-    if (targetCol < currentCol) {
-      term.write(`\x1b[${currentCol - targetCol}D`)
-    }
-  }, [])
+    // 光标绝对定位：目标 offset = promptLen + cursorPos；末尾 offset = promptLen + input.length
+    const total = PROMPT_VISIBLE_LEN + cursorPos.current
+    const endTotal = PROMPT_VISIBLE_LEN + inputBuf.current.length
+    if (total === endTotal) return
+    const targetRow = Math.floor(total / cols)
+    const targetCol = total % cols
+    const endRow = Math.floor(endTotal / cols)
+    const rowDiff = targetRow - endRow
+    if (rowDiff < 0) term.write(`\x1b[${-rowDiff}A`)
+    else if (rowDiff > 0) term.write(`\x1b[${rowDiff}B`)
+    term.write(`\x1b[${targetCol + 1}G`)
+  }, [clearInputBlock])
 
   // ── Ctrl+R 搜索渲染 ──────────────────
   /** 重绘搜索模式行 */
@@ -225,8 +267,10 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
       promptDrawnRef.current = false
 
       if (!cmd.trim()) {
-        // 空命令：清除当前行再写 prompt，避免 omni link> omni link> 重复叠加
-        term.write('\r\x1b[2K' + PROMPT)
+        // 空命令：清除整个输入区再写 prompt，避免 omni link> omni link> 重复叠加
+        clearInputBlock()
+        term.write(PROMPT)
+        markInputStart()
         return
       }
 
@@ -236,6 +280,7 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
       if (!uidRef.current) {
         term.write(`${COLOR.red}Error: No probe selected${COLOR.reset}\r\n`)
         term.write(PROMPT)
+        markInputStart()
         return
       }
 
@@ -246,7 +291,10 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
         if (handled) {
           // 拦截方（如 Zone 联动）执行时已通过 writeLog 注入事件并重绘 prompt，
           // 此时不再补写，避免 omni link> omni link> 叠加
-          if (!promptDrawnRef.current) term.write(PROMPT)
+          if (!promptDrawnRef.current) {
+            term.write(PROMPT)
+            markInputStart()
+          }
           return
         }
       }
@@ -271,9 +319,12 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
       }
 
       // 末尾写完输出后补 prompt；若期间 writeLog 已重绘（如断点事件注入）则不再补写
-      if (!promptDrawnRef.current) term.write(PROMPT)
+      if (!promptDrawnRef.current) {
+        term.write(PROMPT)
+        markInputStart()
+      }
     },
-    [execute, addToHistory, exitSearch]
+    [execute, addToHistory, exitSearch, clearInputBlock, markInputStart]
   )
 
   // ── Tab 补全 ──────────────────────────
@@ -301,6 +352,7 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
         term.write('\r\n')
         term.write(matches.join('  ') + '\r\n')
         term.write(PROMPT + inputBuf.current)
+        markInputStart()
       }
     } else {
       // 多词输入：从历史中找匹配当前行的命令
@@ -315,9 +367,10 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
         term.write('\r\n')
         term.write(matches.join('  ') + '\r\n')
         term.write(PROMPT + inputBuf.current)
+        markInputStart()
       }
     }
-  }, [redrawInputLine])
+  }, [redrawInputLine, markInputStart])
 
   // ── 文本操作 ──────────────────────────
   /** 在当前光标位置插入文本 */
@@ -377,7 +430,8 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
     // clear() 保留当前光标行，所以先清除当前行再写 prompt
     term.clear()
     term.write('\r\x1b[2K' + PROMPT + inputBuf.current)
-  }, [])
+    markInputStart()
+  }, [markInputStart])
 
   // ── 注入日志行（保留当前输入行，供 Console 混合流写入调试事件）──
   const writeLog = useCallback(
@@ -386,19 +440,18 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
       if (!term) return
       const input = inputBuf.current
       const cursor = cursorPos.current
-      // 清除当前输入行，在原行写入日志行，再换行重绘 prompt + 输入行
-      // 注意：不能先用 \r\n 换行再写（会把被清除的 prompt 行留成空行，导致事件间出现空行）
-      term.write('\r\x1b[2K')
+      // 清除整个输入区（含自动换行的续行），在原行写入日志行，再换行重绘 prompt + 输入行
+      clearInputBlock()
       term.write(`${line}\r\n`)
       term.write(PROMPT + input)
-      const targetCol = PROMPT_VISIBLE_LEN + cursor
+      markInputStart()
       const currentCol = PROMPT_VISIBLE_LEN + input.length
-      if (targetCol < currentCol) {
-        term.write(`\x1b[${currentCol - targetCol}D`)
+      if (cursor < input.length) {
+        term.write(`\x1b[${currentCol - (PROMPT_VISIBLE_LEN + cursor)}D`)
       }
       promptDrawnRef.current = true
     },
-    []
+    [clearInputBlock, markInputStart]
   )
 
   // ── 字体缩放 ──────────────────────────
@@ -508,6 +561,7 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
       term.write(`${COLOR.dim}${text}${COLOR.reset}\r\n`)
     }
     term.write(PROMPT)
+    markInputStart()
 
     // 延迟 fit：等待 flex 布局计算完成
     const fitNow = () => {
@@ -563,6 +617,7 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
               inputBuf.current = ''
               cursorPos.current = 0
               t.write(PROMPT)
+              markInputStart()
             }
             continue
           }
@@ -730,12 +785,14 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
             cursorPos.current = 0
             historyIndex.current = -1
             t.write(PROMPT)
+            markInputStart()
             break
           }
           case '\x0c': {
             // Ctrl+L：清屏（修复：清除当前行再写 prompt）
             t.clear()
             t.write('\r\x1b[2K' + PROMPT + inputBuf.current)
+            markInputStart()
             break
           }
           case '\x15': {
@@ -759,6 +816,7 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
               // 空行，显示提示
               t.write('\r\n')
               t.write(PROMPT)
+              markInputStart()
             } else {
               deleteCharForward()
             }
@@ -804,12 +862,20 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
           default: {
             // 可打印字符
             if (ch >= ' ' || ch === '\t') {
-              inputBuf.current =
-                inputBuf.current.slice(0, cursorPos.current) +
-                ch +
-                inputBuf.current.slice(cursorPos.current)
-              cursorPos.current++
-              redrawInputLine()
+              // 光标在行尾：直接写出单个字符即可，避免每次按键整段重绘
+              // （长输入/超宽换行后整段闪动，正是由于反复清空重绘整个输入区）
+              if (cursorPos.current === inputBuf.current.length) {
+                inputBuf.current += ch
+                cursorPos.current++
+                t.write(ch)
+              } else {
+                inputBuf.current =
+                  inputBuf.current.slice(0, cursorPos.current) +
+                  ch +
+                  inputBuf.current.slice(cursorPos.current)
+                cursorPos.current++
+                redrawInputLine()
+              }
             }
           }
         }
@@ -830,7 +896,11 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
         // 容器未就绪时忽略
         return
       }
-      if (justRestored) redrawInputLine()
+      if (justRestored) {
+        // fit 使 cols 重排，旧 startY 可能失效；重置为当前行自对齐后再重绘
+        inputStartYRef.current = -1
+        redrawInputLine()
+      }
     }
     const ro = new ResizeObserver(onRefit)
     ro.observe(containerRef.current)
@@ -856,25 +926,27 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
     }
   }, [terminalTheme])
 
-  // 连接状态变化时显示提示（跳过首次挂载）
+  // 连接状态变化时刷新输入行（跳过首次挂载）
   const isFirstMount = useRef(true)
   useEffect(() => {
     const term = termRef.current
     if (!term) return
 
-    // 首次挂载时跳过，不显示 "[Probe disconnected]"
+    // 首次挂载时跳过
     if (isFirstMount.current) {
       isFirstMount.current = false
       return
     }
 
     if (!connected) {
-      term.write(`\r\n${COLOR.yellow}[Probe disconnected]${COLOR.reset}\r\n`)
+      // 回到行首并清除当前行，再画一个干净 prompt，避免反复断开/连接时在同一行叠加成一段 prompt
+      term.write('\r\x1b[2K')
       term.write(PROMPT)
+      markInputStart()
       inputBuf.current = ''
       cursorPos.current = 0
     }
-  }, [connected])
+  }, [connected, markInputStart])
 
   return <div ref={containerRef} className="h-full w-full overflow-hidden" />
 }

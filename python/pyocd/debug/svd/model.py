@@ -544,7 +544,7 @@ class SVDCpu(SVDElement):
 
 class SVDDevice(SVDElement):
     def __init__(self, vendor, vendor_id, name, version, description, cpu, address_unit_bits, width,
-                 peripherals, size, access, protection, reset_value, reset_mask):
+                 peripherals, interrupts, size, access, protection, reset_value, reset_mask):
         SVDElement.__init__(self)
 
         self.vendor = vendor
@@ -556,6 +556,7 @@ class SVDDevice(SVDElement):
         self.address_unit_bits = _check_type(address_unit_bits, int)
         self.width = _check_type(width, int)
         self.peripherals = peripherals
+        self.interrupts = interrupts
         self.size = size  # Defines the default bit-width of any register contained in the device (implicit inheritance).
         self.access = access  # Defines the default access rights for all registers.
         self.protection = protection  # Defines extended access protection for all registers.
@@ -568,3 +569,6 @@ class SVDDevice(SVDElement):
 
         for p in _none_as_empty(self.peripherals):
             p.parent = self
+
+        for i in _none_as_empty(self.interrupts):
+            i.parent = self

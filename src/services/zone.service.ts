@@ -89,11 +89,12 @@ export interface Peripheral {
   registers: PeripheralRegister[]
 }
 
-/** 核心寄存器（Name/Value/Description） */
+/** 核心寄存器（Name/Value/Description，group 用于分组折叠展示） */
 export interface CoreRegister {
   name: string
   value: number
   description: string
+  group: string
 }
 
 /** 寄存器读取结果 */
@@ -101,6 +102,44 @@ export interface RegisterReadResult {
   success: boolean
   values: { address: number; value: number }[]
   errors: { address: number; error: string }[]
+}
+
+/** Core Peripheral：单个中断源状态（NVIC 视图一行） */
+export interface NvicIrq {
+  number: number
+  name: string
+  enabled: boolean
+  pending: boolean
+  active: boolean
+  priority: number
+}
+
+/** Core Peripheral：SCB 寄存器位域取值（枚举项） */
+export interface ScbFieldValue {
+  name: string
+  value: number
+}
+
+/** Core Peripheral：SCB 寄存器位域 */
+export interface ScbField {
+  name: string
+  description: string
+  bit_offset: number
+  bit_width: number
+  access: 'ro' | 'rw' | 'w'
+  values?: ScbFieldValue[]
+}
+
+/** Core Peripheral：SCB 寄存器（System Control and Configuration 一行） */
+export interface ScbRegister {
+  name: string
+  address: number
+  description: string
+  write_only?: boolean
+  group: string
+  group_desc?: string
+  value: number | null
+  fields: ScbField[]
 }
 
 /** 会话配置 */
@@ -663,6 +702,59 @@ export async function zoneCoreRegisters(
   const client = await api()
   const { data } = await client.get(`/api/probes/${uid}/zone/registers/core`)
   return data as { success: boolean; registers: CoreRegister[] }
+}
+
+// ── Core Peripherals（NVIC） ─────────────────
+
+/** NVIC 中断源状态表（Keil 范式：按中断源展示 Enable/Pending/Active/Priority） */
+export async function zoneCoreNvic(uid: string): Promise<{ success: boolean; interrupts: NvicIrq[] }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/peripherals/core/nvic`)
+  return data as { success: boolean; interrupts: NvicIrq[] }
+}
+
+/** 使能/禁止指定中断 */
+export async function zoneSetNvicEnable(uid: string, number: number, enable: boolean): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/nvic/${number}/enable`, { enable })
+  return data as { success: boolean }
+}
+
+/** 置位/清除指定中断的挂起 */
+export async function zoneSetNvicPending(uid: string, number: number, pending: boolean): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/nvic/${number}/pending`, { pending })
+  return data as { success: boolean }
+}
+
+// ── Core Peripherals（System Control and Configuration：SCB） ──
+
+/** 读取 SCB 寄存器（ICSR/VTOR/AIRCR/STIR）+ 位域 */
+export async function zoneReadScb(uid: string): Promise<{ success: boolean; registers: ScbRegister[]; skipped?: boolean }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/peripherals/core/scb`)
+  return data as { success: boolean; registers: ScbRegister[]; skipped?: boolean }
+}
+
+/** 读取 SysTick 寄存器（CTRL/LOAD/VAL/CALIB）+ 位域 */
+export async function zoneReadSystick(uid: string): Promise<{ success: boolean; registers: ScbRegister[]; skipped?: boolean }> {
+  const client = await api()
+  const { data } = await client.get(`/api/probes/${uid}/zone/peripherals/core/systick`)
+  return data as { success: boolean; registers: ScbRegister[]; skipped?: boolean }
+}
+
+/** 触发软件中断（STIR.INTID，运行态可操作） */
+export async function zoneTriggerStir(uid: string, intid: number): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/scb/stir`, { intid })
+  return data as { success: boolean }
+}
+
+/** 写入可写 SCB 位域（RMW，运行态可操作） */
+export async function zoneWriteScbField(uid: string, address: number, field: string, value: number): Promise<{ success: boolean }> {
+  const client = await api()
+  const { data } = await client.post(`/api/probes/${uid}/zone/peripherals/core/scb/field`, { address, field, value })
+  return data as { success: boolean }
 }
 
 /** 读取内存 */

@@ -226,8 +226,14 @@ export const monitorService = {
     opts?: { mode?: 'all' | 'recent' | 'custom'; recentSeconds?: number; startMs?: number; endMs?: number },
   ): Promise<{ success: boolean; csv: string; count: number }> {
     const client = await api()
+    // 后端 query 参数为 snake_case（recent_seconds/start_ms/end_ms），此处做字段映射，
+    // 否则 FastAPI 按名精确匹配收不到 camelCase，时间范围裁剪会退化为导出全部。
+    const { mode, recentSeconds, startMs, endMs } = opts ?? {}
+    const range = Object.fromEntries(
+      Object.entries({ recent_seconds: recentSeconds, start_ms: startMs, end_ms: endMs }).filter(([, v]) => v !== undefined),
+    ) as Record<string, string | number>
     const { data } = await client.get(`/api/probes/${uid}/monitor/record/export`, {
-      params: { format: 'csv', ...(opts ?? {}) },
+      params: { format: 'csv', mode, ...range },
     })
     return data
   },
@@ -242,7 +248,18 @@ export const monitorService = {
     error?: string
   }> {
     const client = await api()
-    const { data } = await client.get(`/api/probes/${uid}/monitor/record`, { params: opts ?? {} })
+    // 后端参数为 snake_case（start_ms/end_ms/max_points），映射 camelCase，避免参数被丢弃。
+    const { startMs, endMs, limit, maxPoints } = opts ?? {}
+    const { data } = await client.get(`/api/probes/${uid}/monitor/record`, {
+      params: Object.fromEntries(
+        Object.entries({
+          start_ms: startMs,
+          end_ms: endMs,
+          limit,
+          max_points: maxPoints,
+        }).filter(([, v]) => v !== undefined),
+      ) as Record<string, string | number>,
+    })
     return data
   },
 }

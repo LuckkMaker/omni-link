@@ -25,6 +25,19 @@ import logging
 
 LOG = logging.getLogger(__name__)
 
+def _decode_path(data):
+    """解码 DWARF 路径字符串：优先 UTF-8，失败回退 GBK（Keil 在中文 Windows 下用本地代码页
+    写路径），再失败用替换字符兜底，避免 UnicodeDecodeError 导致 ELF 加载失败。"""
+    if not isinstance(data, bytes):
+        return data
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            return data.decode('gbk')
+        except UnicodeDecodeError:
+            return data.decode('utf-8', errors='replace')
+
 FunctionInfo = namedtuple('FunctionInfo', 'name subprogram low_pc high_pc')
 LineInfo = namedtuple('LineInfo', 'cu filename dirname line comp_dir')
 SymbolInfo = namedtuple('SymbolInfo', 'name address size type')
@@ -174,7 +187,7 @@ class DwarfAddressDecoder(object):
             if top_die:
                 comp_dir_attr = top_die.attributes.get('DW_AT_comp_dir')
                 if comp_dir_attr:
-                    comp_dir = comp_dir_attr.value.decode() if isinstance(comp_dir_attr.value, bytes) else comp_dir_attr.value
+                    comp_dir = _decode_path(comp_dir_attr.value)
 
             prevstate = None
             skipThisSequence = False
@@ -196,11 +209,10 @@ class DwarfAddressDecoder(object):
                 if prevstate and not skipThisSequence:
                     try:
                         fileinfo = lineprog['file_entry'][prevstate.file - 1]
-                        filename_bytes = fileinfo.name
-                        filename = filename_bytes.decode() if isinstance(filename_bytes, bytes) else filename_bytes
+                        filename = _decode_path(fileinfo.name)
                         try:
                             dirname = lineprog['include_directory'][fileinfo.dir_index - 1]
-                            dirname = dirname.decode() if isinstance(dirname, bytes) else dirname
+                            dirname = _decode_path(dirname)
                         except IndexError:
                             dirname = ""
                     except IndexError:

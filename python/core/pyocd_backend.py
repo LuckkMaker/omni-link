@@ -19,6 +19,16 @@ from core.events import event_manager
 logger = logging.getLogger(__name__)
 
 
+class FlashOperationCancelled(Exception):
+    """内部信号：烧录/擦除途中用户请求取消，由操作外层 except 捕获转成 FlashResult。"""
+
+
+# 拔出判定所需的连续缺失轮询次数（去抖）：CMSIS-DAP 探针连接成功后可能短暂
+# 重新枚举（USB reset），并非真正拔出，需连续缺失多轮才判定为拔出。
+# 每次轮询间隔 2s，2 轮=约 4s 确认时间。
+REMOVAL_GRACE_POLLS = 2
+
+
 class ProbeState(Enum):
     """探针连接状态"""
     DISCONNECTED = "disconnected"
@@ -57,7 +67,14 @@ class PyOCDBackend(BackendInterface):
     def __init__(self):
         self._sessions: dict[str, ProbeSession] = {}
         self._lock = threading.Lock()
+        # 按探针 UID 记录“关闭中”事件：断开时在后台线程关闭 session，
+        # 供下一次连接等待旧 J-Link 句柄真正释放后再 open，避免并发抢占同一仿真器。
+        self._close_events: dict[str, threading.Event] = {}
         self._known_probe_uids: set[str] = set()
+        # 探针连续缺失轮询次数计数：CMSIS-DAP 探针（如 Geehy Link V2）连接成功后
+        # 会在 USB 总线上短暂重新枚举（USB reset），导致误判为拔出。只有连续缺失
+        # REMOVAL_GRACE_POLLS 次才真正判定拔出，避免误拆刚建立的会话。
+        self._missing_polls: dict[str, int] = {}
         self._pending_target: str | None = None  # 连接时使用的目标型号
         self._probe_info_cache: dict[str, ProbeInfo] = {}  # 缓存探针初始信息（避免连接后名称变化）
         self._cancel_flag: threading.Event = threading.Event()
@@ -82,13 +99,20 @@ class PyOCDBackend(BackendInterface):
         return False
 
     def list_probes(self) -> list[ProbeInfo]:
-        """扫描所有已连接的 CMSIS-DAP 探针（缓存初始信息，避免连接后名称变化）"""
+        """返回所有可见探针（缓存初始信息，避免连接后名称变化）。
+
+        Windows 上 WinUSB 探针被 pyOCD 会话独占打开后，ConnectHelper 枚举会
+        看不到它（详见 detect_probe_changes 注释）。因此这里把"正持有活动会话
+        但仍插着的探针"补充进来，避免会话建立后探针从设备列表/拔出检测中消失。
+        """
         from pyocd.core.helpers import ConnectHelper
 
         probes = ConnectHelper.get_all_connected_probes(blocking=False)
         result = []
+        seen = set()
         for probe in probes:
             uid = probe.unique_id
+            seen.add(uid)
             # 首次发现时缓存探针信息；已连接的探针 product_name 会变化，用缓存保持一致
             if uid not in self._probe_info_cache:
                 info = ProbeInfo(
@@ -101,6 +125,15 @@ class PyOCDBackend(BackendInterface):
                 )
                 self._probe_info_cache[uid] = info
             result.append(self._probe_info_cache[uid])
+
+        # 补上"我们正持有活动会话、但被枚举隐藏"的探针（用缓存的初始信息）
+        with self._lock:
+            session_ids = {uid for uid, s in self._sessions.items()
+                           if s.state == ProbeState.CONNECTED}
+        for uid in session_ids - seen:
+            if uid in self._probe_info_cache:
+                result.append(self._probe_info_cache[uid])
+
         return result
 
     def get_probe_states(self) -> list[dict]:
@@ -122,25 +155,88 @@ class PyOCDBackend(BackendInterface):
     # ── 热插拔检测 ──────────────────────────────────────────────
 
     def detect_probe_changes(self) -> tuple[list[ProbeInfo], list[str]]:
-        """检测探针变化，返回 (新增探针列表, 消失探针uid列表)"""
+        """检测探针变化，返回 (新增探针列表, 消失探针uid列表)
+
+        关键约束：Windows 上 WinUSB 探针被 pyOCD 会话独占打开后，
+        ConnectHelper.get_all_connected_probes() 枚举不到它（实测验证：会话
+        打开期间探针从枚举中消失，关闭会话后恢复）。因此：
+          1. 我们正持有活动会话的探针一律视为"存在"，绝不判为拔出；
+             否则刚建立的会话会被误拆（连接图标回退未连接）。
+          2. 无会话的探针做去抖（debounce）：需连续缺失 REMOVAL_GRACE_POLLS
+             次轮询才判为真正拔出，避免个别轮询的偶发抖动误报。
+        """
         current_probes = self.list_probes()
         current_uids = {p.uid for p in current_probes}
 
         with self._lock:
-            added = [p for p in current_probes if p.uid not in self._known_probe_uids]
-            removed = [uid for uid in self._known_probe_uids if uid not in current_uids]
-            self._known_probe_uids = current_uids
-            # 清理已拔出探针的信息缓存
-            for uid in removed:
-                self._probe_info_cache.pop(uid, None)
+            # 正持有活动会话的探针 = 物理上仍存在，即使枚举看不到
+            engaged = {uid for uid, s in self._sessions.items()
+                       if s.state == ProbeState.CONNECTED}
+
+            added = []
+            removed = []
+
+            # 1) 新出现的探针：本次存在且此前既不已知也非待确认拔除
+            for p in current_probes:
+                if p.uid not in self._known_probe_uids and p.uid not in self._missing_polls:
+                    added.append(p)
+                    self._known_probe_uids.add(p.uid)
+
+            # 2) 处理缺失/重新出现
+            for uid in list(self._known_probe_uids):
+                if uid in current_uids:
+                    # 枚举可见：存在，恢复，清除待确认拔除计数
+                    self._missing_polls.pop(uid, None)
+                elif uid in engaged:
+                    # 枚举隐藏但会话仍 CONNECTED：可能是 WinUSB 独占（在线）。
+                    # 做一次轻量健康探测以区分"独占隐藏（仍在线）"与"物理拔出（失联）"：
+                    #   - 存活 → 独占隐藏，恢复，绝不判拔出（保留既有修复）
+                    #   - 失联 → 落入下方去抖累计，达阈值才确认拔出（修复"物理拔出永不判 removed"）
+                    if self._probe_alive(uid):
+                        self._missing_polls.pop(uid, None)
+                        continue
+                # 枚举缺失且（无会话 或 健康探测失联）：累计去抖，达阈值才确认拔出
+                self._missing_polls[uid] = self._missing_polls.get(uid, 0) + 1
+                if self._missing_polls[uid] >= REMOVAL_GRACE_POLLS:
+                    removed.append(uid)
+                    self._known_probe_uids.discard(uid)
+                    self._missing_polls.pop(uid, None)
+                    self._probe_info_cache.pop(uid, None)
 
         return added, removed
+
+    def _probe_alive(self, probe_uid: str) -> bool:
+        """轻量健康探测：区分 WinUSB 独占隐藏（仍在线）与物理拔出（失联）。
+
+        仅对"枚举缺失但会话仍 CONNECTED"的探针调用。借助 op_lock 非阻塞加锁做一次
+        寄存器读（避免与 API 调试操作并发污染 DAP）；探测失败视为失联。
+        """
+        with self._lock:
+            session_info = self._sessions.get(probe_uid)
+        if session_info is None or session_info.state != ProbeState.CONNECTED:
+            return False
+        py_session = getattr(session_info, "session", None)
+        target = getattr(py_session, "target", None) if py_session else None
+        if target is None:
+            return False
+        op_lock = self.get_op_lock(probe_uid)
+        if op_lock is None or not op_lock.acquire(blocking=False):
+            # 正被 API 使用（大概率仍在枚举/操作中）：保守视为在线，避免误拆正常会话
+            return True
+        try:
+            target.read_core_registers(["pc"])
+            return True
+        except Exception:
+            return False
+        finally:
+            op_lock.release()
 
     # ── 连接管理 ──────────────────────────────────────────────
 
     def connect(self, probe_uid: str, target: str | None = None,
                 interface: str = "swd", speed: int | None = None,
-                connect_mode: str | None = None, force: bool = False) -> bool:
+                connect_mode: str | None = None, force: bool = False,
+                device: str | None = None) -> bool:
         """连接指定探针
 
         Args:
@@ -155,8 +251,17 @@ class PyOCDBackend(BackendInterface):
                 - under-reset: 拉低复位线时连接（用于深度睡眠/被锁目标）
             force: 是否强制重连。为 True 时即使已连接也会关闭旧会话并以新参数重连
                 （用于切换连接模式，如 Zone 会话的 attach/halt 绑定）。
+            device: J-Link 目标设备名（如 G32F463XC），None 则不用或走接口默认。
+                对 J-Link 探针，SWD 也必须设置 jlink.device 才会建立目标连接
+                （否则 pyOCD 只调 coresight_configure()，目标 target_connected=False，
+                表现为"连不上"，实际是 J-Link 根本没做设备连接）。
         """
         from pyocd.core.helpers import ConnectHelper
+
+        # 等上一次断开的旧句柄真正释放后再重建连接。
+        # 否则 J-Link 等探针会因旧 session.close() 尚未完成（在后台线程）而并发抢占
+        # 同一仿真器，新 open() 报 "No emulator with serial number ... found"。
+        self._wait_for_close(probe_uid)
 
         with self._lock:
             existing = self._sessions.get(probe_uid)
@@ -212,6 +317,16 @@ class PyOCDBackend(BackendInterface):
         # 接口协议通过 dap_protocol 选项设置
         if interface == 'jtag':
             options['dap_protocol'] = 'jtag'
+        else:
+            options['dap_protocol'] = 'swd'
+        # J-Link 设备名：显式传入优先；JTAG 走历史兼容的 STM32F4 配置。
+        # 关键：SWD 下 J-Link 也必须设置 jlink.device 才会调用 JLink.connect(device)
+        # 建立目标连接，否则 pyOCD 只调 pylink 的 coresight_configure()，
+        # 目标 target_connected=False（表现为连不上，但探针/软件层都正常）。
+        # SWD 的 device 名由前端 J-Link 输入框提供（如 G32F463XC）。
+        if device:
+            options['jlink.device'] = device
+        elif interface == 'jtag':
             # JTAG 模式必须设置 jlink.device,触发 J-Link 固件执行完整 JTAG 链扫描和 DP 初始化。
             # 否则 pyOCD 走 low-level CoreSight 路径,pylink 的 coresight_configure() 会破坏
             # JTAG DP 访问(实测 DP IDR 变 0x00000000,内存读全零)。
@@ -219,8 +334,6 @@ class PyOCDBackend(BackendInterface):
             # JTAG 链结构相同,可借用 STM32F4 设备配置。
             # 配合 jlink_probe.py 中对 coresight_configure() 的条件跳过使用。
             options['jlink.device'] = 'STM32F407VG'
-        else:
-            options['dap_protocol'] = 'swd'
 
         # 连接超时（秒）。目标未 reset 或无响应时，pyOCD 内部 DP 连接会重试 4 次 SWJ 序列，
         # 可能阻塞数秒到数十秒。用线程池 + future.result(timeout) 强制中断。
@@ -386,10 +499,16 @@ class PyOCDBackend(BackendInterface):
             event_manager.emit("probe.disconnected", {"uid": probe_uid, "reason": "user"})
 
             # session.close() 耗时取决于底层 USB 通信，可能数秒。
-            # 放入后台线程执行以避免阻塞前端。
+            # 放入后台线程执行以避免阻塞前端，同时登记一个"关闭中"事件，
+            # 供下一次连接（connect）等待旧句柄真正释放后再 open，
+            # 避免 J-Link 等探针跑到一半就重建连接导致 "No emulator found"。
             import threading
             session = session_info.session
-            t = threading.Thread(target=self._close_session, args=(probe_uid, session), daemon=True)
+            close_event = threading.Event()
+            with self._lock:
+                self._close_events[probe_uid] = close_event
+            t = threading.Thread(target=self._close_session,
+                                 args=(probe_uid, session, close_event), daemon=True)
             t.start()
 
         return True
@@ -421,19 +540,68 @@ class PyOCDBackend(BackendInterface):
             except Exception:
                 pass  # 单个回调失败不影响其余
 
-    def _close_session(self, uid, session):
+    def _close_session(self, uid, session, close_event=None):
         """后台关闭 pyOCD session，避免 blocking 前端"""
         try:
-            # 断开时恢复目标运行（resume_on_disconnect=True），让芯片退出会话后 free-run，
-            # 避免芯片停在 halt/低功耗导致下次连接需手动复位。resume() 在本后台线程执行，不阻塞前端。
-            session.options.set('resume_on_disconnect', True)
+            # 断开时恢复目标运行，让芯片退出会话后 free-run，避免停在 halt/低功耗导致下次连接需手动复位。
+            # 刻意不走 board.uninit()/target.disconnect()：它们内部会调 dp.power_down_debug()，
+            # 而该步在本目标（J-Link + STM32F407 等）不响应掉电 ACK，会死等 5 秒超时才放弃，
+            # 直接拖慢“断开→立即重连”。掉电对本目标并非必需，跳过即可。
+            target = getattr(session, 'target', None)
+            if target is not None:
+                cores = list(getattr(target, 'cores', None) or [target.selected_core])
+                for core in cores:
+                    try:
+                        # resume=True：恢复执行 + 清调试控制(DHCSR/DEMCR)，亚秒级
+                        core.disconnect(resume=True)
+                    except Exception:
+                        pass
             # 清除目标上所有硬件断点（FPB），避免 stop session 后芯片残留断点
             self._clear_hw_breakpoints(session)
-            session.close()
-        except Exception:
-            pass  # 后台清理，忽略超时等异常
+            probe = getattr(session, 'probe', None) or getattr(session, '_probe', None)
+            if probe is not None and probe.is_open and probe.wire_protocol is not None:
+                try:
+                    probe.disconnect()
+                except Exception:
+                    pass
+            if probe is not None and probe.is_open:
+                try:
+                    probe.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            event_manager.log("warning", f"close session {uid[:16]} exception: {e}")
         finally:
+            # 无论成败都通知旧句柄已释放，并清掉"关闭中"登记，允许下一次连接 proceed
             self._notify_session_closed(uid)
+            with self._lock:
+                # 仅当仍登记本事件的 event 时移除，避免误删新一次的关闭登记
+                if self._close_events.get(uid) is close_event:
+                    self._close_events.pop(uid, None)
+            if close_event is not None:
+                try:
+                    close_event.set()
+                except Exception:
+                    pass
+
+    def _wait_for_close(self, probe_uid: str, timeout: float = 8.0):
+        """等待该探针上一次断开的后台关闭完成（如仍在进行），避免重建连接时抢占旧句柄。
+
+        仅等待已登记的 close_event；无登记或已结束则立即返回。超时后不再等待，
+        由 connect 的 open 超时兜底（J-Link DLL 会因旧句柄未释放而报错）。
+        """
+        with self._lock:
+            ev = self._close_events.get(probe_uid)
+        if ev is None:
+            return
+        try:
+            ev.wait(timeout=timeout)
+        except Exception:
+            pass
+        # 已不需要该登记，清理（connect 后续 self._lock 保护的新登记不受影响）
+        with self._lock:
+            if self._close_events.get(probe_uid) is ev:
+                self._close_events.pop(probe_uid, None)
 
     def get_state(self, probe_uid: str) -> ProbeState:
         """获取探针连接状态"""
@@ -742,6 +910,8 @@ class PyOCDBackend(BackendInterface):
                         sector_size = getattr(region, 'sector_size', 0) or 16384
                         total_sectors = region.length // sector_size
                         for i in range(total_sectors):
+                            if self._check_cancel():
+                                raise FlashOperationCancelled()
                             flash.erase_sector(region.start + i * sector_size)
                             event_manager.emit("flash.progress", {
                                 "phase": "erase", "current": i + 1, "total": total_sectors,
@@ -806,6 +976,8 @@ class PyOCDBackend(BackendInterface):
                     flash.init(Flash.Operation.ERASE)
                     try:
                         for addr in sector_addrs:
+                            if self._check_cancel():
+                                raise FlashOperationCancelled()
                             flash.erase_sector(addr)
                             erased += 1
                             event_manager.emit("flash.progress", {
@@ -840,6 +1012,10 @@ class PyOCDBackend(BackendInterface):
             duration = int((time.time() - start_time) * 1000)
             event_manager.log("info", f"Erase complete ({duration}ms)")
             return FlashResult(success=True, duration_ms=duration)
+        except FlashOperationCancelled:
+            canceled_ms = int((time.time() - start_time) * 1000)
+            event_manager.log("warning", f"Erase cancelled ({canceled_ms}ms)")
+            return FlashResult(success=False, error="Operation cancelled by user", duration_ms=canceled_ms)
         except Exception as e:
             logger.exception("Erase failed")
             event_manager.log("error", f"Erase failed: {e}")
@@ -924,11 +1100,15 @@ class PyOCDBackend(BackendInterface):
 
             def progress_callback(percent: float):
                 # FlashLoader 报告的是 0.0-1.0 的浮点数，前端需要 0-100 的百分比
+                if self._check_cancel():
+                    raise FlashOperationCancelled()
                 progress_pct = round(percent * 100, 2)
+                # current/total 统一用实际写入量 actual_data_size，与 erase 相位口径一致，
+                # 避免 HEX/ELF 下 file_size 与实际数据段大小不符导致前后相位进度不一致。
                 event_manager.emit("flash.progress", {
                     "phase": "program",
-                    "current": int(file_size * percent),
-                    "total": file_size,
+                    "current": int(actual_data_size * percent),
+                    "total": actual_data_size,
                     "percent": progress_pct,
                 })
 
@@ -978,6 +1158,10 @@ class PyOCDBackend(BackendInterface):
                 bytes_written=actual_data_size,
                 duration_ms=duration,
             )
+        except FlashOperationCancelled:
+            canceled_ms = int((time.time() - start_time) * 1000)
+            event_manager.log("warning", f"Programming cancelled ({canceled_ms}ms)")
+            return FlashResult(success=False, error="Operation cancelled by user", duration_ms=canceled_ms)
         except Exception as e:
             logger.exception("Programming failed")
             event_manager.log("error", f"Programming failed: {e}")
@@ -1046,6 +1230,8 @@ class PyOCDBackend(BackendInterface):
             chunk_size = 32768
             for seg_addr, seg_data in segments:
                 for offset in range(0, len(seg_data), chunk_size):
+                    if self._check_cancel():
+                        raise FlashOperationCancelled()
                     read_len = min(chunk_size, len(seg_data) - offset)
                     addr = seg_addr + offset
 
@@ -1087,6 +1273,8 @@ class PyOCDBackend(BackendInterface):
             duration = int((time.time() - start_time) * 1000)
             event_manager.log("info", f"Verify OK ({total_bytes} bytes, {duration}ms)")
             return FlashResult(success=True, duration_ms=duration)
+        except FlashOperationCancelled:
+            return FlashResult(success=False, error="Operation cancelled by user")
         except Exception as e:
             logger.exception("Verify failed")
             event_manager.log("error", f"Verify failed: {e}")

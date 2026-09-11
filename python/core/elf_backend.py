@@ -20,6 +20,58 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
+# 源码兜底搜索时跳过的构建产物/版本控制目录，加速同名文件查找
+_SEARCH_SKIP_DIRS = {
+    "objects", "obj", "build", "debug", "release",
+    ".git", ".svn", ".hg", "node_modules",
+}
+
+
+def _walk_ancestors(path: str, max_levels: int):
+    """从 path 开始逐级向上返回目录（含 path 本身），最多 max_levels 级。"""
+    cur = os.path.normpath(path)
+    for _ in range(max_levels):
+        yield cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+
+
+def _find_basename_hits(root: str, base: str, max_hits: int) -> list[str]:
+    """在 root 下递归收集文件名 == base 的文件绝对路径（最多 max_hits 个）。"""
+    hits: list[str] = []
+    base_l = base.lower()
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d.lower() not in _SEARCH_SKIP_DIRS]
+            for fn in filenames:
+                if fn.lower() == base_l:
+                    hits.append(os.path.join(dirpath, fn))
+                    if len(hits) >= max_hits:
+                        return hits
+    except OSError:
+        pass
+    return hits
+
+
+def _pick_best(root: str, candidates: list[str]) -> str:
+    """在候选里挑与 root 最长公共路径前缀（按目录段计数）的文件，平局取更短路径。"""
+    root_segs = [s.lower() for s in root.replace('\\', '/').split('/') if s]
+
+    def common(c: str):
+        cs = [s.lower() for s in c.replace('\\', '/').split('/') if s]
+        n = 0
+        for a, b in zip(root_segs, cs):
+            if a == b:
+                n += 1
+            else:
+                break
+        return (n, len(c))
+
+    return max(candidates, key=common)
+
+
 # 悬停可识别的核心寄存器名（小写）。与 zone.py 的 _HOVER_REG_NAMES 对齐，
 # 悬停这些名字时直接返回寄存器当前值（目标需暂停）。
 HOVER_REG_NAMES = {
@@ -210,6 +262,70 @@ class ElfBackend:
                 "size": size,
             })
         return {"success": True, "files": files}
+
+    def resolve_source_file(self, uid: str, file: str) -> Optional[str]:
+        """把 DWARF 来源的源码文件标识解析为磁盘上真实存在的绝对路径。
+
+        部分 Keil / armclang 工程会在 DWARF 的 dirname 里记下「包含路径查找链」
+        （多层 ``../`` 与中间 Include 段），使 ``comp_dir + dirname + filename``
+        拼出的路径过冲到并不存在的目录（例如 ``.../Libraries/Config/Source/...``，
+        而真实文件在同工程的 ``.../OTGD_CDC/Config/Source/``），打开源码时报
+        ``File not found``。本方法弥补这类路径：
+          1. 直接规范化 file 并查磁盘；
+          2. 以目标文件 basename 为锚，从 comp_dir / ELF 所在目录向上逐层做有界
+             同名文件搜索，多个同名文件（SDK 里常见）用与根最长的公共路径前缀择优。
+        全部失败返回 None。结果按 uid 缓存，避免单步调试时反复全盘搜索。
+        """
+        if not file:
+            return None
+        norm = os.path.normpath(file)
+        if os.path.isfile(norm):
+            return norm
+
+        entry = self._get(uid)
+        if not entry:
+            return None
+
+        base = os.path.basename(file.replace('\\', '/'))
+        if not base:
+            return None
+
+        cache = entry.setdefault("src_resolve_cache", {})
+        if norm in cache:
+            return cache[norm]
+
+        # 候选搜索根：目标文件所属 comp_dir，其次 ELF 所在目录
+        roots: list[str] = []
+        tree = getattr(entry["decoder"], 'line_tree', None)
+        if tree:
+            for interval in tree:
+                info_fn = (getattr(interval.data, 'filename', '') or '').replace('\\', '/')
+                if info_fn and os.path.basename(info_fn).lower() == base.lower():
+                    cd = (getattr(interval.data, 'comp_dir', '') or '').replace('\\', '/')
+                    if cd and cd not in roots:
+                        roots.append(cd)
+        elfdir = os.path.dirname(entry.get("path") or '')
+        if elfdir and elfdir.replace('\\', '/') not in roots:
+            roots.append(elfdir)
+
+        resolved = None
+        for root in roots:
+            seen: set[str] = set()
+            for ancestor in _walk_ancestors(root, max_levels=8):
+                anc_norm = os.path.normpath(ancestor).lower()
+                if anc_norm in seen:
+                    continue
+                seen.add(anc_norm)
+                hits = _find_basename_hits(ancestor, base, max_hits=16)
+                if hits:
+                    resolved = _pick_best(root, hits)
+                    break
+            if resolved:
+                break
+
+        if resolved:
+            cache[norm] = resolved
+        return resolved
 
     def _close(self, uid: str):
         """关闭并移除探针的 ELF 实例"""

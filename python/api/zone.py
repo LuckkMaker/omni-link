@@ -17,6 +17,15 @@ from pydantic import BaseModel
 from typing import Optional
 
 from core.commander_backend import commander_backend
+from core.core_peripherals import (
+    read_nvic,
+    read_scb,
+    read_systick,
+    set_enable,
+    set_pending,
+    trigger_stir,
+    write_scb_field,
+)
 from core.elf_backend import elf_backend
 from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend, register_session_closed
@@ -50,6 +59,24 @@ class DisasmRequest(BaseModel):
 
 class ReadRegistersRequest(BaseModel):
     addresses: list[int]
+
+
+class NvicEnableRequest(BaseModel):
+    enable: bool
+
+
+class NvicPendingRequest(BaseModel):
+    pending: bool
+
+
+class StirTriggerRequest(BaseModel):
+    intid: int
+
+
+class ScbFieldWriteRequest(BaseModel):
+    address: int
+    field: str
+    value: int
 
 
 class ReadMemoryRequest(BaseModel):
@@ -794,9 +821,16 @@ async def zone_source_search(uid: str, query: str, limit: int = 200):
 
 
 def _resolve_source_path(uid: str, file: str) -> str | None:
-    """将源码文件标识（可能为 basename）解析为磁盘绝对路径；无法解析或不存在时返回 None"""
-    file_path = file
-    if not os.path.isabs(file_path):
+    """将源码文件标识（可能为 basename）解析为磁盘绝对路径；无法解析或不存在时返回 None。
+
+    优先快速路径（绝对值 / comp_dir 拼接）；失败时走 elf_backend 的兜底同名文件
+    有界搜索，规避部分 Keil/armclang 工程在 DWARF 里记录的过冲包含路径。
+    """
+    if os.path.isabs(file):
+        fp = os.path.normpath(file)
+        if os.path.isfile(fp):
+            return fp
+    else:
         comp_dir = None
         with elf_backend._lock:
             entry = elf_backend._entries.get(uid)
@@ -808,10 +842,10 @@ def _resolve_source_path(uid: str, file: str) -> str | None:
                     comp_dir = info.comp_dir
                     break
         if comp_dir:
-            file_path = os.path.join(comp_dir, file)
-    if not os.path.isfile(file_path):
-        return None
-    return os.path.normpath(file_path)
+            fp = os.path.normpath(os.path.join(comp_dir, file))
+            if os.path.isfile(fp):
+                return fp
+    return elf_backend.resolve_source_file(uid, file)
 
 
 @router.get("/probes/{uid}/zone/source/content")
@@ -1008,15 +1042,25 @@ _CORE_REG_DESCRIPTIONS = {
     "primask": "优先级屏蔽寄存器 (PRIMASK)",
     "basepri": "基础优先级寄存器 (BASEPRI)",
     "faultmask": "错误屏蔽寄存器 (FAULTMASK)",
-    "ipsr": "中断程序状态寄存器 (IPSR)",
     "fpscr": "浮点状态与控制寄存器 (FPSCR)",
+}
+
+# 寄存器分组（Registers 面板按组折叠展示，参考 Keil 分组）
+_CORE_REG_GROUP = {
+    "r0": "core", "r1": "core", "r2": "core", "r3": "core", "r4": "core",
+    "r5": "core", "r6": "core", "r7": "core", "r8": "core", "r9": "core",
+    "r10": "core", "r11": "core", "r12": "core",
+    "sp": "core", "lr": "core", "pc": "core", "xpsr": "core",
+    "msp": "banked", "psp": "banked",
+    "control": "system", "primask": "system", "basepri": "system", "faultmask": "system",
+    "fpscr": "fpu",
 }
 
 # 读取顺序（按 ARM 惯例排列）
 _CORE_REG_ORDER = [
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12",
     "sp", "lr", "pc", "xpsr", "msp", "psp",
-    "control", "primask", "basepri", "faultmask", "ipsr", "fpscr",
+    "control", "primask", "basepri", "faultmask", "fpscr",
 ]
 
 
@@ -1045,11 +1089,93 @@ async def zone_registers_core(uid: str):
                 "name": name.upper(),
                 "value": value,
                 "description": _CORE_REG_DESCRIPTIONS.get(name, ""),
+                "group": _CORE_REG_GROUP.get(name, "core"),
             })
         except Exception as e:
             errors.append({"name": name, "error": str(e)})
 
     return {"success": True, "registers": registers, "errors": errors}
+
+
+# ── Core Peripherals（NVIC，Keil 范式：按中断源） ──────────
+
+@router.get("/probes/{uid}/zone/peripherals/core/nvic")
+async def zone_nvic(uid: str):
+    """NVIC 中断源状态表（按中断源展示 Enable/Pending/Active/Priority，Keil 范式）"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    result = await asyncio.to_thread(read_nvic, uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read NVIC failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/nvic/{number}/enable")
+async def zone_nvic_enable(uid: str, number: int, req: NvicEnableRequest):
+    """使能/禁止指定中断（目标须暂停）"""
+    if number < 0:
+        raise HTTPException(status_code=400, detail="Invalid interrupt number")
+    result = await asyncio.to_thread(set_enable, uid, number, req.enable)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Set NVIC enable failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/nvic/{number}/pending")
+async def zone_nvic_pending(uid: str, number: int, req: NvicPendingRequest):
+    """置位/清除指定中断的挂起（目标须暂停）"""
+    if number < 0:
+        raise HTTPException(status_code=400, detail="Invalid interrupt number")
+    result = await asyncio.to_thread(set_pending, uid, number, req.pending)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Set NVIC pending failed"))
+    return result
+
+
+# ── Core Peripherals（System Control and Configuration：SCB） ──────────
+
+@router.get("/probes/{uid}/zone/peripherals/core/scb")
+async def zone_scb(uid: str):
+    """System Control and Configuration：读取 ICSR/VTOR/AIRCR/STIR 寄存器及位域"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    result = await asyncio.to_thread(read_scb, uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read SCB failed"))
+    return result
+
+
+@router.get("/probes/{uid}/zone/peripherals/core/systick")
+async def zone_systick(uid: str):
+    """System Tick Timer：读取 CTRL/LOAD/VAL/CALIB 寄存器及位域"""
+    if not backend.is_connected(uid):
+        raise HTTPException(status_code=400, detail="Probe not connected")
+    result = await asyncio.to_thread(read_systick, uid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Read SysTick failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/scb/stir")
+async def zone_scb_stir(uid: str, req: StirTriggerRequest):
+    """Software Trigger Interrupt：写 STIR.INTID 触发软件中断（运行态可操作）"""
+    if req.intid < 0:
+        raise HTTPException(status_code=400, detail="Invalid interrupt number")
+    result = await asyncio.to_thread(trigger_stir, uid, req.intid)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Trigger STIR failed"))
+    return result
+
+
+@router.post("/probes/{uid}/zone/peripherals/core/scb/field")
+async def zone_scb_field(uid: str, req: ScbFieldWriteRequest):
+    """System Control and Configuration：写入可写 SCB 位域（RMW，VECTKEY 自动处理）"""
+    result = await asyncio.to_thread(
+        write_scb_field, uid, req.address, req.field, req.value
+    )
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Write SCB field failed"))
+    return result
 
 
 @router.post("/probes/{uid}/zone/memory/read")

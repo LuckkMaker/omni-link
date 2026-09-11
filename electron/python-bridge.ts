@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from 'child_process'
 import { join } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 
 interface PythonStatus {
   running: boolean
@@ -49,14 +49,14 @@ export class PythonBridge {
         return
       }
 
-      // 开发模式下使用固定端口 8765，生产模式用 0（自动分配）
-      const portArg = isDev ? '8765' : '0'
+      // 开发模式端口来源：环境变量 OMNI_BACKEND_PORT > backend.config.json > 默认 8765；生产模式用 0（自动分配）
+      const portArg = isDev ? String(this.resolveDevPort()) : '0'
 
       // PyInstaller exe 不需要 scriptPath 参数；开发模式需要 server.py
       const args: string[] = []
       let cwd: string
       if (scriptPath) {
-        // 开发模式：python server.py --port 8765
+        // 开发模式：python server.py --port <port>
         args.push(scriptPath, '--port', portArg)
         cwd = join(scriptPath, '..')
       } else {
@@ -132,6 +132,28 @@ export class PythonBridge {
       this.port = null
       this.ready = null
     }
+  }
+
+  /**
+   * 解析开发模式后端端口。
+   * 优先级：环境变量 OMNI_BACKEND_PORT > backend.config.json 的 backendPort > 默认 8765。
+   */
+  private resolveDevPort(): number {
+    const envPort = Number(process.env.OMNI_BACKEND_PORT)
+    if (Number.isInteger(envPort) && envPort > 0) return envPort
+
+    const root = this.getProjectRoot()
+    const configPath = join(root, 'backend.config.json')
+    try {
+      if (existsSync(configPath)) {
+        const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+        const port = Number(config.backendPort)
+        if (Number.isInteger(port) && port > 0) return port
+      }
+    } catch (err) {
+      console.warn('[PythonBridge] invalid backend.config.json, using default port:', err)
+    }
+    return 8765
   }
 
   /**
