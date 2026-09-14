@@ -144,7 +144,8 @@ export default function RttPage() {
           className="relative min-h-0 flex-1 overflow-hidden"
           style={{ backgroundColor: terminalTheme.theme.background }}
         >
-          {isConnected ? (
+          {/* 终端：只要选中了探针就保持挂载，断开连接也不卸载，保留已接收数据显示在屏幕上 */}
+          {uid ? (
             <RttTerminal
               key={activeTabId}
               ref={terminalRef}
@@ -158,7 +159,7 @@ export default function RttPage() {
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <p style={{ color: terminalTheme.theme.foreground, opacity: 0.7 }}>
-                  {uid ? 'Link 未连接' : '请选择并连接 Link'}
+                  请选择并连接 Link
                 </p>
               </div>
             </div>
