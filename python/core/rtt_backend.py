@@ -184,11 +184,13 @@ class RTTBackend:
             cb = None
             last_error = None
 
-            def _search_control_block():
+            def _search_control_block(limit_bytes: Optional[int] = None):
                 """在所有 RAM region 中搜索 RTT 控制块
 
                 如果用户指定了 address，只搜索指定范围；
                 否则遍历所有 RAM region（对标 J-Link RTT Viewer 的行为）。
+                limit_bytes 非 None 时，每个 RAM region 只扫描起始 limit_bytes
+                字节（快速探测）；None 时完整扫描整个 region。
                 """
                 nonlocal last_error
 
@@ -209,9 +211,13 @@ class RTTBackend:
 
                 # 自动模式：遍历所有 RAM region，用大块 read32 粗扫定位控制块
                 for r in ram_regions:
+                    effective = None
+                    if limit_bytes is not None and r.length > limit_bytes:
+                        effective = limit_bytes
+                    scope = f"first {effective // 1024}KiB" if effective else "all"
                     event_manager.log("info", f"RTT: scanning RAM region 0x{r.start:08X} "
-                                      f"(size=0x{r.length:X})...")
-                    hit = self._fast_scan_region(target, r)
+                                      f"(size=0x{r.length:X}, scope={scope})...")
+                    hit = self._fast_scan_region(target, r, max_bytes=effective)
                     if hit is None:
                         event_manager.log("info", f"RTT: no control block in region 0x{r.start:08X}")
                         continue
@@ -230,16 +236,16 @@ class RTTBackend:
                 last_error = "Control block not found in any RAM region"
                 return None
 
-            # 第一轮：直接搜索（对标 CLI 的行为，此时目标已 halt）
-            event_manager.log("info", f"RTT: searching for control block" +
-                              (f" at 0x{address:08X}" if address is not None else " (auto-detect, all RAM regions)") +
-                              "...")
-            cb = _search_control_block()
+            # 第0轮：低地址快速探测（每个 RAM region 前 64KB），覆盖"固件已在运行、
+            # RTT 已初始化"的常见场景。不要一上来就全 RAM 扫描——SWD 下 APM32F4
+            # 双 RAM 192KB 全扫约 6.5s，势必触发 5s 启动超时。
+            event_manager.log("info",
+                              "RTT: 先做低地址快速探测（每个 RAM region 前 64KB）...")
+            cb = _search_control_block(limit_bytes=0x10000)
 
-            # 第二轮：首次失败说明固件可能尚未初始化 RTT（常见于"下载程序后未复位运行"）。
-            # 此时单纯 resume（继续执行，不再从启动代码重跑）不会让固件重新初始化 RTT 控制块，
-            # 会导致反复扫描 RAM + sleep 累积、最终误触 5s 启动超时。
-            # 对标 J-Link RTT Viewer 的默认行为：复位并运行目标，让固件执行 RTT 初始化后再重试。
+            # 探测未命中且目标处于暂停态：主场景（如"下载程序后未复位运行"）固件
+            # 尚未初始化 RTT。单纯 resume 不会重跑启动代码，必须复位运行，让固件
+            # 初始化控制块后再搜索（对标 J-Link RTT Viewer 的默认行为）。
             target_halted = False
             try:
                 target_halted = (target.get_state() == Target.State.HALTED)
@@ -247,7 +253,6 @@ class RTTBackend:
                 # 无法读取目标状态时保守按暂停态处理，尝试复位运行
                 target_halted = True
             if cb is None and target_halted:
-                # 目标若处于暂停态：resume 无济于事，必须复位运行触发固件重新初始化。
                 event_manager.log("info",
                                   "RTT: 未找到控制块，执行【复位并运行】让固件初始化 RTT...")
                 reset_attempts = 0
@@ -281,6 +286,11 @@ class RTTBackend:
                     if reset_attempts < max_reset_attempts:
                         event_manager.log("info",
                                           "RTT: 仍未找到控制块，再次复位运行尝试初始化...")
+
+            # 目标正运行但低地址未命中：控制块可能位于 RAM 高地址，做一次完整扫描确认
+            if cb is None and not target_halted:
+                event_manager.log("info", "RTT: 低地址未命中，对全部 RAM 完整扫描...")
+                cb = _search_control_block()
 
             if cb is None or len(cb.up_channels) == 0:
                 reason = f"（{last_error}）" if last_error else ""
@@ -582,7 +592,7 @@ class RTTBackend:
         finally:
             lock.release()
 
-    def _fast_scan_region(self, target, region,
+    def _fast_scan_region(self, target, region, max_bytes: Optional[int] = None,
                           magic: bytes = b'SEGG',
                           control_block_id: bytes = b'SEGGER RTT') -> Optional[int]:
         """在单个 RAM region 中快速定位 4 字节对齐的 RTT 控制块签名。
@@ -591,10 +601,12 @@ class RTTBackend:
         （小端 word），命中后再逐字节确认完整 'SEGGER RTT' 签名，返回控制块
         地址或 None。相比 pyOCD 逐 1KB read_memory_block8 的 _find_control_block，
         大幅减少 SWD 事务次数，避免大 RAM region 全量扫描超出 5s 启动窗口。
+        max_bytes 非 None 时只扫描 region 起始 max_bytes（0 或 None 表示全扫）。
         """
         magic_int = int.from_bytes(magic, 'little')  # b'SEGG' -> 0x47474553
         start = region.start
-        region_end = start + region.length
+        span = region.length if (max_bytes is None or max_bytes <= 0) else min(max_bytes, region.length)
+        region_end = start + span
         words_per_read = 4096                        # 一次读 16KB
         cid_len = len(control_block_id)
         addr = start

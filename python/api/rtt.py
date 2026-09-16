@@ -18,7 +18,10 @@ router = APIRouter()
 # 外部工具（如 Keil MDK）下载固件后，pyOCD session 的底层 SWD 通信可能
 # 处于异常状态，target.halt() 或内存读取会永久挂起。设此超时保护，
 # 确保前端不会一直卡在"RTT会话启动中"。
-RTT_START_TIMEOUT = 5.0
+# 注意：启动含低地址探测 + 可能的复位运行 + 控制块重搜，且 SWD 下全 RAM
+# 扫描本身较慢，超时需留够余量（与 RTT deviceReset 请求的 15s 一致）；
+# 启动流程已在 rtt_backend 内部串行化并做了快速探测，正常路径秒级返回。
+RTT_START_TIMEOUT = 15.0
 
 
 class RttStartRequest(BaseModel):
