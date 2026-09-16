@@ -83,8 +83,10 @@ export default function RttPage() {
   }, [uid, coreState, pushNotification])
 
   // 目标设备控制：复位（后端会重新搜索 RTT 控制块）
+  const resetPendingRef = useRef(false)
   const handleReset = useCallback(async () => {
-    if (!uid) return
+    if (!uid || resetPendingRef.current) return // 防抖：避免连点并发多次复位
+    resetPendingRef.current = true
     const notifId = pushNotification({
       type: 'progress', title: '正在复位目标...',
       message: '复位并重新初始化 RTT 控制块',
@@ -103,6 +105,8 @@ export default function RttPage() {
         message: e instanceof Error ? e.message : String(e),
         autoClose: true, autoCloseDelay: 5000,
       })
+    } finally {
+      resetPendingRef.current = false
     }
   }, [uid, pushNotification])
 

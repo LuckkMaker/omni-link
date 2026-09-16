@@ -47,6 +47,10 @@ class RTTBackend:
         self._user_halted: dict[str, bool] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
+        # uid -> RTT 操作互斥锁（start/reset 共用，threading.Lock）。防止 asyncio.wait_for
+        # 超时后残留的 to_thread 僵尸线程与下一次启动/复位请求并发操作同一 target
+        # （重复复位/重复启轮询）。
+        self._ops_locks: dict[str, threading.Lock] = {}
 
     def start(
         self,
@@ -56,7 +60,33 @@ class RTTBackend:
         up_channel: int = 0,
         down_channel: int = 0,
     ) -> dict:
-        """启动 RTT
+        """启动 RTT（带每探针互斥，防止并发启动操作同一 target）
+
+        此方法经 asyncio.to_thread 调用，外层有 5s 超时兜底；但超时后线程
+        并不会真正终止（to_thread 无法取消）。用 per-uid 互斥锁保证同一探针
+        同时只有一个启动流程在跑，避免超时残留的僵尸线程与新请求重复复位、
+        重复启动轮询。
+        """
+        with self._global_lock:
+            lock = self._ops_locks.setdefault(uid, threading.Lock())
+        if not lock.acquire(timeout=6.0):
+            return {"success": False,
+                    "error": "已有另一个 RTT 启动仍在进行中，请稍后重试"}
+        try:
+            return self._start_inner(uid, address=address, size=size,
+                                     up_channel=up_channel, down_channel=down_channel)
+        finally:
+            lock.release()
+
+    def _start_inner(
+        self,
+        uid: str,
+        address: Optional[int] = None,
+        size: Optional[int] = None,
+        up_channel: int = 0,
+        down_channel: int = 0,
+    ) -> dict:
+        """启动 RTT 核心实现（启动流程已在 start() 中加互斥）
 
         在目标 RAM 中搜索 RTT 控制块（SEGGER RTT 标识），解析 up/down 通道。
         搜索完成后恢复目标运行，使固件可以写入 RTT 缓冲区。
@@ -94,6 +124,7 @@ class RTTBackend:
         try:
             from pyocd.debug.rtt import RTTControlBlock
             from pyocd.core.memory_map import MemoryType
+            from pyocd.core.target import Target
 
             # 对标 pyocd rtt CLI 的流程：
             # CLI 用 connect_mode='halt'（默认），连接时即 halt 目标，
@@ -176,19 +207,26 @@ class RTTBackend:
                         event_manager.log("warning", f"RTT: search at 0x{address:08X} failed: {e}")
                     return None
 
-                # 自动模式：遍历所有 RAM region
+                # 自动模式：遍历所有 RAM region，用大块 read32 粗扫定位控制块
                 for r in ram_regions:
-                    event_manager.log("info", f"RTT: searching in RAM region 0x{r.start:08X} "
+                    event_manager.log("info", f"RTT: scanning RAM region 0x{r.start:08X} "
                                       f"(size=0x{r.length:X})...")
+                    hit = self._fast_scan_region(target, r)
+                    if hit is None:
+                        event_manager.log("info", f"RTT: no control block in region 0x{r.start:08X}")
+                        continue
+                    event_manager.log("info",
+                                      f"RTT: signature found @0x{hit:08X}, parsing control block...")
                     try:
-                        cb_obj = RTTControlBlock.from_target(target, address=r.start, size=r.length)
+                        cb_obj = RTTControlBlock.from_target(target, address=hit, size=0)
                         cb_obj.start()
                         if len(cb_obj.up_channels) > 0:
-                            event_manager.log("info", f"RTT: control block found in region 0x{r.start:08X}")
+                            event_manager.log("info",
+                                              f"RTT: control block found in region 0x{r.start:08X}")
                             return cb_obj
-                        event_manager.log("info", f"RTT: no up channels in region 0x{r.start:08X}")
                     except Exception as e:
-                        event_manager.log("info", f"RTT: not found in region 0x{r.start:08X}: {e}")
+                        event_manager.log("info",
+                                          f"RTT: parse control block @0x{hit:08X} failed: {e}")
                 last_error = "Control block not found in any RAM region"
                 return None
 
@@ -198,41 +236,57 @@ class RTTBackend:
                               "...")
             cb = _search_control_block()
 
-            # 第二轮：如果首次失败，resume 目标让固件初始化 RTT，再重试
-            if cb is None:
-                event_manager.log("info", "RTT: resuming target to let firmware initialize RTT...")
-                try:
-                    target.resume()
-                except Exception:
-                    pass
-                time.sleep(1.0)
+            # 第二轮：首次失败说明固件可能尚未初始化 RTT（常见于"下载程序后未复位运行"）。
+            # 此时单纯 resume（继续执行，不再从启动代码重跑）不会让固件重新初始化 RTT 控制块，
+            # 会导致反复扫描 RAM + sleep 累积、最终误触 5s 启动超时。
+            # 对标 J-Link RTT Viewer 的默认行为：复位并运行目标，让固件执行 RTT 初始化后再重试。
+            target_halted = False
+            try:
+                target_halted = (target.get_state() == Target.State.HALTED)
+            except Exception:
+                # 无法读取目标状态时保守按暂停态处理，尝试复位运行
+                target_halted = True
+            if cb is None and target_halted:
+                # 目标若处于暂停态：resume 无济于事，必须复位运行触发固件重新初始化。
+                event_manager.log("info",
+                                  "RTT: 未找到控制块，执行【复位并运行】让固件初始化 RTT...")
+                reset_attempts = 0
+                max_reset_attempts = 2
+                reboot_sleep = 1.2  # 等待固件启动并完成 RTT 控制块初始化
+                while cb is None and reset_attempts < max_reset_attempts:
+                    reset_attempts += 1
+                    try:
+                        target.reset(reset_type=None)   # 复位使固件从启动代码重新执行
+                        target.resume()                 # 运行，让 RTT 初始化代码执行
+                    except Exception as e:
+                        event_manager.log("warning", f"RTT: 复位运行目标失败: {e}")
+                        break
 
-                max_retries = 2
-                for attempt in range(max_retries):
-                    # 搜索前重新 halt
+                    time.sleep(reboot_sleep)
+
+                    # 复位后目标可能停在 reset vector（reset catch），halt 确保内存读取可靠
                     try:
                         target.halt()
                     except Exception:
                         pass
 
-                    event_manager.log("info", f"RTT: retry search (attempt {attempt + 1}/{max_retries})...")
+                    event_manager.log("info",
+                                      f"RTT: 复位运行后重试搜索控制块 "
+                                      f"(attempt {reset_attempts}/{max_reset_attempts})...")
                     cb = _search_control_block()
                     if cb is not None:
                         last_error = None
                         break
 
-                    if attempt < max_retries - 1:
-                        try:
-                            target.resume()
-                        except Exception:
-                            pass
-                        time.sleep(1.5)
+                    if reset_attempts < max_reset_attempts:
+                        event_manager.log("info",
+                                          "RTT: 仍未找到控制块，再次复位运行尝试初始化...")
 
             if cb is None or len(cb.up_channels) == 0:
-                msg = "Control block not found"
-                if last_error:
-                    msg += f" ({last_error})"
-                msg += ". Ensure firmware has RTT initialized and is running."
+                reason = f"（{last_error}）" if last_error else ""
+                msg = ("未检测到 SEGGER RTT 控制块" + reason +
+                       "。已尝试复位并运行固件，但目标 RAM 中仍未找到 RTT 控制块，"
+                       "请确认固件已链接并初始化 SEGGER RTT 库（SEGGER_RTT_ConfigUpBuffer）。")
                 event_manager.log("error", f"RTT: {msg}")
                 return {"success": False, "error": msg}
 
@@ -474,6 +528,13 @@ class RTTBackend:
         if not session:
             return {"success": False, "error": "探针未连接"}
 
+        # 与 start() 共用同一把 per-uid 操作锁，串行化同一探针的复位/启动流程，
+        # 避免并发复位/启动重复复位目标、重复启轮询。
+        with self._global_lock:
+            lock = self._ops_locks.setdefault(uid, threading.Lock())
+        if not lock.acquire(timeout=6.0):
+            return {"success": False,
+                    "error": "已有另一个 RTT 复位/启动正在进行中，请稍后重试"}
         try:
             # 1) halt 目标（确保安全操作）
             try:
@@ -518,6 +579,44 @@ class RTTBackend:
         except Exception as e:
             event_manager.log("warning", f"RTT: reset 目标失败: {e}")
             return {"success": False, "error": str(e)}
+        finally:
+            lock.release()
+
+    def _fast_scan_region(self, target, region,
+                          magic: bytes = b'SEGG',
+                          control_block_id: bytes = b'SEGGER RTT') -> Optional[int]:
+        """在单个 RAM region 中快速定位 4 字节对齐的 RTT 控制块签名。
+
+        用大块 read_memory_block32 批量读取，在 host 侧匹配 'SEGG' 前缀
+        （小端 word），命中后再逐字节确认完整 'SEGGER RTT' 签名，返回控制块
+        地址或 None。相比 pyOCD 逐 1KB read_memory_block8 的 _find_control_block，
+        大幅减少 SWD 事务次数，避免大 RAM region 全量扫描超出 5s 启动窗口。
+        """
+        magic_int = int.from_bytes(magic, 'little')  # b'SEGG' -> 0x47474553
+        start = region.start
+        region_end = start + region.length
+        words_per_read = 4096                        # 一次读 16KB
+        cid_len = len(control_block_id)
+        addr = start
+        while addr < region_end:
+            n = min(words_per_read, (region_end - addr) // 4)
+            if n <= 0:
+                break
+            try:
+                words = target.read_memory_block32(addr, n)
+            except Exception:
+                return None
+            for i, w in enumerate(words):
+                if (w & 0xFFFFFFFF) == magic_int:
+                    hit = addr + i * 4
+                    try:
+                        raw = target.read_memory_block8(hit, cid_len)
+                        if bytes(raw) == control_block_id:
+                            return hit
+                    except Exception:
+                        continue
+            addr += n * 4
+        return None
 
     def _reinit_control_block(self, uid: str, target) -> Optional[object]:
         """重新搜索 RTT 控制块（复位后调用）
@@ -535,9 +634,11 @@ class RTTBackend:
                 return None
 
             for r in ram_regions:
+                hit = self._fast_scan_region(target, r)
+                if hit is None:
+                    continue
                 try:
-                    cb_obj = RTTControlBlock.from_target(
-                        target, address=r.start, size=r.length)
+                    cb_obj = RTTControlBlock.from_target(target, address=hit, size=0)
                     cb_obj.start()
                     if len(cb_obj.up_channels) > 0:
                         event_manager.log("info",
