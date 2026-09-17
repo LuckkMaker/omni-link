@@ -23,6 +23,11 @@ router = APIRouter()
 # 启动流程已在 rtt_backend 内部串行化并做了快速探测，正常路径秒级返回。
 RTT_START_TIMEOUT = 15.0
 
+# 设备复位超时（秒）。复位含 halt + reset + resume + 0.5s 等待 + 控制块重搜索，
+# 正常情况下 1~2s 完成；此处用于防止 J-Link 等探针 reset 期间 SWD 挂起。
+# 小于前端 rttService.deviceReset 的 axios timeout（20s），确保后端先返回明确的 408。
+RTT_DEVICE_RESET_TIMEOUT = 12.0
+
 
 class RttStartRequest(BaseModel):
     """RTT 启动请求"""
@@ -153,11 +158,27 @@ def rtt_device_halt(uid: str):
 
 
 @router.post("/probes/{uid}/rtt/device/reset")
-def rtt_device_reset(uid: str, req: RttDeviceResetRequest):
-    """复位目标芯片并重新初始化 RTT 控制块"""
-    result = rtt_backend.reset_target(uid, run=req.run)
+async def rtt_device_reset(uid: str, req: RttDeviceResetRequest):
+    """复位目标芯片并重新初始化 RTT 控制块
+
+    与 rtt_start 一致，用 async + asyncio.wait_for 保护，防止 J-Link 等探针在
+    reset 期间 SWD 偶发挂起导致 endpoint 永不返回、前端收到无响应的
+    "Network Error"。超时转为明确的 408 提示。
+    """
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(rtt_backend.reset_target, uid, run=req.run),
+            timeout=RTT_DEVICE_RESET_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        msg = (f"RTT 复位超时（{int(RTT_DEVICE_RESET_TIMEOUT)}秒）。"
+               "可能是外部工具占用调试接口或 session 状态异常，"
+               "请断开并重新连接仿真器后重试")
+        event_manager.log("error", f"RTT: {msg}")
+        raise HTTPException(status_code=408, detail=msg)
+
     if not result["success"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Reset failed"))
+        raise HTTPException(status_code=400, detail=result.get("error") or "Reset failed")
     return result
 
 

@@ -46,9 +46,12 @@ export const rttService = {
   async start(uid: string, opts: RttStartOptions): Promise<RttStartResult> {
     const client = await api()
     const { data } = await client.post(`/api/probes/${uid}/rtt/start`, opts, {
-      // 10 秒超时（后端 5 秒超时 + 5 秒余量），防止 SWD 通信挂起时
-      // 前端通知永久卡在"RTT会话启动中"
-      timeout: 10000,
+      // 20 秒超时（后端 RTT_START_TIMEOUT=15s + 5s 余量）：
+      // 后端启动流程含低地址探测 + 复位运行 + 控制块重搜，主场景耗时可到 10s+，
+      // 且后端只有真挂起时才会在 15s 返回 408。前端超时必须大于后端，
+      // 否则会把后端仍在正常进行的启动误判为失败（日志显示已找到/已启动，
+      // 前端却弹"启动失败"）。
+      timeout: 20000,
     })
     return data
   },
@@ -117,8 +120,10 @@ export const rttService = {
   async deviceReset(uid: string, run: boolean = true): Promise<{ success: boolean; state: string }> {
     const client = await api()
     const { data } = await client.post(`/api/probes/${uid}/rtt/device/reset`, { run }, {
-      // 复位含 0.5s 等待 + 控制块重搜索，需较长超时
-      timeout: 15000,
+      // 20 秒超时：后端 rtt_device_reset 已有 RTT_DEVICE_RESET_TIMEOUT=12s 的
+      // wait_for 保护，前端超时须大于后端，否则会先于后端拿到无响应的
+      // "Network Error" 而非收到明确错误。
+      timeout: 20000,
     })
     return data
   },

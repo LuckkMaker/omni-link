@@ -23,6 +23,14 @@ logger = logging.getLogger(__name__)
 # 我们通过 WebSocket 推送，10ms 足够流畅且降低 CPU/USB 压力。
 POLL_INTERVAL = 0.01
 
+# RTT 操作锁（reset/start 共用）的等待与僵死判定参数。
+# RTT_OP_LOCK_WAIT: 单次等待 per-uid 操作锁的秒数（不可太小，否则会过早报"上一个未完成"）。
+# RTT_OP_LOCK_STALE_S: 上一操作持锁超过此时长，视为 to_thread 僵尸线程遗留
+# （asyncio.wait_for 超时后线程无法取消、仍持锁），允许新请求强制重建锁并接管，
+# 避免用户被永久卡在"已有另一个复位/启动正在进行中"。
+RTT_OP_LOCK_WAIT = 6.0
+RTT_OP_LOCK_STALE_S = 15.0
+
 
 class RTTBackend:
     """RTT 后端
@@ -51,6 +59,9 @@ class RTTBackend:
         # 超时后残留的 to_thread 僵尸线程与下一次启动/复位请求并发操作同一 target
         # （重复复位/重复启轮询）。
         self._ops_locks: dict[str, threading.Lock] = {}
+        # uid -> 最近一次成功获取操作锁的时间戳（monotonic），用于识别僵尸线程遗留
+        # 长期持有操作锁的场景，从而允许 reset_target 强制接管。
+        self._ops_lock_stamp: dict[str, float] = {}
 
     def start(
         self,
@@ -540,22 +551,54 @@ class RTTBackend:
 
         # 与 start() 共用同一把 per-uid 操作锁，串行化同一探针的复位/启动流程，
         # 避免并发复位/启动重复复位目标、重复启轮询。
+        # 注意：操作锁必须用独立变量 op_lock 保存，绝不能在 try 块内被其他用途
+        # 的同名局部变量覆盖，否则 finally 里的 op_lock.release() 会释放一把
+        # 本线程从未获取的锁，抛 RuntimeError: release unlocked lock。
+        acquired = False
         with self._global_lock:
-            lock = self._ops_locks.setdefault(uid, threading.Lock())
-        if not lock.acquire(timeout=6.0):
-            return {"success": False,
-                    "error": "已有另一个 RTT 复位/启动正在进行中，请稍后重试"}
+            op_lock = self._ops_locks.setdefault(uid, threading.Lock())
+        if op_lock.acquire(timeout=RTT_OP_LOCK_WAIT):
+            acquired = True
+        else:
+            # 拿不到锁：可能是上一复位/启动仍在进行，也可能是 wait_for 超时后遗留的
+            # to_thread 僵尸线程仍长期持锁（J-Link 下 SWD 偶发挂起常见）。
+            with self._global_lock:
+                held_for = time.monotonic() - self._ops_lock_stamp.get(uid, 0.0)
+                is_stale = held_for > RTT_OP_LOCK_STALE_S
+            if not is_stale:
+                # 上一个操作仍在正常进行（持锁未超时），让其自然完成，不强行干预
+                return {"success": False,
+                        "error": "上一次复位/启动尚未完成，请稍后再试"}
+            # 僵尸线程遗留的僵死锁：强制重建锁并接管，避免用户被永久卡住
+            event_manager.log("warning",
+                              f"RTT: 检测到僵尸操作锁（已持 {held_for:.1f}s），强制接管重试复位")
+            with self._global_lock:
+                self._ops_locks.pop(uid, None)
+                op_lock = threading.Lock()
+                self._ops_locks[uid] = op_lock
+            if not op_lock.acquire(timeout=RTT_OP_LOCK_WAIT):
+                return {"success": False,
+                        "error": "上一次复位/启动尚未完成，请稍后再试"}
+            acquired = True
+        # 记录本次获取锁的时间戳，供后续请求判断是否僵死
+        with self._global_lock:
+            self._ops_lock_stamp[uid] = time.monotonic()
         try:
+            # 复位分步日志：J-Link 下复位可能在某一步永久挂起（疑似 SWD 或 J-Link 驱动阻塞），
+            # 卡住时日志会停在对应 [n/5] 以定位挂起点。
+            event_manager.log("info", "RTT: reset[1/5] halt...")
             # 1) halt 目标（确保安全操作）
             try:
                 session.target.halt()
             except Exception:
                 pass
 
+            event_manager.log("info", "RTT: reset[2/5] core reset...")
             # 2) 复位目标芯片
             session.target.reset(reset_type=None)
             event_manager.log("info", f"RTT: 目标已复位 (run={run})")
 
+            event_manager.log("info", "RTT: reset[3/5] resume...")
             if run:
                 # 3a) resume 目标，让固件重新初始化 RTT
                 try:
@@ -565,8 +608,10 @@ class RTTBackend:
                 # 等待固件启动并初始化 RTT 控制块
                 time.sleep(0.5)
 
+                event_manager.log("info", "RTT: reset[4/5] search control block...")
                 # 4) 重新搜索 RTT 控制块
                 new_cb = self._reinit_control_block(uid, session.target)
+                event_manager.log("info", "RTT: reset[5/5] done")
                 if new_cb is not None:
                     with self._global_lock:
                         lock = self._locks.get(uid)
@@ -590,7 +635,9 @@ class RTTBackend:
             event_manager.log("warning", f"RTT: reset 目标失败: {e}")
             return {"success": False, "error": str(e)}
         finally:
-            lock.release()
+            # 只释放本线程实际获取到的操作锁；绝不释放被内层逻辑覆盖/从未持有的锁
+            if acquired:
+                op_lock.release()
 
     def _fast_scan_region(self, target, region, max_bytes: Optional[int] = None,
                           magic: bytes = b'SEGG',

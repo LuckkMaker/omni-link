@@ -100,10 +100,17 @@ export default function RttPage() {
         autoClose: true, autoCloseDelay: 3000,
       })
     } catch (e) {
+      // 从 axios 错误响应中提取后端 HTTPException 的 detail 字段（后端 reset_target
+      // 会返回具体失败原因，如 J-Link 下 reset 抛的异常），否则只会看到通用的
+      // "Request failed with status code 400" 而无法定位根因。
+      const axiosErr = e as { response?: { data?: { detail?: string } }; message?: string }
+      const msg = axiosErr.response?.data?.detail ?? (e instanceof Error ? e.message : String(e))
       useNotificationStore.getState().update(notifId, {
-        type: 'error', title: '复位失败',
-        message: e instanceof Error ? e.message : String(e),
-        autoClose: true, autoCloseDelay: 5000,
+        type: 'error',
+        title: '复位失败',
+        message: msg,
+        autoClose: true,
+        autoCloseDelay: 8000,
       })
     } finally {
       resetPendingRef.current = false
