@@ -156,6 +156,9 @@ from .st import target_STM32L475xx
 # from . import target_AMA3B1KK
 
 from .geehy import target_G32F401x8
+from .geehy import target_G32F002x5
+from .geehy import target_G32F031x8
+from .geehy import target_G32M3101x8
 from .geehy import target_G32F463xC
 from .geehy import target_APM32F402xx
 from .geehy import target_APM32F403xx
@@ -209,6 +212,9 @@ BUILTIN_TARGETS = {
           'stm32l475xg' : target_STM32L475xx.STM32L475xG,
           'g32f463xc' : target_G32F463xC.G32F463xC,
           'g32f401x8' : target_G32F401x8.G32F401x8,
+          'g32f002x5' : target_G32F002x5.G32F002x5,
+          'g32f031x8' : target_G32F031x8.G32F031x8,
+          'g32m3101x8' : target_G32M3101x8.G32M3101x8,
           'apm32f402xb' : target_APM32F402xx.APM32F402xB,
           'apm32f403xb' : target_APM32F403xx.APM32F403xB,
           'apm32f405xg' : target_APM32F405xx.APM32F405xG,
