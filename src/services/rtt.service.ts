@@ -116,7 +116,7 @@ export const rttService = {
     return data
   },
 
-  /** 复位目标芯片并重新初始化 RTT 控制块 */
+  /** 复位目标芯片（仅芯片复位，可指定复位后运行） */
   async deviceReset(uid: string, run: boolean = true): Promise<{ success: boolean; state: string }> {
     const client = await api()
     const { data } = await client.post(`/api/probes/${uid}/rtt/device/reset`, { run }, {

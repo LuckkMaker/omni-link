@@ -82,21 +82,21 @@ export default function RttPage() {
     }
   }, [uid, coreState, pushNotification])
 
-  // 目标设备控制：复位（后端会重新搜索 RTT 控制块）
+  // 目标设备控制：复位（仅复位芯片并运行固件）
   const resetPendingRef = useRef(false)
   const handleReset = useCallback(async () => {
     if (!uid || resetPendingRef.current) return // 防抖：避免连点并发多次复位
     resetPendingRef.current = true
     const notifId = pushNotification({
       type: 'progress', title: '正在复位目标...',
-      message: '复位并重新初始化 RTT 控制块',
+      message: '复位芯片并运行固件',
     })
     try {
       const result = await rttService.deviceReset(uid, true)
       setCoreState(result.state === 'halted' ? 'halted' : 'running')
       useNotificationStore.getState().update(notifId, {
         type: 'success', title: '目标已复位',
-        message: 'RTT 控制块已重新初始化',
+        message: '目标芯片已复位并运行固件',
         autoClose: true, autoCloseDelay: 3000,
       })
     } catch (e) {
