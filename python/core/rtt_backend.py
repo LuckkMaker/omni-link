@@ -536,14 +536,14 @@ class RTTBackend:
             return {"success": False, "error": str(e)}
 
     def reset_target(self, uid: str, run: bool = True) -> dict:
-        """复位目标芯片并重新初始化 RTT 控制块
+        """仅复位目标芯片
 
-        硬件复位后固件会重新初始化 RTT 控制块（重写 "SEGGER RTT" 签名、
-        重置通道读写指针），因此必须重新搜索控制块以获取新的引用，
-        否则旧的 RTTControlBlock 对象的缓存状态（buffer 地址等）可能失效。
+        只执行芯片硬件复位；run=True 时复位后顺带 resume 让固件继续运行，
+        不做 RTT 控制块重搜/重初始化（固件重跑的 RTT 控制块通常在同一地址，
+        签名与指针会在下次读取时由固件重新写入）。
 
         Args:
-            run: True=复位后运行，False=复位后保持 halt
+            run: True=复位后运行（重启固件），False=复位后保持 halt
         """
         session = backend._get_session(uid)
         if not session:
@@ -585,51 +585,34 @@ class RTTBackend:
             self._ops_lock_stamp[uid] = time.monotonic()
         try:
             # 复位分步日志：J-Link 下复位可能在某一步永久挂起（疑似 SWD 或 J-Link 驱动阻塞），
-            # 卡住时日志会停在对应 [n/5] 以定位挂起点。
-            event_manager.log("info", "RTT: reset[1/5] halt...")
+            # 卡住时日志会停在对应 [n/3] 以定位挂起点。
+            event_manager.log("info", "RTT: reset[1/3] halt...")
             # 1) halt 目标（确保安全操作）
             try:
                 session.target.halt()
             except Exception:
                 pass
 
-            event_manager.log("info", "RTT: reset[2/5] core reset...")
+            event_manager.log("info", "RTT: reset[2/3] core reset...")
             # 2) 复位目标芯片
             session.target.reset(reset_type=None)
             event_manager.log("info", f"RTT: 目标已复位 (run={run})")
 
-            event_manager.log("info", "RTT: reset[3/5] resume...")
+            event_manager.log("info", "RTT: reset[3/3] resume...")
             if run:
-                # 3a) resume 目标，让固件重新初始化 RTT
+                # 3) resume 目标，让固件继续运行（重启固件），不重搜/重初始化 RTT 控制块
                 try:
                     session.target.resume()
                 except Exception:
                     pass
-                # 等待固件启动并初始化 RTT 控制块
-                time.sleep(0.5)
-
-                event_manager.log("info", "RTT: reset[4/5] search control block...")
-                # 4) 重新搜索 RTT 控制块
-                new_cb = self._reinit_control_block(uid, session.target)
-                event_manager.log("info", "RTT: reset[5/5] done")
-                if new_cb is not None:
-                    with self._global_lock:
-                        lock = self._locks.get(uid)
-                        if lock:
-                            with lock:
-                                self._control_blocks[uid] = new_cb
-                        self._user_halted[uid] = False
-                    event_manager.log("info",
-                                      "RTT: 控制块已重新初始化")
-                else:
-                    event_manager.log("warning",
-                                      "RTT: 复位后未找到控制块，"
-                                      "RTT 数据可能无法恢复（固件可能尚未初始化 RTT）")
+                with self._global_lock:
+                    self._user_halted[uid] = False
             else:
                 with self._global_lock:
                     self._user_halted[uid] = True
 
             state = "running" if run else "halted"
+            event_manager.log("info", "RTT: reset 完成，仅芯片复位")
             return {"success": True, "state": state}
         except Exception as e:
             event_manager.log("warning", f"RTT: reset 目标失败: {e}")
@@ -675,39 +658,6 @@ class RTTBackend:
                     except Exception:
                         continue
             addr += n * 4
-        return None
-
-    def _reinit_control_block(self, uid: str, target) -> Optional[object]:
-        """重新搜索 RTT 控制块（复位后调用）
-
-        遍历所有 RAM region 搜索 "SEGGER RTT" 控制块，
-        找到后创建新的 RTTControlBlock 对象并返回。
-        """
-        try:
-            from pyocd.debug.rtt import RTTControlBlock
-            from pyocd.core.memory_map import MemoryType
-
-            mem_map = target.get_memory_map()
-            ram_regions = list(mem_map.iter_matching_regions(type=MemoryType.RAM))
-            if not ram_regions:
-                return None
-
-            for r in ram_regions:
-                hit = self._fast_scan_region(target, r)
-                if hit is None:
-                    continue
-                try:
-                    cb_obj = RTTControlBlock.from_target(target, address=hit, size=0)
-                    cb_obj.start()
-                    if len(cb_obj.up_channels) > 0:
-                        event_manager.log("info",
-                                          f"RTT: 控制块重新找到 @0x{r.start:08X}, "
-                                          f"{len(cb_obj.up_channels)} up channels")
-                        return cb_obj
-                except Exception:
-                    continue
-        except Exception as e:
-            event_manager.log("warning", f"RTT: 重新搜索控制块失败: {e}")
         return None
 
     def get_core_state(self, uid: str) -> dict:

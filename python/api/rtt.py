@@ -23,7 +23,7 @@ router = APIRouter()
 # 启动流程已在 rtt_backend 内部串行化并做了快速探测，正常路径秒级返回。
 RTT_START_TIMEOUT = 15.0
 
-# 设备复位超时（秒）。复位含 halt + reset + resume + 0.5s 等待 + 控制块重搜索，
+# 设备复位超时（秒）。复位仅 halt + reset +（可选）resume，
 # 正常情况下 1~2s 完成；此处用于防止 J-Link 等探针 reset 期间 SWD 挂起。
 # 小于前端 rttService.deviceReset 的 axios timeout（20s），确保后端先返回明确的 408。
 RTT_DEVICE_RESET_TIMEOUT = 12.0
@@ -136,8 +136,7 @@ def rtt_send_text(uid: str, req: RttSendTextRequest):
 
 
 # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
-# 直接操作 CPU 内核状态，不影响 RTT 轮询线程。
-# 复位时会重新搜索 RTT 控制块，确保复位后数据流恢复正常。
+# 直接操作 CPU 内核状态（仅芯片复位），不影响 RTT 轮询线程，不做 RTT 控制块重搜。
 
 @router.post("/probes/{uid}/rtt/device/run")
 def rtt_device_run(uid: str):
@@ -159,7 +158,7 @@ def rtt_device_halt(uid: str):
 
 @router.post("/probes/{uid}/rtt/device/reset")
 async def rtt_device_reset(uid: str, req: RttDeviceResetRequest):
-    """复位目标芯片并重新初始化 RTT 控制块
+    """仅复位目标芯片（run=True 时复位后运行固件）
 
     与 rtt_start 一致，用 async + asyncio.wait_for 保护，防止 J-Link 等探针在
     reset 期间 SWD 偶发挂起导致 endpoint 永不返回、前端收到无响应的
