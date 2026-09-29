@@ -1,5 +1,6 @@
 """探针管理 API 路由"""
 
+import asyncio
 import threading
 
 from fastapi import APIRouter, HTTPException
@@ -64,8 +65,13 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
                 jlink_device = dev["jlink_device"]
         except Exception:
             pass
-    success = backend.connect(uid, target=target, interface=interface, speed=speed,
-                              connect_mode=connect_mode, force=force, device=jlink_device)
+    # 连接涉及 J-Link open / 目标复位等同步阻塞调用（可耗时数秒甚至卡死），
+    # 放线程池执行，避免堵死事件循环导致 /api/system/shutdown 等端点无响应。
+    success = await asyncio.to_thread(
+        backend.connect, uid,
+        target=target, interface=interface, speed=speed,
+        connect_mode=connect_mode, force=force, device=jlink_device,
+    )
     if not success:
         # 获取后端存储的具体错误信息，避免丢失诊断细节
         error_detail = "Connection failed"
@@ -84,9 +90,13 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
 
 
 @router.post("/{uid}/disconnect")
-async def disconnect_probe(uid: str):
-    """断开探针"""
-    backend.disconnect(uid)
+async def disconnect_probe(uid: str, wait: bool = False):
+    """断开探针
+
+    wait=true 时等待底层关闭完成再返回，确保探针（J-Link 等）句柄真正释放、
+    立即对其他调试工具可用；前端保持默认 false（不阻塞 UI）。
+    """
+    await asyncio.to_thread(backend.disconnect, uid, wait)
     # 清理 Commander 命令上下文
     from core.commander_backend import commander_backend
     commander_backend.reset_context(uid)

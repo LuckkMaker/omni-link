@@ -101,8 +101,8 @@ omni backend stop
 | 子命令 | 说明 |
 | --- | --- |
 | `start` | 启动常驻后端 daemon（自动分配端口，pid/port 记入运行时文件） |
-| `stop` | 停止常驻后端 |
-| `status` | 查询运行状态（退出码 0=运行中，1=未运行） |
+| `stop` | 停止后端：先走 HTTP 优雅关停；若后端僵死（事件循环被探针操作阻塞）则按端口定位进程树强杀，并等进程真正退出 |
+| `status` | 查询运行状态（退出码 0=运行中，1=未运行；端口在监听但 HTTP 无响应会标为「僵死」） |
 
 ```powershell
 omni backend start
@@ -111,13 +111,17 @@ omni backend status --quiet; echo $LASTEXITCODE   # 仅看退出码，适合脚�
 omni backend stop
 ```
 
+`stop` 不依赖运行时记录：即使后端由手动 `python server.py` 或 Electron 主进程拉起，
+也能按端口找到并停止，确保 J-Link 等探针句柄被释放。若优雅关停的清理被探针操作卡住，
+后端自身的关停看门狗（`api/system.py` `SHUTDOWN_GRACE_S=10s`）会兜底强制退出。
+
 ### `probe` — 探针管理
 
 | 子命令 | 说明 |
 | --- | --- |
 | `list` | 枚举探针（UID / 厂商 / 产品 / 串号 / 连接状态） |
 | `connect <uid>` | 连接探针并指定目标芯片 |
-| `disconnect <uid>` | 断开探针 |
+| `disconnect <uid>` | 断开探针（等待底层关闭，释放 J-Link 等探针句柄） |
 | `status <uid>` | 查询连接状态与目标信息 |
 | `target <uid> [--part PART]` | 查询或设置目标型号 |
 
@@ -197,6 +201,56 @@ omni commander exec reg
 omni commander shell                         # 进 REPL，连续调试最省事
 omni commander shell --command "status; reg"
 ```
+
+### `debug` — 调试控制（Phase 4）
+
+源码级调试工作台，复用后端 `/api/probes/{uid}/zone/*` 接口。**会话状态（是否已加载 ELF、
+断点表、目标是否暂停）保存在后端**，因此每条 `omni` 命令都是独立进程：`elf load` 之后
+可直接在下一条命令里下断点、读寄存器，无需在同一进程内维持会话。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `status` | 查询目标状态（halted/running + PC） |
+| `halt` | 暂停目标 |
+| `run` | 继续运行（continue） |
+| `step` | 单步，`--mode into`（默认）/ `over` / `out` |
+| `reset` | 复位，`--mode halt`（默认）/ `run` / `break-symbol`（复位运行并停在入口符号） |
+| `run-to-cursor` | 运行到 `--file` + `--line` 后暂停 |
+| `elf load <path>` | 加载 ELF/AXF（后端按 uid 保存；下断点与源码查询的前提） |
+| `elf info` | 查询已加载的 ELF |
+| `src files` | 列出 ELF 中的源文件（`--filter` 过滤） |
+| `src line --addr A` | 地址反查源码位置（文件 / 行 / 函数） |
+| `bp add --file F --line L` | 按源码行设置断点（`--mode break/log/execute`，`--condition` 条件） |
+| `bp list` | 列出全部断点 |
+| `bp del` / `bp enable` / `bp disable` | 删除 / 启用 / 停用断点 |
+| `bp clear` | 清除全部断点 |
+| `regs` | 读取 CPU 核心寄存器（`--filter` 过滤，如 `pc` / `r1`） |
+| `mem read --addr A` | 读取内存并 hex dump（`--size` 字节数） |
+| `mem resolve <expr>` | 解析地址表达式（hex / `&符号` / `name[下标]`） |
+
+`bp del` / `bp enable` / `bp disable` 支持两种定位方式（二选一）：`--address`（hex 或符号）
+或 `--file` + `--line`。符号地址与源码行断点地址常落在**同一函数的不同位置**，命令内部按
+「精确 → Thumb 位归一 → 同函数」三级匹配对齐，因此 `--address main` 也能命中按行设置的断点。
+
+```powershell
+omni debug elf load .\app.axf                       # 1) 加载 ELF（后端按 uid 保存）
+omni debug src files --filter main                  # 2) 找源文件
+omni debug bp add --file main.c --line 93           # 3) 下断点（回显落点地址）
+omni debug reset --mode halt                        # 4) 复位并暂停
+omni debug run                                      # 5) 继续运行，命中后自动暂停
+omni debug status                                   # 6) 查看状态与 PC
+omni debug regs --filter pc                         # 7) 读寄存器
+omni debug mem read --addr 0x20000000 --size 64     # 8) 看内存
+omni debug bp list                                  # 9) 查看断点
+omni debug bp clear                                 # 10) 清除全部断点
+```
+
+> ⚠️ `reset --mode break-symbol` 依赖**板载固件与 ELF 一致**：后端复位后运行，并在入口符号
+> （如 `main`）处下临时断点；若 8s 内未命中会提示确认固件与 ELF 是否匹配。断点若落在实际
+> 不执行的地址上，命令不报错但也不会命中——可先用 `src line` 确认目标地址确有所属源码行。
+>
+> ℹ️ `bp clear` 会清空目标上**全部**硬件断点，包括通过 `commander exec break` 直接设置的
+> 断点（二者共用 pyOCD 的断点管理器）。
 
 ### `device` — 设备应用库
 
@@ -290,6 +344,9 @@ powershell -File scripts\cli-smoke.ps1 -UseInstalled
 
 # 追加破坏性回环：program → verify → blank-check → erase → blank-check
 powershell -File scripts\cli-smoke.ps1 -UseInstalled -Firmware .\app.hex
+
+# 追加 Phase 4 调试控制段：elf load → src files → bp add/list/del → regs → mem
+powershell -File scripts\cli-smoke.ps1 -UseInstalled -Elf .\app.axf
 ```
 
 `-UseInstalled` 表示使用 venv 中已安装的 `omni.exe`；省略则用源码 `python -m omnilink_cli`。脚本会自行拉起后端、自动取第一个探针，结束时清理进程，每条命令后打印 `exit=`。

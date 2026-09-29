@@ -67,6 +67,9 @@ class ApiClient:
     def put(self, path: str, payload=None) -> dict:
         return self.request("PUT", path, payload)
 
+    def patch(self, path: str, payload=None) -> dict:
+        return self.request("PATCH", path, payload)
+
     def delete(self, path: str) -> dict:
         return self.request("DELETE", path)
 
@@ -85,6 +88,75 @@ class ApiClient:
 
 def reachable(port: int, timeout: float = 1.5) -> bool:
     return ApiClient(int(port), timeout).health(timeout)
+
+
+def port_open(port: int, timeout: float = 0.5) -> bool:
+    """TCP 层探测端口是否有进程监听（不依赖后端 HTTP 响应）。
+
+    后端事件循环被 J-Link 等同步调用阻塞时 /api/health 恒超时，但监听套接字
+    仍在内核 accept 队列里，TCP 连接照样成功——据此区分「进程已退出」与
+    「进程僵死仍占着端口/J-Link」。
+    """
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def find_pids_by_port(port: int) -> list[int]:
+    """返回本机监听指定端口的进程 PID（仅标准库，跨平台）。
+
+    用于定位「手动 server.py / Electron 托管」这类没有运行时 pid 记录的后端。
+    """
+    pids: list[int] = []
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                # 形如：TCP  127.0.0.1:57123  0.0.0.0:0  LISTENING  17904
+                if len(parts) >= 5 and parts[0].upper() == "TCP" \
+                        and parts[3].upper() == "LISTENING" \
+                        and parts[1].rsplit(":", 1)[-1] == str(port):
+                    try:
+                        pids.append(int(parts[4]))
+                    except ValueError:
+                        pass
+        else:
+            out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            pids = [int(x) for x in out.split() if x.strip().isdigit()]
+    except Exception:
+        pass
+    return sorted(set(pids))
+
+
+def pid_alive(pid: int) -> bool:
+    """进程是否仍存活。
+
+    不能用 os.kill(pid, 0) 判活：Windows 上 os.kill 只支持发送终止信号，
+    传 0 会直接把进程 TerminateProcess 掉。故 Windows 走 tasklist。
+    """
+    if not pid:
+        return False
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            # 输出每行形如：python.exe  17904  Console  1  115,932 K
+            for line in out.splitlines():
+                cols = line.split()
+                if len(cols) >= 2 and cols[1] == str(int(pid)):
+                    return True
+            return False
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
 
 
 # ── 后端进程管理 ────────────────────────────────────────────
@@ -233,12 +305,16 @@ def start_persistent(timeout: int = 30) -> dict:
 
 
 def stop(pid: int) -> None:
-    """终止后端进程（兼容 Windows/Unix）。"""
+    """终止后端进程及其子进程（兼容 Windows/Unix）。
+
+    Windows 下 venv 启动器会再派生一个真实解释器子进程，只杀父进程会留下
+    仍持有 J-Link 句柄的子进程，故用 /T 连整棵进程树一起终止。
+    """
     if not pid:
         return
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                            capture_output=True, timeout=10)
         else:
             os.kill(pid, signal.SIGTERM)

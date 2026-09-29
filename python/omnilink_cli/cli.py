@@ -8,12 +8,12 @@
 import argparse
 
 from . import __version__, client
-from .commands import backend, commander, device, flash, probe, rtt, target
+from .commands import backend, commander, debug, device, flash, probe, rtt, target
 from .formatting import ctx_error
 
 PROG = "omni"
 
-_COMMAND_MODULES = (backend, commander, device, flash, probe, rtt, target)
+_COMMAND_MODULES = (backend, commander, debug, device, flash, probe, rtt, target)
 
 
 def build_parser() -> argparse.ArgumentParser:

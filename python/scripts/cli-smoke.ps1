@@ -1,11 +1,12 @@
-﻿# OMNI Link CLI 冒烟 / 集成测试（Phase 1 + 2 + 3）
+﻿# OMNI Link CLI 冒烟 / 集成测试（Phase 1 + 2 + 3 + 4）
 # 用法：
 #   .\cli-smoke.ps1                      # 只测只读/离线子集（安全）
 #   .\cli-smoke.ps1 -Firmware .\app.hex  # 追加破坏性 program/erase 回环（需确认板子可擦除）
-#   .\cli-smoke.ps1 -IncludeDestructive   # 不带固件也执行 fill RAM 等非 Flash 破坏操作
+#   .\cli-smoke.ps1 -Elf .\app.axf       # 追加 Phase 4 调试控制段（需已连接探针）
 #   .\cli-smoke.ps1 -UseInstalled         # 改用 venv 里已安装的 omni.exe（wheel 安装后）
 param(
     [string]$Firmware = "",          # 固件路径；提供后执行 flash program/erase 回环
+    [string]$Elf      = "",          # ELF/AXF 路径；提供后执行 debug 命令组（ELF/断点/寄存器/内存）
     [string]$Target   = "stm32f407xg",
     [string]$Uid      = "",
     [int]$Port        = 57123,
@@ -105,6 +106,39 @@ if ($Firmware) {
         Run "flash program (restore)" @("flash","program",$abs,"--uid",$Uid,"--backend-port",$Port)
         Run "flash reset" @("flash","reset","--uid",$Uid,"--backend-port",$Port)
         Write-Host "`n已恢复固件。破坏性回环完成。" -ForegroundColor Green
+    }
+}
+
+# ── I. Phase 4 调试控制（需已连接探针 + 提供 -Elf）────────────
+if ($Elf) {
+    if (-not (Test-Path $Elf)) { Write-Host "ELF 不存在: $Elf" -ForegroundColor Red }
+    elseif ($Uid) {
+        $abs = (Resolve-Path $Elf).Path
+        Write-Host "`n## I. Phase 4 调试控制（ELF=$abs）" -ForegroundColor Green
+        Run "debug status" @("debug","status","--uid",$Uid,"--backend-port",$Port)
+        Run "debug halt" @("debug","halt","--uid",$Uid,"--backend-port",$Port)
+        Run "debug elf load" @("debug","elf","load",$abs,"--uid",$Uid,"--backend-port",$Port)
+        Run "debug elf info" @("debug","elf","info","--uid",$Uid,"--backend-port",$Port)
+        Run "debug src files" @("debug","src","files","--uid",$Uid,"--backend-port",$Port)
+        Run "debug regs" @("debug","regs","--uid",$Uid,"--backend-port",$Port,"--filter","pc")
+        Run "debug mem resolve" @("debug","mem","resolve","0x20000000","--uid",$Uid,"--backend-port",$Port)
+        Run "debug mem read" @("debug","mem","read","--addr","0x20000000","--size","64","--uid",$Uid,"--backend-port",$Port)
+        # 断点段：用 src line --addr main 反查出真实 file:line（--line 1 多为注释行，无地址）
+        $lineOut = & $cliExe @cliPrefix debug src line --addr main --uid $Uid --backend-port $Port --json 2>$null | Out-String
+        $loc = $null
+        try { $loc = ($lineOut | ConvertFrom-Json).line } catch { $loc = $null }
+        if ($loc -and $loc.file -and $loc.line) {
+            $bpLine = "$($loc.line)"
+            Run "debug bp add (main:$bpLine)" @("debug","bp","add","--file",$loc.file,"--line",$bpLine,"--uid",$Uid,"--backend-port",$Port)
+            Run "debug bp list" @("debug","bp","list","--uid",$Uid,"--backend-port",$Port)
+            Run "debug bp del --file+line" @("debug","bp","del","--file",$loc.file,"--line",$bpLine,"--uid",$Uid,"--backend-port",$Port)
+            Run "debug bp clear" @("debug","bp","clear","--uid",$Uid,"--backend-port",$Port)
+        } else {
+            Write-Host "ELF 中未解析到 main 的源码行，跳过断点段" -ForegroundColor DarkGray
+        }
+        Run "debug run" @("debug","run","--uid",$Uid,"--backend-port",$Port)
+    } else {
+        Write-Host "无探针，跳过 Phase 4 调试段" -ForegroundColor DarkGray
     }
 }
 

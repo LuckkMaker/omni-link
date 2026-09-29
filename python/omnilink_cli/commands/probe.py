@@ -24,7 +24,8 @@ def add_parser(sub):
     s.add_argument("--force", action="store_true", help="强制按新参数重连（即使已连接）")
     s.set_defaults(func=run_command(_connect))
 
-    s = ps.add_parser("disconnect", parents=[common_parser()], help="断开指定探针")
+    s = ps.add_parser("disconnect", parents=[common_parser()],
+                      help="断开指定探针（等待底层关闭，释放 J-Link 等探针句柄）")
     s.add_argument("uid")
     s.set_defaults(func=run_command(_disconnect))
 
@@ -70,7 +71,8 @@ def _connect(c: ApiClient, args):
 
 
 def _disconnect(c: ApiClient, args):
-    data = c.post(f"/api/probes/{args.uid}/disconnect")
+    # wait=true：等后端真正关闭底层句柄再返回，避免 J-Link 等探针残留在后台
+    data = c.post(f"/api/probes/{args.uid}/disconnect?wait=true")
     finish(args, data, f"已断开 uid={args.uid}")
     return 0
 

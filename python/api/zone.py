@@ -323,10 +323,11 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
                 raise HTTPException(status_code=400, detail=result["error"])
 
             # 复位会经 reset-catch（VECTOR_CATCH）清除目标上已武装的全部断点并禁用 FPB
-            # （见 pyocd BreakpointManager._pre/_post_reset_catch_handler）。复位暂停后需
+            # （见 pyocd BreakpointManager._pre/_post_reset_catch_handler）。复位后需
             # 重新武装应用层记录的断点，否则用户 Reset 后再 Run 将不会命中任何断点。
-            if mode in ('halt', 'break_symbol'):
-                await asyncio.to_thread(_rearm_breakpoints, uid)
+            # run 模式（reset 后继续运行）不触发 VECTOR_CATCH，bp_manager 仍保留旧记录，
+            # 需 force 强制重装，否则 set_breakpoint 被判为重复而不下发到目标。
+            await asyncio.to_thread(_rearm_breakpoints, uid, mode == 'run')
 
             if mode == 'break_symbol':
                 # 复位暂停后设置入口断点并继续运行，可靠停在 main
@@ -454,18 +455,24 @@ def _get_session_core(uid: str):
         raise HTTPException(status_code=400, detail=f"Target not available: {e}")
 
 
-def _rearm_breakpoints(uid: str):
+def _rearm_breakpoints(uid: str, force: bool = False):
     """复位后重新武装应用层记录的源码断点。
 
     pyOCD 的 reset-catch 复位（VECTOR_CATCH）会清除目标上已武装的全部断点
     并禁用 FPB（见 BreakpointManager._pre/_post_reset_catch_handler）。此函数
     遍历应用层断点表 _BREAKPOINTS[uid]，把它们重新设置到目标 core 上。
+
+    force=True 用于「复位后继续运行」（reset 不带 halt）的场景：该路径不触发
+    VECTOR_CATCH，bp_manager 仍保留旧记录，直接 set_breakpoint 会被判为重复而
+    不下发到目标，导致复位后断点全部失效。此时先清空管理器簿记再重装。
     """
     bps = _BREAKPOINTS.get(uid, {})
     if not bps:
         return
     core = _get_session_core(uid)
     _ensure_soft_bp(uid)
+    if force:
+        core.bp_manager.remove_all_breakpoints()
     for address, b in bps.items():
         if b.get("enabled", True):
             core.set_breakpoint(address)
@@ -878,17 +885,23 @@ async def zone_source_save(uid: str, req: SourceSaveRequest):
 
 @router.delete("/probes/{uid}/zone/debug/breakpoints")
 async def zone_clear_breakpoints(uid: str):
-    """清除全部断点"""
+    """清除全部断点
+
+    除应用层断点表外，pyOCD 的 bp_manager 还可能持有其他来源的断点：例如通过
+    commander 的 `break` 命令直接设置的断点，或 bp_manager 在复位时自动重新武装
+    的旧断点。它们不在 _BREAKPOINTS 里，按应用层地址逐条 remove 清不掉，故直接
+    清空 bp_manager 的全部簿记，保证「清除全部」名副其实。
+    """
     from core.monitor_backend import monitor_backend
-    bps = _BREAKPOINTS.get(uid, {})
-    if not bps:
-        return {"success": True, "cleared": 0}
-    core = _get_session_core(uid)
-    with monitor_backend.pause_during(uid):
-        for address in list(bps.keys()):
-            core.remove_breakpoint(address)
-        core.bp_manager.flush()
-    count = len(bps)
+    count = len(_BREAKPOINTS.get(uid, {}))
+    try:
+        core = _get_session_core(uid)
+    except HTTPException:
+        core = None
+    if core is not None:
+        with monitor_backend.pause_during(uid):
+            core.bp_manager.remove_all_breakpoints()
+            core.bp_manager.flush()
     _BREAKPOINTS[uid] = {}
     return {"success": True, "cleared": count}
 

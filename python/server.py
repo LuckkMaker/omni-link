@@ -110,6 +110,7 @@ async def websocket_endpoint(websocket: WebSocket):
 async def health():
     return {
         "status": "ok",
+        "pid": os.getpid(),
         "ws_connections": event_manager.connection_count,
     }
 
@@ -159,7 +160,7 @@ def main():
     print(json.dumps({"port": actual_port}), flush=True)
 
     # 使用 uvicorn 运行
-    uvicorn.run(
+    config = uvicorn.Config(
         app,
         host=args.host,
         port=actual_port,
@@ -167,6 +168,10 @@ def main():
         access_log=False,
         ws="wsproto",
     )
+    server = uvicorn.Server(config)
+    # 暴露给 /api/system/shutdown 端点，触发优雅退出（执行 lifespan 关闭清理）
+    app.state._server = server
+    server.run()
 
 
 if __name__ == "__main__":

@@ -45,7 +45,9 @@ def add_parser(sub):
     s.add_argument("--no-newline", action="store_true", help="文本发送时不追加换行符")
     s.set_defaults(func=run_command(_send))
 
-    s = ps.add_parser("device", parents=[common_parser()], help="目标内核控制（run/halt/reset/state）")
+    # 中间层 parser 不挂 common_parser：否则 `rtt device --uid X run` 的 --uid
+    # 会被子 parser 的同名默认值(None)覆盖，静默丢失。全局选项只挂叶子 parser。
+    s = ps.add_parser("device", help="目标内核控制（run/halt/reset/state）")
     sd = s.add_subparsers(dest="rtt_device_sub", metavar="<sub>")
     for name, help_ in [("run", "运行目标内核（resume）"), ("halt", "暂停目标内核"),
                         ("status", "查询内核状态"), ("reset", "复位目标并重初始化 RTT")]:
