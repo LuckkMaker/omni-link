@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PROG,
         description="OMNI Link CLI - 通过复用 OMNI Link 后端接口开放探针/烧录/RTT 等能力",
     )
-    parser.add_argument("--version", action="version", version=f"omni {__version__}")
+    parser.add_argument("-v", "--version", action="version", version=f"omni {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     for mod in _COMMAND_MODULES:
         mod.add_parser(sub)

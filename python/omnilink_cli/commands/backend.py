@@ -24,6 +24,18 @@ def add_parser(sub):
 
 
 def _start(args):
+    # 已有可达后端（含应用托管 / 共享注册表发现的后端）则直接复用，
+    # 否则会再拉起一个后端去抢同一探针。
+    ports: list[int] = []
+    if args.backend_port:
+        ports.append(args.backend_port)
+    ports += config.candidate_ports()
+    for p in ports:
+        if p and bclient.reachable(p):
+            finish(args, {"running": True, "reused": True, "port": p},
+                   f"后端已在运行: 端口={p}（复用现有后端，未重复启动）")
+            return 0
+
     info = bclient.start_persistent(args.timeout)
     human = f"后端已启动: pid={info['pid']} 端口={info['port']}"
     finish(args, {"running": True, "pid": info["pid"], "port": info["port"]}, human)

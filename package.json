@@ -1,6 +1,6 @@
 {
   "name": "omni-link",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "一站式嵌入式工作平台",
   "license": "MIT",
   "author": "LuckkMaker",
@@ -36,6 +36,10 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "python/dist/omni.exe",
+        "to": "python/omni.exe"
       }
     ],
     "win": {
@@ -56,7 +60,8 @@
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "OMNI Link"
+      "shortcutName": "OMNI Link",
+      "include": "build/installer.nsh"
     }
   },
   "dependencies": {

@@ -164,21 +164,47 @@ def pid_alive(pid: int) -> bool:
 def _backend_command() -> list[str]:
     """构造启动后端的命令：
 
-    优先使用打包后的 omni-backend.exe；否则用当前解释器运行 server.py。
+    - 打包态：使用与 CLI 同目录的 omni-backend.exe。
+    - 源码态：用当前解释器运行 server.py，保证改动即时生效。
     与 Electron 主进程约定一致：传 --port 0（自动分配），读 stdout 首行
     {"port": N} 即就绪。
     """
-    exe = os.path.join(config.BACKEND_DIR, "dist", "omni-backend.exe")
-    if os.path.exists(exe):
-        return [exe, "--port", "0"]
-    if not os.path.exists(config.BACKEND_SERVER_PY):
-        raise ApiError(
-            0,
-            f"未找到后端 server.py: {config.BACKEND_SERVER_PY}\n"
-            "  wheel 安装的 CLI 请设置 OMNI_BACKEND_DIR 指向后端目录，"
-            "或先手动启动后端并用 --backend-port 指定端口。",
-        )
-    return [sys.executable, config.BACKEND_SERVER_PY, "--port", "0"]
+    explicit = os.environ.get("OMNI_BACKEND_EXE")
+    if explicit and os.path.exists(explicit):
+        return [explicit, "--port", "0"]
+
+    if getattr(sys, "frozen", False):
+        exes = _candidate_backend_exes()
+    else:
+        # 源码态优先 server.py，避免误用 dist/ 里的旧 exe
+        exes = _candidate_backend_exes()
+        if os.path.exists(config.BACKEND_SERVER_PY):
+            return [sys.executable, config.BACKEND_SERVER_PY, "--port", "0"]
+
+    for exe in exes:
+        if os.path.exists(exe):
+            return [exe, "--port", "0"]
+
+    raise ApiError(
+        0,
+        f"未找到后端 server.py: {config.BACKEND_SERVER_PY}\n"
+        "  wheel 安装的 CLI 请设置 OMNI_BACKEND_DIR 指向后端目录，"
+        "或先手动启动后端并用 --backend-port 指定端口。",
+    )
+
+
+def _candidate_backend_exes() -> list[str]:
+    """收集可能的打包后端可执行文件路径：
+
+    1. 安装态：CLI（resources/python/omni.exe）与后端
+       （resources/python/omni-backend.exe）同目录。
+    2. 构建态：python/dist/omni-backend/omni-backend.exe（onedir）。
+    """
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    return [
+        os.path.join(exe_dir, "omni-backend.exe"),
+        os.path.join(config.BACKEND_DIR, "dist", "omni-backend", "omni-backend.exe"),
+    ]
 
 
 def _open_log() -> object:

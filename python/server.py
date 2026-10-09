@@ -11,11 +11,13 @@ OMNI Link - Python 后端入口
 import sys
 import os
 import json
+import atexit
 import asyncio
 import argparse
 import logging
 import uvicorn
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from api import probes, flash, targets, files, devices, commander, rtt, tools, monitor, system, packs, zone
@@ -27,6 +29,61 @@ from core.pyocd_backend import backend
 BACKEND_VERSION = "0.3.1"
 
 logger = logging.getLogger("omni-link")
+
+
+# ---------------------------------------------------------------------------
+# 共享后端注册表
+#
+# 后端启动后把 {pid, port} 写入一个用户级、跨安装布局都相同的文件，任何调用方
+# （CLI `omni`、其他工具）都能据此发现并复用**同一个**后端进程，而不会各自再拉起
+# 一个后端去抢同一探针。路径计算必须与 CLI 侧 omnilink_cli/config.py 的
+# _state_dir 保持一致。
+# ---------------------------------------------------------------------------
+def _state_dir() -> str:
+    env = os.environ.get("OMNI_STATE_DIR")
+    if env:
+        return env
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "omni-link")
+
+
+def shared_runtime_file() -> str:
+    return os.path.join(_state_dir(), "backend.json")
+
+
+def publish_runtime(host: str, port: int) -> None:
+    """写入共享注册表，供 CLI 等外部进程发现本后端。"""
+    path = shared_runtime_file()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {
+            "pid": os.getpid(),
+            "host": host,
+            "port": port,
+            "version": BACKEND_VERSION,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.warning(f"Failed to publish backend runtime file: {e}")
+
+
+def unpublish_runtime() -> None:
+    """进程退出时删除注册表；仅当记录仍指向本进程时才删，避免误删后启动的后端。"""
+    path = shared_runtime_file()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("pid") == os.getpid():
+            os.remove(path)
+    except Exception:
+        pass
 
 
 @asynccontextmanager
@@ -158,6 +215,10 @@ def main():
 
     # 输出端口信息（Electron 主进程读取此行）
     print(json.dumps({"port": actual_port}), flush=True)
+
+    # 共享注册表：让 CLI 等外部进程能发现并复用本后端（退出时自动清理）
+    publish_runtime(args.host, actual_port)
+    atexit.register(unpublish_runtime)
 
     # 使用 uvicorn 运行
     config = uvicorn.Config(

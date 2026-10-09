@@ -8,7 +8,8 @@ Usage:
     python build.py --python PATH      # Use specific Python executable
 
 Output:
-    dist/omni-backend/omni-backend.exe   # Executable (Windows)
+    dist/omni-backend/omni-backend.exe   # Backend executable (Windows)
+    dist/omni.exe                        # CLI executable (Windows)
 
 The output is placed in dist/ and is consumed by electron-builder
 when building the Electron installer.
@@ -30,6 +31,10 @@ BUILD_DIR = BACKEND_DIR / "build"
 
 ENTRY_SCRIPT = BACKEND_DIR / "server.py"
 APP_NAME = "omni-backend"
+
+# CLI 打包（单文件 omni.exe，随安装包分发，实现"装完即用命令行"）
+CLI_ENTRY_SCRIPT = BACKEND_DIR / "omni_cli_main.py"
+CLI_APP_NAME = "omni"
 
 # Required runtime packages that must be importable by the building Python.
 # 注意：pyocd 是内置源码（python/pyocd/），check_package 会把 BACKEND_DIR 加入
@@ -191,6 +196,9 @@ def clean():
     spec_file = BACKEND_DIR / f"{APP_NAME}.spec"
     if spec_file.exists():
         spec_file.unlink()
+    cli_spec = BACKEND_DIR / f"{CLI_APP_NAME}.spec"
+    if cli_spec.exists():
+        cli_spec.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +268,42 @@ def build(python_exe: str):
         sys.exit(1)
 
 
+def build_cli(python_exe: str):
+    """把零依赖的 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
+
+    单文件便于随安装包分发并直接放进 PATH；CLI 只依赖标准库，产物很小。
+    """
+    ensure_pyinstaller(python_exe)
+
+    cmd = [
+        python_exe, "-m", "PyInstaller",
+        "--name", CLI_APP_NAME,
+        "--noconfirm",
+        "--console",
+        "--onefile",
+        f"--distpath={DIST_DIR}",
+        f"--workpath={BUILD_DIR}",
+        f"--specpath={BACKEND_DIR}",
+        "--collect-submodules", "omnilink_cli",
+        "--paths", str(BACKEND_DIR),
+        str(CLI_ENTRY_SCRIPT),
+    ]
+
+    log("Running PyInstaller (CLI)...")
+    log(f"Command: {' '.join(cmd)}")
+    subprocess.check_call(cmd, cwd=str(BACKEND_DIR))
+
+    exe_path = DIST_DIR / (f"{CLI_APP_NAME}.exe" if sys.platform == "win32" else CLI_APP_NAME)
+    if exe_path.exists():
+        size_mb = exe_path.stat().st_size / (1024 * 1024)
+        log("CLI build successful!")
+        log(f"Executable: {exe_path}")
+        log(f"Size: {size_mb:.1f} MB")
+    else:
+        log(f"ERROR: Expected CLI output not found at {exe_path}")
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -280,6 +324,7 @@ def main():
 
     py = ensure_python(args.python)
     build(py)
+    build_cli(py)
 
 
 if __name__ == "__main__":
