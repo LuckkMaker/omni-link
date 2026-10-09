@@ -202,7 +202,7 @@ omni commander shell                         # 进 REPL，连续调试最省事
 omni commander shell --command "status; reg"
 ```
 
-### `debug` — 调试控制（Phase 4）
+### `debug` — 调试控制
 
 源码级调试工作台，复用后端 `/api/probes/{uid}/zone/*` 接口。**会话状态（是否已加载 ELF、
 断点表、目标是否暂停）保存在后端**，因此每条 `omni` 命令都是独立进程：`elf load` 之后
@@ -227,6 +227,25 @@ omni commander shell --command "status; reg"
 | `regs` | 读取 CPU 核心寄存器（`--filter` 过滤，如 `pc` / `r1`） |
 | `mem read --addr A` | 读取内存并 hex dump（`--size` 字节数） |
 | `mem resolve <expr>` | 解析地址表达式（hex / `&符号` / `name[下标]`） |
+| `mem usage` | 内存占用统计（Flash/RAM 分类与 Section 明细） |
+| `stack [--locals]` | 调用栈回溯（`--locals` 同时展开每帧局部变量/形参） |
+| `locals` | 当前函数局部变量/形参（需目标暂停） |
+| `disasm --addr A` | 反汇编（`--length` 字节数 / `--count` 指令条数） |
+| `functions` | 列出函数（`--filter` / `--offset` / `--limit`） |
+| `callgraph --addr A` | 指定函数的直接被调函数（callees） |
+| `hover <name>` | 悬停求值：函数地址 / 变量值 |
+| `watch eval <expr>` | 表达式求值（`var.field` / `arr[i]` / `*ptr` / `&x`） |
+| `watch set` | 写内存或寄存器（`--address` 或 `--register`，`--value` 必填） |
+| `periph list` | 列出外设（名称/基址/寄存器数） |
+| `periph regs <name>` | 读取外设寄存器值（`--filter` 过滤寄存器名） |
+| `periph nvic` | NVIC 中断源状态（使能/挂起/活动/优先级） |
+| `periph scb` / `periph systick` | SCB / SysTick 内核寄存器（含位域分解） |
+| `src content <file>` | 读取源文件内容（`--start` / `--end` 限定行范围） |
+| `src search <query>` | 全部源文件文本搜索（`--limit` 限量） |
+| `src symbol <name>` | 按名字解析符号定义位置 |
+| `session list` | 列出已保存的会话配置 |
+| `session save <name>` | 保存会话配置（`--file` 读 JSON 文件，或 `--data` 直接给 JSON） |
+| `session load <name>` / `session del <name>` | 读取 / 删除会话配置 |
 
 `bp del` / `bp enable` / `bp disable` 支持两种定位方式（二选一）：`--address`（hex 或符号）
 或 `--file` + `--line`。符号地址与源码行断点地址常落在**同一函数的不同位置**，命令内部按
@@ -243,6 +262,23 @@ omni debug regs --filter pc                         # 7) 读寄存器
 omni debug mem read --addr 0x20000000 --size 64     # 8) 看内存
 omni debug bp list                                  # 9) 查看断点
 omni debug bp clear                                 # 10) 清除全部断点
+```
+
+命中后查看现场（调用栈 / 局部变量 / 反汇编 / 外设 / 表达式求值）：
+
+```powershell
+omni debug stack --locals                           # 调用栈 + 每帧局部变量
+omni debug locals                                   # 当前函数局部变量/形参
+omni debug disasm --addr main --count 20            # 反汇编 main 前 20 条
+omni debug functions --filter gpio                  # 列出含 gpio 的函数
+omni debug mem usage                                # Flash/RAM 占用
+omni debug watch eval "counter"                     # 求值表达式
+omni debug hover main                               # 查看符号地址/类型
+omni debug periph list                              # 外设列表
+omni debug periph regs GPIOA --filter ODR           # 读 GPIOA 寄存器
+omni debug periph nvic                              # 中断源状态
+omni debug periph scb                               # SCB 内核寄存器
+omni debug session save my-session --file cfg.json  # 保存会话配置
 ```
 
 > ⚠️ `reset --mode break-symbol` 依赖**板载固件与 ELF 一致**：后端复位后运行，并在入口符号
@@ -345,7 +381,7 @@ powershell -File scripts\cli-smoke.ps1 -UseInstalled
 # 追加破坏性回环：program → verify → blank-check → erase → blank-check
 powershell -File scripts\cli-smoke.ps1 -UseInstalled -Firmware .\app.hex
 
-# 追加 Phase 4 调试控制段：elf load → src files → bp add/list/del → regs → mem
+# 追加调试控制段：elf load → src files → bp add/list/del → regs → mem → stack/locals/disasm → periph → session
 powershell -File scripts\cli-smoke.ps1 -UseInstalled -Elf .\app.axf
 ```
 

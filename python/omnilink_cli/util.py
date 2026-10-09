@@ -19,16 +19,23 @@ def parse_int(value) -> int | None:
 
 
 def resolve_uid(c, args) -> str | None:
-    """显式 --uid 优先，否则取第一个探针的 uid。无探针时返回 None。"""
+    """显式 --uid 优先；否则优先取第一个「已连接」探针，均未连接时回退第一个。
+
+    多探针场景不能盲取 probes[0]：机器上可能同时挂着已连接的 J-Link 和未连接的
+    CMSIS-DAP，取到后者会让所有依赖探针的命令误报「Probe not connected」。
+    """
     if getattr(args, "uid", None):
         return args.uid
     try:
         probes = c.get("/api/probes").get("probes", [])
-        if probes:
-            return probes[0]["uid"]
     except Exception:
-        pass
-    return None
+        return None
+    if not probes:
+        return None
+    for p in probes:
+        if p.get("state") == "connected":
+            return p["uid"]
+    return probes[0]["uid"]
 
 
 def _err(msg: str) -> None:

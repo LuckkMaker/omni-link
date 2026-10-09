@@ -641,7 +641,10 @@ class ElfBackend:
             if sd:
                 for name, info in sd.symbol_dict.items():
                     if info.type == "STT_FUNC" and info.size > 0:
-                        ranges.append((info.address, info.address + info.size, name, info.address, info.size))
+                        # 归一化 Thumb 位：符号地址可能含 bit0，若作为区间起点，
+                        # 分支目标（bit0 已清）会落在区间前 1 字节，误判为上一个函数。
+                        start = info.address & ~1
+                        ranges.append((start, start + info.size, name, start, info.size))
                 ranges.sort(key=lambda r: r[0])
             entry["_function_ranges"] = ranges
         return ranges
@@ -1165,7 +1168,10 @@ class ElfBackend:
             import capstone
         except ImportError:
             return {"success": False, "error": "Capstone not installed"}
-        code = self._read_from_segments(entry["elf"], fn["address"], fn["size"])
+        # 清除 Thumb 位：符号表地址可能含 bit0，作为段内偏移读取会错位 1 字节，
+        # 反汇编得到乱码、匹配不到 bl 指令 → callees 恒为空。
+        fstart = fn["address"] & ~1
+        code = self._read_from_segments(entry["elf"], fstart, fn["size"])
         if not code:
             return {"success": False, "error": "No code in function"}
         md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
@@ -1173,7 +1179,7 @@ class ElfBackend:
         callees = []
         seen = set()
         try:
-            for ins in md.disasm(code, fn["address"]):
+            for ins in md.disasm(code, fstart):
                 if ins.mnemonic not in ("bl", "blx"):
                     continue
                 target = None

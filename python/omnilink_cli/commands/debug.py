@@ -1,4 +1,4 @@
-"""调试控制命令组（Phase 4）：执行控制、ELF、源码断点、寄存器、内存。
+"""调试控制命令组：执行控制、ELF、源码断点、寄存器、内存、调用栈、反汇编、外设、会话。
 
 对标前端 Zone 调试工作台，复用 `/api/probes/{uid}/zone/*` 接口。
 
@@ -7,6 +7,7 @@ CLI 每条命令都是独立进程，因此 `omni debug elf load` 之后可直�
 下一条命令里下断点、查寄存器，不需要在同一进程内维持会话。
 """
 
+import json
 import os
 import urllib.parse
 
@@ -75,7 +76,22 @@ def add_parser(sub):
     _uid(ss)
     ss.add_argument("--addr", required=True, help="地址（hex 或符号表达式）")
     ss.set_defaults(func=run_command(_src_line))
-    s.set_defaults(func=run_command(_usage("debug src <files|line>")))
+    ss = sc.add_parser("content", parents=[common_parser()], help="读取源文件内容（带行号）")
+    _uid(ss)
+    ss.add_argument("file", help="源文件（ELF 中记录的路径或其后缀）")
+    ss.add_argument("--start", type=int, help="起始行（默认 1）")
+    ss.add_argument("--end", type=int, help="结束行（默认文件末尾）")
+    ss.set_defaults(func=run_command(_src_content))
+    ss = sc.add_parser("search", parents=[common_parser()], help="在全部源文件中做文本搜索")
+    _uid(ss)
+    ss.add_argument("query", help="搜索关键字")
+    ss.add_argument("--limit", type=int, default=200, help="最大结果数（默认 200）")
+    ss.set_defaults(func=run_command(_src_search))
+    ss = sc.add_parser("symbol", parents=[common_parser()], help="按名字解析符号定义位置")
+    _uid(ss)
+    ss.add_argument("name", help="符号名")
+    ss.set_defaults(func=run_command(_src_symbol))
+    s.set_defaults(func=run_command(_usage("debug src <files|line|content|search|symbol>")))
 
     # ── 源码行断点 ────────────────────────────
     s = ps.add_parser("bp", help="源码行断点管理")
@@ -132,7 +148,102 @@ def add_parser(sub):
     ss.add_argument("expr", help="地址表达式")
     ss.set_defaults(func=run_command(_mem_resolve))
 
-    s.set_defaults(func=run_command(_usage("debug mem <read|resolve>")))
+    ss = sm.add_parser("usage", parents=[common_parser()], help="内存占用统计（Flash/RAM，需已加载 ELF）")
+    _uid(ss)
+    ss.set_defaults(func=run_command(_mem_usage))
+
+    s.set_defaults(func=run_command(_usage("debug mem <read|resolve|usage>")))
+
+    # ── 调用栈 / 局部变量 ─────────────────────
+    s = ps.add_parser("stack", parents=[common_parser()], help="调用栈回溯（需目标暂停）")
+    _uid(s)
+    s.add_argument("--locals", action="store_true", help="同时展开每帧的局部变量/形参")
+    s.set_defaults(func=run_command(_stack))
+
+    s = ps.add_parser("locals", parents=[common_parser()], help="当前函数局部变量/形参（需目标暂停）")
+    _uid(s)
+    s.set_defaults(func=run_command(_locals))
+
+    # ── 反汇编 ────────────────────────────────
+    s = ps.add_parser("disasm", parents=[common_parser()], help="反汇编指定地址")
+    _uid(s)
+    s.add_argument("--addr", required=True, help="起始地址（hex 或符号表达式）")
+    s.add_argument("--length", type=int, default=64, help="读取字节数（默认 64）")
+    s.add_argument("--count", type=int, default=32, help="最大指令条数（默认 32）")
+    s.set_defaults(func=run_command(_disasm))
+
+    # ── 函数 / 调用图 ─────────────────────────
+    s = ps.add_parser("functions", parents=[common_parser()], help="列出 ELF 中的函数")
+    _uid(s)
+    s.add_argument("--filter", help="按名称子串过滤")
+    s.add_argument("--offset", type=int, default=0, help="分页偏移（默认 0）")
+    s.add_argument("--limit", type=int, default=200, help="每页数量（默认 200）")
+    s.set_defaults(func=run_command(_functions))
+
+    s = ps.add_parser("callgraph", parents=[common_parser()], help="查看指定函数的直接被调函数（callees）")
+    _uid(s)
+    s.add_argument("--addr", required=True, help="函数地址（hex 或符号）")
+    s.set_defaults(func=run_command(_callgraph))
+
+    # ── 悬停 / Watch 求值 ─────────────────────
+    s = ps.add_parser("hover", parents=[common_parser()], help="悬停求值：函数地址 / 变量值")
+    _uid(s)
+    s.add_argument("name", help="标识符（函数名 / 变量名）")
+    s.set_defaults(func=run_command(_hover))
+
+    s = ps.add_parser("watch", help="Watch 表达式求值与写入")
+    sw = s.add_subparsers(dest="debug_watch_sub", metavar="<sub>")
+    ss = sw.add_parser("eval", parents=[common_parser()], help="按表达式求值（var.field / arr[i] / *ptr / &x）")
+    _uid(ss)
+    ss.add_argument("expr", help="C 表达式或标识符")
+    ss.set_defaults(func=run_command(_watch_eval))
+    ss = sw.add_parser("set", parents=[common_parser()], help="写入内存或寄存器（需目标暂停）")
+    _uid(ss)
+    ss.add_argument("--address", help="内存地址（hex 或符号表达式），与 --register 二选一")
+    ss.add_argument("--size", type=int, default=4, help="写入字节数（默认 4，1-8）")
+    ss.add_argument("--register", help="寄存器名（如 r0 / pc）")
+    ss.add_argument("--value", required=True, help="要写入的值（支持 0x 前缀）")
+    ss.set_defaults(func=run_command(_watch_set))
+    s.set_defaults(func=run_command(_usage("debug watch <eval|set>")))
+
+    # ── 外设 / 内核外设 ───────────────────────
+    s = ps.add_parser("periph", help="外设与内核外设（NVIC/SCB/SysTick）")
+    sp = s.add_subparsers(dest="debug_periph_sub", metavar="<sub>")
+    ss = sp.add_parser("list", parents=[common_parser()], help="列出外设（名称/基址/寄存器数）")
+    _uid(ss)
+    ss.set_defaults(func=run_command(_periph_list))
+    ss = sp.add_parser("regs", parents=[common_parser()], help="读取某外设的寄存器值")
+    _uid(ss)
+    ss.add_argument("name", help="外设名（如 GPIOA / TIM1）")
+    ss.add_argument("--filter", help="按寄存器名子串过滤")
+    ss.set_defaults(func=run_command(_periph_regs))
+    for _sub, _fn, _help in [
+        ("nvic", _periph_nvic, "NVIC 中断源状态（使能/挂起/活动/优先级）"),
+        ("scb", _periph_scb, "SCB 内核寄存器（ICSR/AIRCR/VTOR/STIR）"),
+        ("systick", _periph_systick, "SysTick 内核寄存器（CTRL/LOAD/VAL/CALIB）"),
+    ]:
+        ss = sp.add_parser(_sub, parents=[common_parser()], help=_help)
+        _uid(ss)
+        ss.set_defaults(func=run_command(_fn))
+    s.set_defaults(func=run_command(_usage("debug periph <list|regs|nvic|scb|systick>")))
+
+    # ── 会话配置 ──────────────────────────────
+    s = ps.add_parser("session", help="Zone 会话配置存取")
+    sn = s.add_subparsers(dest="debug_session_sub", metavar="<sub>")
+    ss = sn.add_parser("list", parents=[common_parser()], help="列出已保存的会话")
+    ss.set_defaults(func=run_command(_session_list))
+    ss = sn.add_parser("save", parents=[common_parser()], help="保存会话配置")
+    ss.add_argument("name", help="会话名")
+    ss.add_argument("--file", help="从 JSON 文件读取配置")
+    ss.add_argument("--data", help="直接提供 JSON 字符串")
+    ss.set_defaults(func=run_command(_session_save))
+    ss = sn.add_parser("load", parents=[common_parser()], help="读取会话配置")
+    ss.add_argument("name", help="会话名")
+    ss.set_defaults(func=run_command(_session_load))
+    ss = sn.add_parser("del", parents=[common_parser()], help="删除会话配置")
+    ss.add_argument("name", help="会话名")
+    ss.set_defaults(func=run_command(_session_del))
+    s.set_defaults(func=run_command(_usage("debug session <list|save|load|del>")))
 
 
 # ── 执行控制 ──────────────────────────────
@@ -413,6 +524,462 @@ def _mem_resolve(c: ApiClient, args):
     return 0
 
 
+# ── 调用栈 / 局部变量 ──────────────────────
+
+_FRAME_TYPES = {
+    "top": "当前", "except": "异常", "call": "调用",
+    "fp": "帧指针", "scan": "栈扫描",
+}
+
+
+def _stack(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/stack")
+    frames = data.get("frames") or []
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    sp, pc, lr = data.get("sp"), data.get("pc"), data.get("lr")
+    print(f"共 {len(frames)} 帧  PC {_addr(pc)}  SP {_addr(sp)}  LR {_addr(lr)}")
+    if not frames:
+        print("（无帧：目标可能未暂停，或未加载带调试信息的 ELF）")
+        return 0
+    rows = []
+    for i, f in enumerate(frames):
+        name = f.get("function") or f.get("symbol") or "-"
+        addr = f.get("function_address") or f.get("address")
+        loc = f"{f.get('file')}:{f.get('line')}" if f.get("file") else "-"
+        rows.append([str(i), name, _addr(addr), _FRAME_TYPES.get(f.get("type"), f.get("type") or "-"), loc])
+    print(render_table(["#", "函数", "地址", "类型", "源码位置"], rows))
+    if getattr(args, "locals", False):
+        for i, f in enumerate(frames):
+            locs = f.get("locals") or []
+            if not locs:
+                continue
+            print(f"\n#{i} {f.get('function') or '-'}  {f.get('signature') or ''}")
+            print(render_table(["变量", "类型", "值", "种类"],
+                               [[v.get("name"), v.get("type") or "", _fmt_value(v), _var_kind(v)] for v in locs]))
+    return 0
+
+
+def _locals(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.post(f"/api/probes/{uid}/zone/locals")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    state = data.get("state")
+    if state != "halted":
+        print(f"目标状态: {state}（局部变量需目标暂停）")
+        return 0
+    info = data.get("locals")
+    if not info:
+        print("当前函数无局部变量/形参（可能未加载 DWARF 调试信息）")
+        return 0
+    if info.get("signature"):
+        print(f"函数签名: {info['signature']}   返回: {info.get('ret') or '-'}")
+    variables = info.get("variables") or []
+    if not variables:
+        print("（无局部变量/形参）")
+        return 0
+    rows = [[v.get("name"), v.get("type") or "", _fmt_value(v), _var_kind(v)] for v in variables]
+    print(render_table(["变量", "类型", "值", "种类"], rows))
+    return 0
+
+
+# ── 反汇编 ────────────────────────────────
+
+def _disasm(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    addr = _resolve_addr(c, uid, args.addr)
+    if addr is None:
+        return 1
+    data = c.post(f"/api/probes/{uid}/zone/disasm",
+                  {"address": addr, "length": args.length, "max_instructions": args.count})
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    rows = data.get("rows") or []
+    if not rows:
+        print(f"无指令  {_addr(addr)}")
+        return 0
+    print(f"反汇编 {_addr(data.get('address', addr))}  {data.get('count', 0)} 条指令")
+    for r in rows:
+        t = r.get("type")
+        if t == "func":
+            print(f"\n{r.get('name') or '<unknown>'}:")
+        elif t == "source":
+            print(f"    ; {r.get('file')}:{r.get('line')}  {r.get('text') or ''}")
+        else:
+            b = r.get("bytes") or ""
+            print(f"{_addr(r.get('address'))}  {b:<8}  {r.get('mnemonic')} {r.get('op_str')}")
+    return 0
+
+
+# ── 函数 / 调用图 ─────────────────────────
+
+def _functions(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    q = (f"filter={urllib.parse.quote(args.filter or '')}"
+         f"&offset={args.offset}&limit={args.limit}")
+    data = c.get(f"/api/probes/{uid}/zone/functions?{q}")
+    funcs = data.get("functions") or []
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    if not funcs:
+        print("没有匹配的函数")
+        return 0
+    rows = [[f.get("name"), _addr(f.get("address")), _size(f.get("size")),
+             (f"{f.get('file')}:{f.get('line')}" if f.get("file") else "-")] for f in funcs]
+    print(f"共 {data.get('total', len(funcs))} 个函数，显示 {len(funcs)} 个（offset={args.offset}）")
+    print(render_table(["函数", "地址", "大小", "源码位置"], rows))
+    return 0
+
+
+def _callgraph(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    addr = _resolve_addr(c, uid, args.addr)
+    if addr is None:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/callgraph?address={addr}")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    fn = data.get("function") or {}
+    callees = data.get("callees") or []
+    print(f"函数 {fn.get('name') or '-'}  {_addr(fn.get('address'))}  直接调用 {len(callees)} 个")
+    if not callees:
+        return 0
+    rows = [[cl.get("name"), _addr(cl.get("address")), _size(cl.get("size"))] for cl in callees]
+    print(render_table(["被调函数", "地址", "大小"], rows))
+    return 0
+
+
+def _mem_usage(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/memory/usage")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    print(f"Flash 占用: {_size(data.get('flash_used'))}    RAM 占用: {_size(data.get('ram_used'))}")
+    cats = data.get("categories") or []
+    if cats:
+        print("\n分类占用:")
+        print(render_table(["分类", "Flash", "RAM"],
+                           [[c.get("name"), _size(c.get("rom")), _size(c.get("ram"))] for c in cats]))
+    sections = data.get("sections") or []
+    if sections:
+        print("\nSection 明细:")
+        print(render_table(["Section", "地址", "大小", "区域"],
+                           [[s.get("name"), _addr(s.get("address")), _size(s.get("size")),
+                             "RAM" if s.get("writable") else "Flash"] for s in sections]))
+    return 0
+
+
+# ── 悬停 / Watch ──────────────────────────
+
+def _hover(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.post(f"/api/probes/{uid}/zone/hover", {"name": args.name})
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    info = data.get("info")
+    if not info:
+        print(f"无调试信息: {args.name}（状态: {data.get('state')}）")
+        return 1
+    _print_info_tree(info, 0)
+    return 0
+
+
+def _watch_eval(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.post(f"/api/probes/{uid}/zone/watch/eval", {"name": args.expr})
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    info = data.get("info")
+    if not info:
+        print(f"无法解析 {args.expr!r}（状态: {data.get('state')}）")
+        return 1
+    _print_info_tree(info, 0)
+    return 0
+
+
+def _watch_set(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    try:
+        value = parse_int(args.value)
+    except ValueError as e:
+        print(f"错误: {e}")
+        return 1
+    if args.register:
+        payload = {"target": "register", "name": args.register, "value": value}
+        what = f"寄存器 {args.register}"
+    elif args.address is not None:
+        address = _resolve_addr(c, uid, args.address)
+        if address is None:
+            return 1
+        payload = {"target": "address", "address": address, "size": args.size, "value": value}
+        what = f"内存 {_addr(address)}"
+    else:
+        print("错误: 请提供 --address（写内存）或 --register（写寄存器）。")
+        return 1
+    data = c.post(f"/api/probes/{uid}/zone/watch/set", payload)
+    finish(args, data, f"已写入 {what} = {_hexv(data.get('value'))}")
+    return 0 if data.get("success") else 1
+
+
+# ── 外设 / 内核外设 ───────────────────────
+
+def _periph_list(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/peripherals")
+    periphs = data.get("peripherals") or []
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    if not periphs:
+        print("无外设（未连接目标或该型号无 SVD）")
+        return 0
+    rows = [[p.get("name"), _addr(p.get("base_address")), str(len(p.get("registers") or [])),
+             p.get("description") or ""] for p in periphs]
+    print(f"共 {len(periphs)} 个外设")
+    print(render_table(["外设", "基址", "寄存器数", "说明"], rows))
+    return 0
+
+
+def _periph_regs(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    meta = c.get(f"/api/probes/{uid}/zone/peripherals")
+    periphs = meta.get("peripherals") or []
+    target = _find_peripheral(periphs, args.name)
+    if target is None:
+        names = ", ".join(p.get("name", "") for p in periphs[:20])
+        print(f"错误: 未找到外设 {args.name!r}。可用: {names}")
+        return 1
+    regs = target.get("registers") or []
+    if args.filter:
+        needle = args.filter.lower()
+        regs = [r for r in regs if needle in str(r.get("name", "")).lower()]
+    if not regs:
+        print(f"{target.get('name')} 没有匹配的寄存器")
+        return 0
+    data = c.post(f"/api/probes/{uid}/zone/registers/read",
+                  {"addresses": [r["address"] for r in regs]})
+    if args.json_ or args.quiet:
+        finish(args, {**data, "peripheral": target.get("name")}, "")
+        return 0
+    values = {v["address"]: v.get("value") for v in (data.get("values") or [])}
+    rows = [[r.get("name"), _addr(r.get("address")), _addr(values.get(r["address"])),
+             r.get("access") or "", r.get("description") or ""] for r in regs]
+    print(f"{target.get('name')}  基址 {_addr(target.get('base_address'))}  {len(regs)} 个寄存器")
+    print(render_table(["寄存器", "地址", "值", "访问", "说明"], rows))
+    return 0
+
+
+def _periph_nvic(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/peripherals/core/nvic")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    if data.get("skipped"):
+        print("跳过本轮读取（有调试操作正在进行）")
+        return 0
+    ints = data.get("interrupts") or []
+    if not ints:
+        print("无中断源")
+        return 0
+    rows = [[str(i.get("number")), i.get("name") or "",
+             "1" if i.get("enabled") else "0",
+             "1" if i.get("pending") else "0",
+             "1" if i.get("active") else "0",
+             str(i.get("priority"))] for i in ints]
+    print(f"共 {len(ints)} 个中断源")
+    print(render_table(["#", "中断源", "使能", "挂起", "活动", "优先级"], rows))
+    return 0
+
+
+def _core_periph_regs(c: ApiClient, args, path: str, title: str):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/peripherals/core/{path}")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    if data.get("skipped"):
+        print("跳过本轮读取（有调试操作正在进行）")
+        return 0
+    regs = data.get("registers") or []
+    if not regs:
+        print(f"无 {title} 寄存器")
+        return 0
+    for r in regs:
+        val = r.get("value")
+        print(f"\n{r.get('name')}  {_addr(r.get('address'))}  = {_hexv(val)}   {r.get('description') or ''}")
+        fields = r.get("fields") or []
+        if fields and isinstance(val, int):
+            rows = []
+            for f in fields:
+                off, wid = f.get("bit_offset", 0), f.get("bit_width", 1)
+                fv = (val >> off) & ((1 << wid) - 1)
+                rows.append([f.get("name"), f"[{off + wid - 1}:{off}]", _hexv(fv),
+                             f.get("access") or "", f.get("description") or ""])
+            print(render_table(["位域", "位", "值", "访问", "说明"], rows))
+    return 0
+
+
+def _periph_scb(c: ApiClient, args):
+    return _core_periph_regs(c, args, "scb", "SCB")
+
+
+def _periph_systick(c: ApiClient, args):
+    return _core_periph_regs(c, args, "systick", "SysTick")
+
+
+# ── 源码内容 / 搜索 / 符号 ────────────────
+
+def _src_content(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/source/content?file={urllib.parse.quote(args.file)}")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0 if data.get("success") else 1
+    if not data.get("success"):
+        print(f"读取失败: {data.get('error', '未知错误')}")
+        return 1
+    lines = data.get("lines") or []
+    start = max(1, args.start or 1)
+    end = min(args.end or len(lines), len(lines))
+    print(f"{data.get('file')}  共 {len(lines)} 行，显示 {start}-{end}")
+    for no in range(start, end + 1):
+        print(f"{no:>5}  {lines[no - 1]}")
+    return 0
+
+
+def _src_search(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/source/search"
+                 f"?query={urllib.parse.quote(args.query)}&limit={args.limit}")
+    results = data.get("results") or []
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    if not results:
+        print("没有匹配结果")
+        return 0
+    rows = [[r.get("file"), str(r.get("line")), (r.get("text") or "").strip()] for r in results]
+    extra = "（已截断）" if data.get("truncated") else ""
+    print(f"共 {len(results)} 条匹配{extra}")
+    print(render_table(["文件", "行", "内容"], rows))
+    return 0
+
+
+def _src_symbol(c: ApiClient, args):
+    uid = require_uid(c, args)
+    if not uid:
+        return 1
+    data = c.get(f"/api/probes/{uid}/zone/source/symbol?name={urllib.parse.quote(args.name)}")
+    sym = data.get("symbol")
+    if not sym:
+        finish(args, data, f"未找到符号 {args.name!r}")
+        return 1
+    loc = f"{sym.get('file')}:{sym.get('line')}" if sym.get("file") else "-"
+    finish(args, data, f"{sym.get('name')}  {_addr(sym.get('address'))}  "
+                       f"类型 {sym.get('type') or '-'}  大小 {_size(sym.get('size'))}  位置 {loc}")
+    return 0
+
+
+# ── 会话配置 ──────────────────────────────
+
+def _session_list(c: ApiClient, args):
+    data = c.get("/api/zone/sessions")
+    sessions = data.get("sessions") or []
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    if not sessions:
+        print("没有已保存的会话")
+        return 0
+    rows = [[s.get("name"), s.get("updated_at") or "", s.get("path") or ""] for s in sessions]
+    print(render_table(["名称", "更新时间", "路径"], rows))
+    return 0
+
+
+def _session_save(c: ApiClient, args):
+    if args.file:
+        path = os.path.abspath(os.path.expanduser(args.file))
+        if not os.path.isfile(path):
+            print(f"错误: 文件不存在: {path}")
+            return 1
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"错误: JSON 解析失败: {e}")
+            return 1
+    elif args.data:
+        try:
+            payload = json.loads(args.data)
+        except json.JSONDecodeError as e:
+            print(f"错误: --data 不是合法 JSON: {e}")
+            return 1
+    else:
+        print("错误: 请用 --file 指定 JSON 文件，或用 --data 直接提供 JSON。")
+        return 1
+    data = c.post("/api/zone/sessions", {"name": args.name, "data": payload})
+    finish(args, data, f"会话已保存: {data.get('name')}")
+    return 0 if data.get("success") else 1
+
+
+def _session_load(c: ApiClient, args):
+    data = c.get(f"/api/zone/sessions/{urllib.parse.quote(args.name)}")
+    if args.json_ or args.quiet:
+        finish(args, data, "")
+        return 0
+    session = data.get("session") or {}
+    print(f"会话 {session.get('name')}  更新于 {session.get('updated_at') or '-'}")
+    print(json.dumps(session.get("data"), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _session_del(c: ApiClient, args):
+    data = c.delete(f"/api/zone/sessions/{urllib.parse.quote(args.name)}")
+    finish(args, data, f"会话已删除: {args.name}")
+    return 0
+
+
 # ── 辅助 ──────────────────────────────────
 
 def _uid(p):
@@ -587,3 +1154,52 @@ def _hex_dump(base: int, data: bytes, width: int = 16) -> str:
         text = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
         lines.append(f"{_addr(base + off)}  {hexs:<{width * 3 - 1}}  |{text}|")
     return "\n".join(lines)
+
+
+def _hexv(v) -> str:
+    """紧凑 hex（不做 8 位补零），非整数返回 '-'。"""
+    return f"0x{v:X}" if isinstance(v, int) else "-"
+
+
+def _fmt_value(v: dict) -> str:
+    """变量值格式化：不可用标注，整数按 hex，其余原样。"""
+    if not v.get("available", True):
+        return "(不可用)"
+    val = v.get("value")
+    if isinstance(val, int):
+        return _addr(val)
+    if val is None:
+        return "-"
+    return str(val)
+
+
+def _var_kind(v: dict) -> str:
+    return "形参" if v.get("is_param") else "局部"
+
+
+def _find_peripheral(periphs: list[dict], name: str):
+    """按名称定位外设：先大小写不敏感精确匹配，再退化为子串匹配。"""
+    low = name.lower()
+    for p in periphs:
+        if str(p.get("name", "")).lower() == low:
+            return p
+    for p in periphs:
+        if low in str(p.get("name", "")).lower():
+            return p
+    return None
+
+
+def _print_info_tree(info: dict, depth: int = 0) -> None:
+    """递归打印 hover/watch 求值结果（含 struct/array children）。"""
+    pad = "  " * depth
+    typ = info.get("type") or ""
+    if not info.get("available", True):
+        val_s = "(不可用)"
+    else:
+        val = info.get("value")
+        val_s = _addr(val) if isinstance(val, int) else (str(val) if val is not None else "-")
+    addr = info.get("address")
+    addr_s = f"  @{_addr(addr)}" if isinstance(addr, int) else ""
+    print(f"{pad}{info.get('name') or '-'}: {typ} = {val_s}{addr_s}")
+    for child in (info.get("children") or []):
+        _print_info_tree(child, depth + 1)
