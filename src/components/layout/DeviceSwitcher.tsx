@@ -86,7 +86,11 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   // 已连接时以实际会话端口为准，否则用列表中的选中项
   const omniSelected =
     omniDevices.find((d) => d.port === (omniSession.port ?? selectedPort)) ?? null
-  const omniSerial = omniSelected ? omniSelected.serial_number || omniSelected.port : ''
+  // 列表可能滞后于会话（如设备刚复位重枚举），此时回退到会话端口，
+  // 不能显示"未发现设备"——会话仍在，设备就在。
+  const omniSerial = omniSelected
+    ? omniSelected.serial_number || omniSelected.port
+    : omniSession.port ?? selectedPort ?? ''
 
   // 后端就绪后加载设备目录
   useEffect(() => {
@@ -194,9 +198,17 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
               </DropdownMenuTrigger>
               <DropdownMenuContent side="right" align="start" className="w-64">
                 {omniDevices.length === 0 ? (
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                    未发现 OMNI Tool 设备
-                  </div>
+                  omniConnected ? (
+                    /* 列表滞后于会话（设备刚重枚举）：显示当前会话，避免误报"未发现" */
+                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                      当前会话：{omniSession.port}
+                      <span className="ml-1 opacity-70">（列表刷新中）</span>
+                    </div>
+                  ) : (
+                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                      未发现 OMNI Tool 设备
+                    </div>
+                  )
                 ) : (
                   omniDevices.map((d) => (
                     <DropdownMenuItem

@@ -77,6 +77,7 @@ interface OmniToolStore {
   busy: boolean
 
   refreshDevices: () => Promise<void>
+  refreshDevicesUntil: (personality: OmniPersonality, timeoutMs?: number) => Promise<boolean>
   selectPort: (port: string | null) => void
   connect: (port: string) => Promise<void>
   disconnect: () => Promise<void>
@@ -252,6 +253,20 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
     }
   },
 
+  /**
+   * 刷新设备列表，并重试直到出现目标人格的设备（设备刚复位/跳转时，
+   * USB 重新枚举有延迟，立刻扫描常扫不到，会导致列表为空但会话仍显示已连接）。
+   */
+  refreshDevicesUntil: async (personality: OmniPersonality, timeoutMs = 15000) => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      await get().refreshDevices()
+      const hit = get().devices.some((d) => d.personality === personality)
+      if (hit || Date.now() >= deadline) return hit
+      await new Promise((r) => setTimeout(r, 500))
+    }
+  },
+
   selectPort: (port) => set({ selectedPort: port }),
 
   connect: async (port) => {
@@ -386,11 +401,15 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
       log('info', '已下发 MODE_BOOT，等待设备重新枚举为 boot...')
       const boot = await waitForPersonality('boot')
       if (!boot) {
+        // 超时：app 端口已失效，必须显式断开，否则页面停留在死连接上
+        await get().disconnect()
         throw new Error('等待 boot 设备超时（请确认设备已复位并重新枚举）')
       }
       log('info', `boot 设备已就绪：${boot.port}`)
       await get().connect(boot.port)
       endOperation(true, '已进入 Bootloader', `boot 设备就绪：${boot.port}`)
+      // 设备刚重新枚举，列表可能还没刷新到位：重试直到扫到 boot 设备
+      await get().refreshDevicesUntil('boot')
     } catch (e) {
       const msg = omniToolErrorMessage(e)
       log('error', `进入 bootloader 失败：${msg}`)
@@ -431,7 +450,8 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
         endOperation(true, '升级完成', `${formatBytes(res.size)} 已写入，设备运行新固件`)
       }
 
-      await get().refreshDevices()
+      // 设备刚重新枚举，列表可能还没刷新到位：重试直到扫到 app 设备
+      await get().refreshDevicesUntil('app')
     } catch (e) {
       const msg = omniToolErrorMessage(e)
       log('error', `升级失败：${msg}`)
@@ -606,7 +626,8 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
         log('info', `app 已就绪：${app.port}`)
         endOperation(true, '已跳转到 App', `app 已就绪：${app.port}`)
       }
-      await get().refreshDevices()
+      // 设备刚重新枚举，列表可能还没刷新到位：重试直到扫到 app 设备
+      await get().refreshDevicesUntil('app')
     } catch (e) {
       const msg = omniToolErrorMessage(e)
       log('error', `跳转失败：${msg}`)
