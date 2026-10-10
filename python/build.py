@@ -107,6 +107,21 @@ HIDDEN_IMPORTS = [
     "core.database",
     "core.map_parser",
     "core.command_examples",
+    # OMNI Tool（多功能调试工具）后端模块
+    "omni_tools",
+    "omni_tools.router",
+    "omni_tools.session",
+    "omni_tools.device_finder",
+    "omni_tools.protocol.serial_link",
+    "omni_tools.protocol.modbus_rtu",
+    "omni_tools.protocol.boot_iap",
+    "omni_tools.protocol.app_cmd",
+    # pyserial（OMNI Tool 串口底座，serialwin32 为运行时动态导入，需显式声明）
+    "serial",
+    "serial.tools",
+    "serial.tools.list_ports",
+    "serial.tools.list_ports_windows",
+    "serial.serialwin32",
     # ELF 解析依赖
     "elftools.elf.elffile",
     "elftools.elf.sections",

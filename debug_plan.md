@@ -13,6 +13,7 @@
 ## 优化 Commander 页面功能
 
 ## 优化 RTT Viewer 页面功能
+1. [启动]按钮改到右侧配置栏
 
 ## 优化 Monitor 页面功能
 

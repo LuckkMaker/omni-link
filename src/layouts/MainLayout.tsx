@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen, Cpu } from 'lucide-react'
 import appIcon from '../../assets/images/icon.png'
 import { cn } from '@/lib/utils'
 import {
@@ -27,6 +27,7 @@ import { useBackendStatus } from '@/hooks/useBackendStatus'
 import { useProbeWs } from '@/hooks/useProbeWs'
 import { useRttSession } from '@/hooks/useRttSession'
 import { useProbeStore } from '@/stores/probe.store'
+import { useOmniToolStore } from '@/pages/omni-tool/store'
 import { resetApiClient } from '@/services/api'
 import { DeviceSwitcher } from '@/components/layout/DeviceSwitcher'
 import { InfoPanel } from '@/pages/flash/components/InfoPanel'
@@ -50,6 +51,9 @@ const navItems = [
   { to: '/settings', label: '设置', icon: Settings },
 ]
 
+// OMNI Tool：独立顶层入口，置于"工具"分组之上（不并入 /tools 子菜单）
+const omniToolItem = { to: '/omni-tool', label: 'Omni Tool', icon: Cpu }
+
 const toolsSubItems = [
   { to: '/tools/fault', label: 'Fault Analyzer', icon: AlertOctagon },
   { to: '/tools/map', label: 'Map Analyzer', icon: FileBarChart },
@@ -68,9 +72,12 @@ export default function MainLayout() {
   const [toolsExpanded, setToolsExpanded] = useState(isToolsActive)
 
   // ── 侧边栏自动折叠：目标设备连接后折叠为窄图标栏，断开后自动展开 ──
-  const isConnected = useProbeStore(
+  // 调试探针与 OMNI Tool 两类连接都视为"已连接"
+  const probeConnected = useProbeStore(
     (s) => s.probes.find((p) => p.uid === s.selectedUid)?.state === 'connected'
   )
+  const omniConnected = useOmniToolStore((s) => s.session.connected)
+  const isConnected = probeConnected || omniConnected
   const [sidebarOpen, setSidebarOpen] = useState(!isConnected)
   // 展开/收起只由显式点击触发（去掉边缘 hover，避免操作页面时鼠标扫过侧栏边误展开）
   const effectiveSidebarOpen = sidebarOpen
@@ -190,6 +197,20 @@ export default function MainLayout() {
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   ))}
+
+                  {/* OMNI Tool — 独立顶层入口（位于"工具"分组之上） */}
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      asChild
+                      isActive={location.pathname === omniToolItem.to}
+                      tooltip={omniToolItem.label}
+                    >
+                      <NavLink to={omniToolItem.to}>
+                        <omniToolItem.icon className="size-4" />
+                        <span>{omniToolItem.label}</span>
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
 
                   {/* 工具 — 可展开的二级菜单 */}
                   <SidebarMenuItem>
