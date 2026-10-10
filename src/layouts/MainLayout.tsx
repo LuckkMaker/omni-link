@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen, Cpu } from 'lucide-react'
+import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen, Box } from 'lucide-react'
 import appIcon from '../../assets/images/icon.png'
 import { cn } from '@/lib/utils'
 import {
@@ -52,7 +52,7 @@ const navItems = [
 ]
 
 // OMNI Tool：独立顶层入口，置于"工具"分组之上（不并入 /tools 子菜单）
-const omniToolItem = { to: '/omni-tool', label: 'Omni Tool', icon: Cpu }
+const omniToolItem = { to: '/omni-tool', label: 'Omni Tool', icon: Box }
 
 const toolsSubItems = [
   { to: '/tools/fault', label: 'Fault Analyzer', icon: AlertOctagon },

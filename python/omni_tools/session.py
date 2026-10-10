@@ -6,6 +6,7 @@
 单功能互斥：boot 与 app 是同一物理工具的两套固件人格，同一时刻只持有一条连接。
 """
 
+import base64
 import os
 import threading
 import time
@@ -43,10 +44,21 @@ _STAGE_SPAN = {
 
 
 def _percent(stage: str, current: int, total: int) -> float:
+    """升级闭环内各阶段的整体百分比（按分段权重累计）。"""
     base, span = _STAGE_SPAN.get(stage, (0.0, 0.0))
     frac = (current / total) if total > 0 else 1.0
     frac = max(0.0, min(1.0, frac))
     return round((base + span * frac) * 100, 1)
+
+
+def _percent_standalone(current: int, total: int) -> float:
+    """单步操作（Verify / Read Back）的百分比：独立走 0~100%，不复用升级分段权重。
+
+    否则独立校验只会落在 67%~98% 区间，既到不了 100%，也会与升级进度混淆。
+    """
+    frac = (current / total) if total > 0 else 1.0
+    frac = max(0.0, min(1.0, frac))
+    return round(frac * 100, 1)
 
 
 class OmniToolSession:
@@ -168,8 +180,7 @@ class OmniToolSession:
         if self._boot is None:
             raise OmniToolError("当前设备不是 bootloader（请先进入 boot 模式并连接 boot 串口）")
 
-        addr = address if address is not None else APP_DEFAULT_ADDRESS
-        data = self._load_bin(file_path)
+        data, addr = self._load_firmware(file_path, address)
         self._validate_range(data, addr)
 
         def report(stage: str, current: int, total: int, message: str) -> None:
@@ -234,8 +245,7 @@ class OmniToolSession:
     def download(self, file_path: str, address: Optional[int] = None) -> dict:
         with self._lock:
             boot = self._require_boot()
-            addr = address if address is not None else APP_DEFAULT_ADDRESS
-            data = self._load_bin(file_path)
+            data, addr = self._load_firmware(file_path, address)
             self._validate_range(data, addr)
             boot.download(data, addr, self._report)
             return {"success": True, "address": addr, "size": len(data)}
@@ -243,11 +253,34 @@ class OmniToolSession:
     def verify(self, file_path: str, address: Optional[int] = None) -> dict:
         with self._lock:
             boot = self._require_boot()
-            addr = address if address is not None else APP_DEFAULT_ADDRESS
-            data = self._load_bin(file_path)
+            data, addr = self._load_firmware(file_path, address)
             self._validate_range(data, addr)
-            ok, offset = boot.verify(data, addr, self._report)
+            ok, offset = boot.verify(data, addr, self._report_standalone)
             return {"verified": ok, "offset": offset, "address": addr, "size": len(data)}
+
+    def read_back(self, address: Optional[int] = None, size: Optional[int] = None) -> dict:
+        """回读设备 Flash，返回 base64 数据与地址（不落盘）。"""
+        with self._lock:
+            boot = self._require_boot()
+            addr = address if address is not None else APP_DEFAULT_ADDRESS
+            length = size if size is not None else 0
+            if length <= 0:
+                raise OmniToolError("请指定回读长度（size > 0）")
+            if length % FLASH_WRITE_ALIGN != 0:
+                raise OmniToolError(f"回读长度 {length} 未 4 字节对齐")
+            if addr % FLASH_WRITE_ALIGN != 0:
+                raise OmniToolError(f"起始地址 0x{addr:08X} 未 4 字节对齐")
+            if addr < APP_DEFAULT_ADDRESS or addr + length > APP_END_ADDRESS:
+                raise OmniToolError(
+                    f"回读范围越界（App 区 0x{APP_DEFAULT_ADDRESS:08X}~0x{APP_END_ADDRESS:08X}）"
+                )
+            data = boot.upload(addr, length, self._report_standalone, stage="read_back")
+            return {
+                "success": True,
+                "address": addr,
+                "size": length,
+                "data": base64.b64encode(data).decode("ascii"),
+            }
 
     def leave(self) -> dict:
         with self._lock:
@@ -265,6 +298,17 @@ class OmniToolSession:
             "percent": _percent(stage, current, total),
         })
 
+    @staticmethod
+    def _report_standalone(stage: str, current: int, total: int, message: str) -> None:
+        """单步操作的进度上报：百分比独立走 0~100%。"""
+        event_manager.emit("omni_tool.progress", {
+            "stage": stage,
+            "message": message,
+            "current": current,
+            "total": total,
+            "percent": _percent_standalone(current, total),
+        })
+
     # ---- 内部工具 ----
     def _require_link(self) -> None:
         if not self.connected:
@@ -277,17 +321,41 @@ class OmniToolSession:
         return self._boot
 
     @staticmethod
-    def _load_bin(file_path: str) -> bytes:
+    def _load_firmware(file_path: str, addr: Optional[int] = None) -> tuple[bytes, int]:
+        """读取固件镜像，返回 ``(数据, 实际起始地址)``。
+
+        - ``.bin``：不含地址，起始地址取 ``addr``（缺省 App 区起点）
+        - ``.hex``：Intel HEX 自带地址；未显式指定 ``addr`` 时采用文件内的起始地址
+          （忽略 HEX 里可能高于 App 区起点的 vector table 偏移，保证写入 App 区）
+        """
         if not file_path or not os.path.exists(file_path):
             raise OmniToolError(f"固件文件不存在: {file_path}")
         ext = os.path.splitext(file_path)[1].lower()
-        if ext != ".bin":
-            raise OmniToolError(f"仅支持 .bin 文件，当前: {ext or '无后缀'}")
-        with open(file_path, "rb") as f:
-            data = f.read()
+
+        if ext == ".hex":
+            # 延迟导入：复用 files 模块的 HEX 解析，保证与前端预览结果一致
+            from api.files import parse_intel_hex
+
+            parsed = parse_intel_hex(file_path)
+            raw = parsed.get("data", b"")
+            file_base = parsed.get("base_address", 0) or 0
+            if addr is not None and addr > 0:
+                # 显式指定地址：以文件内容为基准整体平移
+                shift = addr - file_base
+                data = (b"\xFF" * shift + raw) if shift > 0 else raw[-shift:]
+            else:
+                data = raw
+            target = addr if (addr is not None and addr > 0) else file_base
+        elif ext == ".bin":
+            with open(file_path, "rb") as f:
+                data = f.read()
+            target = addr if addr is not None else APP_DEFAULT_ADDRESS
+        else:
+            raise OmniToolError(f"仅支持 .bin / .hex 文件，当前: {ext or '无后缀'}")
+
         if not data:
             raise OmniToolError("固件文件为空")
-        return data
+        return data, target
 
     @staticmethod
     def _validate_range(data: bytes, addr: int) -> None:

@@ -51,6 +51,11 @@ class UpgradeRequest(BaseModel):
     address: Optional[int] = None
 
 
+class ReadBackRequest(BaseModel):
+    address: Optional[int] = None
+    size: Optional[int] = None
+
+
 @router.get("/omni-tool/devices")
 async def list_devices():
     """扫描串口，标注 OMNI Tool 设备人格（boot/app）。"""
@@ -149,6 +154,18 @@ async def leave():
     except Exception as e:  # noqa: BLE001
         logger.exception("omni-tool leave failed")
         raise HTTPException(status_code=500, detail=f"跳转失败: {e}")
+
+
+@router.post("/omni-tool/read-back")
+async def read_back(req: ReadBackRequest):
+    """回读设备 Flash（FC102），返回 base64 数据与地址，不落盘。"""
+    try:
+        return await asyncio.to_thread(session.read_back, req.address, req.size)
+    except _EXPECTED as e:
+        raise _fail(e)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("omni-tool read back failed")
+        raise HTTPException(status_code=500, detail=f"回读失败: {e}")
 
 
 @router.post("/omni-tool/upgrade")

@@ -80,6 +80,14 @@ export function omniToolErrorMessage(e: unknown): string {
   return ax.response?.data?.detail ?? (e instanceof Error ? e.message : String(e))
 }
 
+export interface OmniReadBackResult {
+  success: boolean
+  address: number
+  size: number
+  /** base64 编码的设备内容 */
+  data: string
+}
+
 /** OMNI Tool API 客户端（后端前缀 /api/omni-tool） */
 export const omniToolService = {
   async scan(): Promise<OmniScanResult> {
@@ -118,16 +126,6 @@ export const omniToolService = {
     return data
   },
 
-  async erase(address?: number, full = false): Promise<{ success: boolean; sectors: number[] }> {
-    const client = await api()
-    const { data } = await client.post(
-      '/api/omni-tool/erase',
-      { address, full },
-      { timeout: 0 } // 擦除按扇区耗时，不做前端超时
-    )
-    return data
-  },
-
   async upgrade(filePath: string, address?: number): Promise<OmniUpgradeResult> {
     const client = await api()
     const { data } = await client.post(
@@ -135,6 +133,37 @@ export const omniToolService = {
       { file_path: filePath, address },
       { timeout: 0 } // 擦除 + 下载 + 回读校验耗时可达数分钟
     )
+    return data
+  },
+
+  async verify(filePath: string, address?: number): Promise<{
+    verified: boolean
+    offset: number | null
+    address: number
+    size: number
+  }> {
+    const client = await api()
+    const { data } = await client.post(
+      '/api/omni-tool/verify',
+      { file_path: filePath, address },
+      { timeout: 0 } // 回读全量比对耗时较长
+    )
+    return data
+  },
+
+  async readBack(address: number, size: number): Promise<OmniReadBackResult> {
+    const client = await api()
+    const { data } = await client.post(
+      '/api/omni-tool/read-back',
+      { address, size },
+      { timeout: 0 } // 按 248B/帧回读，耗时随长度增长
+    )
+    return data
+  },
+
+  async leave(): Promise<{ success: boolean; address: number }> {
+    const client = await api()
+    const { data } = await client.post('/api/omni-tool/leave', {}, { timeout: 8000 })
     return data
   },
 }

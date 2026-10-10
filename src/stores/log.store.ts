@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { LogEvent } from '@shared/types'
 
 /** 日志来源筛选 */
-export type LogFilter = 'all' | 'monitor' | 'flash' | 'rtt' | 'commander' | 'zone' | 'system'
+export type LogFilter = 'all' | 'monitor' | 'flash' | 'rtt' | 'commander' | 'zone' | 'omni-tool' | 'system'
 
 /** 全局日志条目（带来源标记） */
 export interface GlobalLogEntry extends LogEvent {
@@ -29,6 +29,8 @@ function inferSource(message: string): string {
   if (msg.includes('Monitor')) return 'monitor'
   if (msg.includes('RTT')) return 'rtt'
   if (msg.includes('Commander')) return 'commander'
+  // 必须在 flash 之前判定：OMNI Tool 的升级日志含“固件/擦除/校验”等词
+  if (msg.includes('OMNI Tool') || msg.includes('OmniTool')) return 'omni-tool'
   if (['Zone', 'Debug', 'Session', 'ELF', 'Breakpoint', 'Register'].some((k) => msg.includes(k))) {
     return 'zone'
   }

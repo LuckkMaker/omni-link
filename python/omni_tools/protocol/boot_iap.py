@@ -143,7 +143,12 @@ class BootIAP:
             _emit(on_progress, "download", pos, total, f"下载 {pos}/{total} bytes")
 
     # ---- FC102 上传 ----
-    def upload(self, addr: int, length: int, on_progress: ProgressCallback = None) -> bytes:
+    def upload(self, addr: int, length: int, on_progress: ProgressCallback = None, stage: str = "verify") -> bytes:
+        """分块回读（FC102）。
+
+        ``stage`` 用于进度上报的阶段标签：升级闭环内为 ``verify``（回读校验），
+        单独回读时由调用方传入 ``read_back`` 以便前端区分。
+        """
         result = bytearray()
         pos = 0
         while pos < length:
@@ -157,7 +162,7 @@ class BootIAP:
                 raise IAPError(f"FC102 响应地址不匹配: 期望 0x{addr + pos:08X}, 收到 0x{raddr:08X}")
             result.extend(resp[4:])
             pos += n
-            _emit(on_progress, "verify", pos, length, f"校验 {pos}/{length} bytes")
+            _emit(on_progress, stage, pos, length, f"回读 {pos}/{length} bytes")
         return bytes(result)
 
     # ---- 校验 ----
