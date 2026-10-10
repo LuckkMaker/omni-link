@@ -114,6 +114,15 @@ if (-not $SkipBackend) {
     }
     $backendSizeMB = [math]::Round((Get-Item $backendExe).Length / 1MB, 1)
     Write-Host "[build] Backend exe: $backendExe ($backendSizeMB MB)" -ForegroundColor Green
+
+    # Verify CLI exe exists (随安装包分发，安装后可直接在终端使用 omni)
+    $cliExe = "$ProjectRoot\python\dist\omni.exe"
+    if (-not (Test-Path $cliExe)) {
+        Write-Host "ERROR: CLI executable not found at '$cliExe'" -ForegroundColor Red
+        exit 1
+    }
+    $cliSizeMB = [math]::Round((Get-Item $cliExe).Length / 1MB, 1)
+    Write-Host "[build] CLI exe: $cliExe ($cliSizeMB MB)" -ForegroundColor Green
 } else {
     Write-Host "[build] Skipping backend build." -ForegroundColor DarkGray
 }
@@ -164,7 +173,10 @@ if (-not $SkipFrontend) {
     # 如需恢复官方源，删除此环境变量即可。
     $env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
 
-    npx electron-builder --win 2>&1 | Tee-Object -Variable buildOutput
+    # --publish never：CI 环境（如设置了 CI / GITHUB_ACTIONS 变量）下 electron-builder
+    # 默认会触发隐式发布到 GitHub 并因缺少 GH_TOKEN 报错（安装包其实已生成，但退出码为 1）。
+    # 这里只产出本地安装包，明确禁用发布。
+    npx electron-builder --win --publish never 2>&1 | Tee-Object -Variable buildOutput
     Pop-Location
 
     # electron-builder may exit with non-zero on warnings; check for actual output

@@ -139,13 +139,15 @@ class PeripheralBackend:
                 for rng in ranges:
                     start = rng.base
                     end = rng.end_addr()
-                    count = end - start + 1
+                    # read_memory_block32 的 size 是 32 位字数：区间字节长度向上取整到字
+                    word_count = (rng.length + 3) // 4
                     # 只读取该区间内实际请求的地址（切块可能引入未请求地址）
                     wanted = [a for a in addresses if start <= a <= end]
                     try:
-                        data = target.read_memory_block32(start, count)
-                        for i, addr in enumerate(wanted):
-                            values.append({"address": addr, "value": data[addr - start]})
+                        data = target.read_memory_block32(start, word_count)
+                        for addr in wanted:
+                            # 寄存器按字节地址寻址，需换算成块内字索引
+                            values.append({"address": addr, "value": data[(addr - start) // 4]})
                     except Exception as e:
                         for addr in wanted:
                             errors.append({"address": addr, "error": str(e)})

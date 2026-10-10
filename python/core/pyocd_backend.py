@@ -489,8 +489,13 @@ class PyOCDBackend(BackendInterface):
             event_manager.emit("probe.disconnected", {"uid": probe_uid, "reason": "error"})
             return False
 
-    def disconnect(self, probe_uid: str) -> bool:
-        """断开探针"""
+    def disconnect(self, probe_uid: str, wait: bool = False, timeout: float = 8.0) -> bool:
+        """断开探针
+
+        wait=True 时等待后台关闭完成再返回（底层 USB/DLL 关闭可能耗时数秒），
+        确保返回时探针句柄已真正释放、立即对其他调试工具可用。前端保持默认
+        False 不阻塞 UI；CLI 断开时用 True 保证「断开即释放」。
+        """
         with self._lock:
             session_info = self._sessions.pop(probe_uid, None)
 
@@ -510,6 +515,8 @@ class PyOCDBackend(BackendInterface):
             t = threading.Thread(target=self._close_session,
                                  args=(probe_uid, session, close_event), daemon=True)
             t.start()
+            if wait:
+                self._wait_for_close(probe_uid, timeout)
 
         return True
 
@@ -1852,13 +1859,18 @@ class PyOCDBackend(BackendInterface):
 
     # ── 清理 ──────────────────────────────────────────────
 
-    def cleanup(self):
-        """关闭所有会话"""
+    def cleanup(self, wait: bool = True, timeout: float = 8.0):
+        """关闭所有会话。
+
+        wait=True 时等待每个会话的后台关闭完成，确保进程退出前探针（如 J-Link）
+        句柄已释放——否则后台关闭线程可能还没执行就随进程一起结束，导致 J-Link
+        残留在系统中。
+        """
         with self._lock:
             uids = list(self._sessions.keys())
 
         for uid in uids:
-            self.disconnect(uid)
+            self.disconnect(uid, wait=wait, timeout=timeout)
 
 
 # 全局单例

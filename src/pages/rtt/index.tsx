@@ -82,27 +82,38 @@ export default function RttPage() {
     }
   }, [uid, coreState, pushNotification])
 
-  // 目标设备控制：复位（后端会重新搜索 RTT 控制块）
+  // 目标设备控制：复位（仅复位芯片并运行固件）
+  const resetPendingRef = useRef(false)
   const handleReset = useCallback(async () => {
-    if (!uid) return
+    if (!uid || resetPendingRef.current) return // 防抖：避免连点并发多次复位
+    resetPendingRef.current = true
     const notifId = pushNotification({
       type: 'progress', title: '正在复位目标...',
-      message: '复位并重新初始化 RTT 控制块',
+      message: '复位芯片并运行固件',
     })
     try {
       const result = await rttService.deviceReset(uid, true)
       setCoreState(result.state === 'halted' ? 'halted' : 'running')
       useNotificationStore.getState().update(notifId, {
         type: 'success', title: '目标已复位',
-        message: 'RTT 控制块已重新初始化',
+        message: '目标芯片已复位并运行固件',
         autoClose: true, autoCloseDelay: 3000,
       })
     } catch (e) {
+      // 从 axios 错误响应中提取后端 HTTPException 的 detail 字段（后端 reset_target
+      // 会返回具体失败原因，如 J-Link 下 reset 抛的异常），否则只会看到通用的
+      // "Request failed with status code 400" 而无法定位根因。
+      const axiosErr = e as { response?: { data?: { detail?: string } }; message?: string }
+      const msg = axiosErr.response?.data?.detail ?? (e instanceof Error ? e.message : String(e))
       useNotificationStore.getState().update(notifId, {
-        type: 'error', title: '复位失败',
-        message: e instanceof Error ? e.message : String(e),
-        autoClose: true, autoCloseDelay: 5000,
+        type: 'error',
+        title: '复位失败',
+        message: msg,
+        autoClose: true,
+        autoCloseDelay: 8000,
       })
+    } finally {
+      resetPendingRef.current = false
     }
   }, [uid, pushNotification])
 
@@ -144,7 +155,8 @@ export default function RttPage() {
           className="relative min-h-0 flex-1 overflow-hidden"
           style={{ backgroundColor: terminalTheme.theme.background }}
         >
-          {isConnected ? (
+          {/* 终端：只要选中了探针就保持挂载，断开连接也不卸载，保留已接收数据显示在屏幕上 */}
+          {uid ? (
             <RttTerminal
               key={activeTabId}
               ref={terminalRef}
@@ -158,7 +170,7 @@ export default function RttPage() {
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <p style={{ color: terminalTheme.theme.foreground, opacity: 0.7 }}>
-                  {uid ? 'Link 未连接' : '请选择并连接 Link'}
+                  请选择并连接 Link
                 </p>
               </div>
             </div>

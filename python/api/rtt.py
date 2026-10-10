@@ -18,7 +18,15 @@ router = APIRouter()
 # 外部工具（如 Keil MDK）下载固件后，pyOCD session 的底层 SWD 通信可能
 # 处于异常状态，target.halt() 或内存读取会永久挂起。设此超时保护，
 # 确保前端不会一直卡在"RTT会话启动中"。
-RTT_START_TIMEOUT = 5.0
+# 注意：启动含低地址探测 + 可能的复位运行 + 控制块重搜，且 SWD 下全 RAM
+# 扫描本身较慢，超时需留够余量（与 RTT deviceReset 请求的 15s 一致）；
+# 启动流程已在 rtt_backend 内部串行化并做了快速探测，正常路径秒级返回。
+RTT_START_TIMEOUT = 15.0
+
+# 设备复位超时（秒）。复位仅 halt + reset +（可选）resume，
+# 正常情况下 1~2s 完成；此处用于防止 J-Link 等探针 reset 期间 SWD 挂起。
+# 小于前端 rttService.deviceReset 的 axios timeout（20s），确保后端先返回明确的 408。
+RTT_DEVICE_RESET_TIMEOUT = 12.0
 
 
 class RttStartRequest(BaseModel):
@@ -128,8 +136,7 @@ def rtt_send_text(uid: str, req: RttSendTextRequest):
 
 
 # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
-# 直接操作 CPU 内核状态，不影响 RTT 轮询线程。
-# 复位时会重新搜索 RTT 控制块，确保复位后数据流恢复正常。
+# 直接操作 CPU 内核状态（仅芯片复位），不影响 RTT 轮询线程，不做 RTT 控制块重搜。
 
 @router.post("/probes/{uid}/rtt/device/run")
 def rtt_device_run(uid: str):
@@ -150,11 +157,27 @@ def rtt_device_halt(uid: str):
 
 
 @router.post("/probes/{uid}/rtt/device/reset")
-def rtt_device_reset(uid: str, req: RttDeviceResetRequest):
-    """复位目标芯片并重新初始化 RTT 控制块"""
-    result = rtt_backend.reset_target(uid, run=req.run)
+async def rtt_device_reset(uid: str, req: RttDeviceResetRequest):
+    """仅复位目标芯片（run=True 时复位后运行固件）
+
+    与 rtt_start 一致，用 async + asyncio.wait_for 保护，防止 J-Link 等探针在
+    reset 期间 SWD 偶发挂起导致 endpoint 永不返回、前端收到无响应的
+    "Network Error"。超时转为明确的 408 提示。
+    """
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(rtt_backend.reset_target, uid, run=req.run),
+            timeout=RTT_DEVICE_RESET_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        msg = (f"RTT 复位超时（{int(RTT_DEVICE_RESET_TIMEOUT)}秒）。"
+               "可能是外部工具占用调试接口或 session 状态异常，"
+               "请断开并重新连接仿真器后重试")
+        event_manager.log("error", f"RTT: {msg}")
+        raise HTTPException(status_code=408, detail=msg)
+
     if not result["success"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Reset failed"))
+        raise HTTPException(status_code=400, detail=result.get("error") or "Reset failed")
     return result
 
 

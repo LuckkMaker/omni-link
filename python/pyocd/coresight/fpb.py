@@ -139,7 +139,8 @@ class FPB(BreakpointProvider, CoreSightComponent):
                     bp_match = (1 << 30)
                     if addr & 0x2:
                         bp_match = (2 << 30)
-                    comp = addr & 0x1ffffffc | bp_match | 1
+                    # FPBv1 FP_COMPn 每位比较器需自行置 ENABLE(bit31)，仅靠 FP_CTRL 全局使能不生效
+                    comp = (addr & 0x1ffffffc) | bp_match | 1 | 0x80000000
                 elif self.fpb_rev == 2:
                     comp = (addr & 0xfffffffe) | 1
                 self.ap.write32(bp.comp_register_addr, comp)

@@ -196,9 +196,16 @@ class SoftBreakpointHandler:
     def install(self):
         """订阅 HALTED 事件并启动 watcher 线程。"""
         try:
-            from pyocd.core.target import TargetEvent
-            if hasattr(self.target, "subscribe"):
-                self._unsub = self.target.subscribe(TargetEvent.HALTED, self._on_halted)
+            from pyocd.core.target import Target
+            # subscribe 定义在 Notifier（Session）上，CoreTarget 自身没有；
+            # 事件枚举为 Target.Event.POST_HALT（不存在 TargetEvent）。
+            session = getattr(self.target, "session", None)
+            if session is None or not hasattr(session, "subscribe"):
+                logger.warning("[soft_bp] 无法获取 session，软断点跳过不可用")
+                return
+            session.subscribe(self._on_halted, Target.Event.POST_HALT)
+            self._unsub = lambda: session.unsubscribe(
+                self._on_halted, Target.Event.POST_HALT)
         except Exception as e:
             logger.warning("[soft_bp] HALTED 订阅失败（软断点跳过不可用）: %s", e)
             return

@@ -16,7 +16,6 @@ import { rttService } from '@/services/rtt.service'
  */
 export function useRttSession() {
   const setRunning = useRttStore((s) => s.setRunning)
-  const reset = useRttStore((s) => s.reset)
   const appendTabData = useRttStore((s) => s.appendTabData)
   const addBytesReceived = useRttStore((s) => s.addBytesReceived)
   // RTT 会话状态日志进全局日志区（带 RTT 来源筛选）
@@ -50,9 +49,6 @@ export function useRttSession() {
       if (payload.uid !== uidRef.current) return
       setRunning(false)
       logEvent({ level: 'info', message: `RTT 会话已停止 (${payload.reason})`, timestamp: new Date().toISOString() })
-      if (payload.reason === 'disconnected') {
-        reset()
-      }
     })
 
     const unsubError = wsClient.on('rtt.error', (data: unknown) => {
@@ -95,7 +91,7 @@ export function useRttSession() {
       unsubError()
       unsubData()
     }
-  }, [selectedUid, setRunning, reset, logEvent, appendTabData, addBytesReceived])
+  }, [selectedUid, setRunning, logEvent, appendTabData, addBytesReceived])
 
   // 探针断开时停止 RTT（全局监听，不依赖页面挂载）
   const isConnected = useProbeStore((s) => {
@@ -107,7 +103,7 @@ export function useRttSession() {
     if (!isConnected && useRttStore.getState().running && selectedUid) {
       void rttService.stop(selectedUid).catch(() => {})
       setRunning(false)
-      reset()
+      // 注意：断开时不清空 Tab 缓冲，保留已接收数据显示在终端上
     }
-  }, [isConnected, selectedUid, setRunning, reset])
+  }, [isConnected, selectedUid, setRunning])
 }

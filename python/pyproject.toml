@@ -1,10 +1,21 @@
+# 本文件仅用于把内置的 pyOCD fork（python/pyocd/）打成 omni-pyocd 发行版，
+# 不包含 OMNI Link 后端（api/、core/、server.py、data/、flm/ 等）。
+#
+# 后端走的是另一条链路：python/build.py → omni-backend.spec（PyInstaller），
+# 开发与常规构建都不需要执行 pip install，pyocd 以源码形式经 sys.path 直接 import。
+# 详见 docs/tech/architecture.md（"pyOCD 源码内置 python/pyocd/，不通过 pip 安装"）。
+#
+# 注意：本文件保持在 python/ 根而非移入 python/pyocd/。pyocd 是 28 个包目录的多层包
+# 且带 package data（svd_data.zip 等），"项目根=包目录"需要逐包映射 package-dir 并重写
+# package-data 路径，且 packages.find 无法为包名加 pyocd. 前缀，故不适合该写法。
+
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "omni-pyocd"
-version = "0.44.1"
+version = "0.1.0"
 description = "OMNI-Link fork of pyOCD (pyocd) with extra builtin Geehy targets"
 requires-python = ">=3.8"
 dependencies = [
