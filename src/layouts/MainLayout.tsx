@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen, Box } from 'lucide-react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen, Box, Upload, Flame } from 'lucide-react'
 import appIcon from '../../assets/images/icon.png'
 import { cn } from '@/lib/utils'
 import {
@@ -28,6 +28,7 @@ import { useProbeWs } from '@/hooks/useProbeWs'
 import { useRttSession } from '@/hooks/useRttSession'
 import { useProbeStore } from '@/stores/probe.store'
 import { useOmniToolStore } from '@/pages/omni-tool/store'
+import { OMNI_TOOL_SECTIONS, isOmniToolPath } from '@/pages/omni-tool/sections'
 import { resetApiClient } from '@/services/api'
 import { DeviceSwitcher } from '@/components/layout/DeviceSwitcher'
 import { InfoPanel } from '@/pages/flash/components/InfoPanel'
@@ -52,7 +53,13 @@ const navItems = [
 ]
 
 // OMNI Tool：独立顶层入口，置于"工具"分组之上（不并入 /tools 子菜单）
+// 其下再分两个子功能：Boot（给自身刷固件）/ Flasher（在线烧录外部目标）
 const omniToolItem = { to: '/omni-tool', label: 'Omni Tool', icon: Box }
+const omniToolSubItems = OMNI_TOOL_SECTIONS.map((s) => ({
+  to: `/omni-tool/${s.id}`,
+  label: s.label,
+  icon: s.id === 'boot' ? Upload : Flame,
+}))
 
 const toolsSubItems = [
   { to: '/tools/fault', label: 'Fault Analyzer', icon: AlertOctagon },
@@ -63,6 +70,7 @@ const toolsSubItems = [
 
 export default function MainLayout() {
   const { status, port } = useBackendStatus()
+  const navigate = useNavigate()
   useProbeWs(port)
   useRttSession()  // 全局 RTT 会话管理（切换页面不停止）
 
@@ -70,6 +78,10 @@ export default function MainLayout() {
   const location = useLocation()
   const isToolsActive = location.pathname.startsWith('/tools')
   const [toolsExpanded, setToolsExpanded] = useState(isToolsActive)
+  // Omni Tool 二级菜单（Boot / Flasher）：在任一子页时高亮并展开
+  const isOmniActive = isOmniToolPath(location.pathname)
+  const isOmniSubActive = omniToolSubItems.some((i) => location.pathname === i.to)
+  const [omniExpanded, setOmniExpanded] = useState(isOmniActive)
 
   // ── 侧边栏自动折叠：目标设备连接后折叠为窄图标栏，断开后自动展开 ──
   // 调试探针与 OMNI Tool 两类连接都视为"已连接"
@@ -133,6 +145,13 @@ export default function MainLayout() {
       setToolsExpanded(true)
     }
   }, [isToolsActive])
+
+  // 路由变化到 Omni Tool 任一子页时自动展开其二级菜单
+  useEffect(() => {
+    if (isOmniActive) {
+      setOmniExpanded(true)
+    }
+  }, [isOmniActive])
 
   useEffect(() => {
     if (status) {
@@ -198,18 +217,64 @@ export default function MainLayout() {
                     </SidebarMenuItem>
                   ))}
 
-                  {/* OMNI Tool — 独立顶层入口（位于"工具"分组之上） */}
+                  {/* OMNI Tool — 独立顶层入口（位于"工具"分组之上），下挂 Boot / Flasher 两个子功能 */}
                   <SidebarMenuItem>
-                    <SidebarMenuButton
-                      asChild
-                      isActive={location.pathname === omniToolItem.to}
-                      tooltip={omniToolItem.label}
-                    >
-                      <NavLink to={omniToolItem.to}>
-                        <omniToolItem.icon className="size-4" />
-                        <span>{omniToolItem.label}</span>
-                      </NavLink>
-                    </SidebarMenuButton>
+                    {!effectiveSidebarOpen ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <SidebarMenuButton isActive={isOmniActive} collapseIconOnly={false}>
+                            <span className="relative flex items-center justify-center">
+                              <Box className="size-5 shrink-0" />
+                              <ChevronDown className="absolute -right-1.5 -bottom-1.5 size-3 rounded-sm bg-background text-muted-foreground shadow-sm" />
+                            </span>
+                          </SidebarMenuButton>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent side="right" align="start" className="w-48">
+                          {omniToolSubItems.map((item) => (
+                            <DropdownMenuItem key={item.to} asChild>
+                              <NavLink to={item.to}>
+                                <item.icon className="size-3.5" />
+                                <span>{item.label}</span>
+                              </NavLink>
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : (
+                      <>
+                        <SidebarMenuButton
+                          onClick={() => {
+                            // 点父项：未展开时先展开，再点才跳默认子页
+                            if (!omniExpanded) {
+                              setOmniExpanded(true)
+                            } else {
+                              navigate(omniToolItem.to)
+                            }
+                          }}
+                          isActive={isOmniActive}
+                        >
+                          <Box className="size-4" />
+                          <span className="flex-1 text-left">{omniToolItem.label}</span>
+                          <ChevronDown
+                            className={cn('size-4 transition-transform', omniExpanded && 'rotate-180')}
+                          />
+                        </SidebarMenuButton>
+                        {omniExpanded && (
+                          <SidebarMenuSub>
+                            {omniToolSubItems.map((item) => (
+                              <SidebarMenuSubItem key={item.to}>
+                                <SidebarMenuSubButton asChild isActive={location.pathname === item.to}>
+                                  <NavLink to={item.to}>
+                                    <item.icon className="size-3.5" />
+                                    <span>{item.label}</span>
+                                  </NavLink>
+                                </SidebarMenuSubButton>
+                              </SidebarMenuSubItem>
+                            ))}
+                          </SidebarMenuSub>
+                        )}
+                      </>
+                    )}
                   </SidebarMenuItem>
 
                   {/* 工具 — 可展开的二级菜单 */}

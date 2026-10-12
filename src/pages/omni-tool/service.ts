@@ -88,6 +88,28 @@ export interface OmniReadBackResult {
   data: string
 }
 
+/** 在线烧录可用性（后端 /api/omni-tool/flasher/status） */
+export interface OmniFlasherStatus {
+  /** 已连接 app 人格设备 */
+  available: boolean
+  personality: OmniPersonality
+  port: string | null
+  /** 单包负载上限（64B 协议包去掉 8B 头） */
+  max_payload: number
+  /** 支持的目标型号（由固件内置 FLM 决定） */
+  targets: string[]
+}
+
+/** 在线烧录结果 */
+export interface OmniFlasherResult {
+  success: boolean
+  /** 是否执行并通过了回读校验 */
+  verified: boolean
+  address: number
+  size: number
+  message: string
+}
+
 /** OMNI Tool API 客户端（后端前缀 /api/omni-tool） */
 export const omniToolService = {
   async scan(): Promise<OmniScanResult> {
@@ -164,6 +186,38 @@ export const omniToolService = {
   async leave(): Promise<{ success: boolean; address: number }> {
     const client = await api()
     const { data } = await client.post('/api/omni-tool/leave', {}, { timeout: 8000 })
+    return data
+  },
+
+  // ---- 在线烧录（外部目标 MCU） ----
+  async flasherStatus(): Promise<OmniFlasherStatus> {
+    const client = await api()
+    const { data } = await client.get('/api/omni-tool/flasher/status', { timeout: 8000 })
+    return data
+  },
+
+  async flasherFlash(
+    filePath: string,
+    opts: { address?: number; target?: string; erase?: boolean; verify?: boolean } = {}
+  ): Promise<OmniFlasherResult> {
+    const client = await api()
+    const { data } = await client.post(
+      '/api/omni-tool/flasher/flash',
+      {
+        file_path: filePath,
+        address: opts.address,
+        target: opts.target ?? 'stm32f407ig',
+        erase: opts.erase ?? true,
+        verify: opts.verify ?? true,
+      },
+      { timeout: 0 } // 整片擦除 + 分块写入 + 回读校验耗时可达数分钟
+    )
+    return data
+  },
+
+  async flasherRecover(): Promise<{ success: boolean; message: string }> {
+    const client = await api()
+    const { data } = await client.post('/api/omni-tool/flasher/recover', {}, { timeout: 20000 })
     return data
   },
 }

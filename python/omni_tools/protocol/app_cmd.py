@@ -1,13 +1,14 @@
 # OMNI Link - OMNI Tool app 命令通道
 # Copyright (c) 2026 LuckkMaker
 # SPDX-License-Identifier: MIT
-"""app 64B 小端命令通道（INFO / MODE）。
+"""app 64B 小端命令通道（INFO / MODE / FLASH）。
 
 协议见 ``omni_tool_app/docs/HOST_COMMANDS.md`` v0.2：
 
 - 请求 ``[0]=命令ID``，其后字段随命令而定；多字节字段 **小端 LE**。
 - INFO 响应 ``[0]=0x00 [1]=长度 [2..]=数据``（注意 ``[1]`` 是长度，不是状态码）。
 - MODE 响应 ``[0]=0x01 [1]=状态码``（``0x00`` 成功）。
+- FLASH 响应 ``[0]=0x20 [1]=状态码``，``READ`` 额外在 ``[2..]`` 追加数据。
 - ``MODE(BOOT=0xFF)`` 写 magic 后立即复位，**不回包**，须按"无响应 = 成功进入 boot"处理。
 """
 
@@ -19,6 +20,7 @@ from omni_tools.protocol.serial_link import SerialLink
 # 命令 ID
 CMD_INFO = 0x00
 CMD_MODE = 0x01
+CMD_FLASH = 0x20
 CMD_INVALID = 0xFF
 
 # INFO 子项
@@ -36,6 +38,17 @@ MODE_UART = 0x01
 MODE_DAP = 0x02
 MODE_FLASHER = 0x03
 MODE_BOOT = 0xFF
+
+# FLASH 子命令
+FLASH_OPEN = 0x00
+FLASH_WRITE = 0x01
+FLASH_ERASE_CHIP = 0x02
+FLASH_CLOSE = 0x03
+FLASH_READ = 0x04
+FLASH_RECOVER = 0x05
+
+# 单包负载上限：64B 包头占 [0]=cmd [1]=op [2..5]=addr [6..7]=size，共 8 字节
+FLASH_MAX_PAYLOAD = 64 - 8
 
 # 能力位
 CAP_GPIO = 1 << 0
@@ -96,10 +109,14 @@ class AppCmd:
             raise AppCmdError(f"INFO 数据不完整: 期望 {length} 字节, 收到 {len(data)}")
         return data
 
-    def mode(self, target: int) -> int:
-        """切换模式，返回状态码（0 = 成功）。"""
+    def mode(self, target: int, timeout: Optional[float] = None) -> int:
+        """切换模式，返回状态码（0 = 成功）。
+
+        ``timeout`` 用于需要更长的操作（如 ``MODE(FLASHER)`` 内部执行
+        ``svc_flasher_start`` → ``swd_init()`` 连接目标，不是瞬时返回）。
+        """
         self._send(bytes([CMD_MODE, target]))
-        head = self.link.read_exact(2, timeout=self.timeout)
+        head = self.link.read_exact(2, timeout=timeout or self.timeout)
         if len(head) < 2:
             raise AppCmdError("MODE 无响应")
         if head[0] == CMD_INVALID:
@@ -111,6 +128,79 @@ class AppCmd:
     def mode_boot(self) -> None:
         """写 magic 并软复位进 bootloader（固件不回包，随后 USB 重新枚举）。"""
         self._send(bytes([CMD_MODE, MODE_BOOT]))
+
+    # ---- FLASH（在线烧录，经 SWD 烧写外部目标 MCU） ----
+    def _flash(self, op: int, payload: bytes = b"", timeout: Optional[float] = None) -> int:
+        """下发 FLASH 子命令，返回状态码（0 = 成功）。
+
+        响应固定 2 字节（``READ`` 由 :meth:`flash_read` 单独处理）。
+        """
+        self._send(bytes([CMD_FLASH, op]) + payload)
+        head = self.link.read_exact(2, timeout=timeout or self.timeout)
+        if len(head) < 2:
+            raise AppCmdError("FLASH 无响应（设备可能已离线或不在 FLASHER 模式）")
+        if head[0] == CMD_INVALID:
+            raise AppCmdError("当前固件不支持 FLASH 命令")
+        if head[0] != CMD_FLASH:
+            raise AppCmdError(f"FLASH 响应异常 (id=0x{head[0]:02X})")
+        return head[1]
+
+    @staticmethod
+    def _check(status: int, op_name: str) -> None:
+        """非零状态码转成可读异常。"""
+        if status != 0:
+            raise AppCmdError(f"FLASH {op_name} 失败: {errno_str(status)}")
+
+    def mode_flasher(self, timeout: float) -> None:
+        """切换到 FLASHER 模式（执行 ``svc_flasher_start`` → SWD 连接目标）。"""
+        self._check(self.mode(MODE_FLASHER, timeout=timeout), "MODE(FLASHER)")
+
+    def mode_dap(self, timeout: Optional[float] = None) -> None:
+        """切换回 DAP（调试）模式，释放 SWD 给 omni-link 的 DAP 链路。"""
+        self._check(self.mode(MODE_DAP, timeout=timeout), "MODE(DAP)")
+
+    def flash_open(self, timeout: float) -> None:
+        """开启烧写会话：目标 halt + 装载 FLM + flash_manager 初始化。"""
+        self._check(self._flash(FLASH_OPEN, timeout=timeout), "OPEN")
+
+    def flash_erase_chip(self, timeout: float) -> None:
+        """整片擦除（只能在 ``OPEN`` 之后、``WRITE`` 之前）。"""
+        self._check(self._flash(FLASH_ERASE_CHIP, timeout=timeout), "ERASE")
+
+    def flash_close(self, timeout: float) -> None:
+        """结束会话：刷残留缓冲 + 复位目标运行。"""
+        self._check(self._flash(FLASH_CLOSE, timeout=timeout), "CLOSE")
+
+    def flash_recover(self, timeout: float) -> None:
+        """清场恢复：作废会话 + 硬复位目标 + 重建 SWD 链路 + 放开运行。"""
+        self._check(self._flash(FLASH_RECOVER, timeout=timeout), "RECOVER")
+
+    def flash_write(self, addr: int, data: bytes, timeout: float) -> None:
+        """写入一块（``len(data)`` ≤ :data:`FLASH_MAX_PAYLOAD`）。"""
+        if len(data) > FLASH_MAX_PAYLOAD:
+            raise AppCmdError(f"单包负载超限: {len(data)} > {FLASH_MAX_PAYLOAD}")
+        payload = struct.pack("<IH", addr, len(data)) + data
+        self._check(self._flash(FLASH_WRITE, payload, timeout=timeout), "WRITE")
+
+    def flash_read(self, addr: int, size: int, timeout: float) -> bytes:
+        """回读一块 flash（``size`` ≤ :data:`FLASH_MAX_PAYLOAD`），返回数据。"""
+        if size <= 0 or size > FLASH_MAX_PAYLOAD:
+            raise AppCmdError(f"单包读取长度非法: {size}（上限 {FLASH_MAX_PAYLOAD}）")
+        payload = struct.pack("<IH", addr, size)
+        self._send(bytes([CMD_FLASH, FLASH_READ]) + payload)
+        head = self.link.read_exact(2, timeout=timeout)
+        if len(head) < 2:
+            raise AppCmdError("FLASH READ 无响应")
+        if head[0] == CMD_INVALID:
+            raise AppCmdError("当前固件不支持 FLASH 命令")
+        if head[0] != CMD_FLASH:
+            raise AppCmdError(f"FLASH 响应异常 (id=0x{head[0]:02X})")
+        if head[1] != 0:
+            raise AppCmdError(f"FLASH READ 失败: {errno_str(head[1])}")
+        data = self.link.read_exact(size, timeout=timeout)
+        if len(data) < size:
+            raise AppCmdError(f"FLASH READ 数据不完整: 期望 {size} 字节, 收到 {len(data)}")
+        return data
 
     # ---- 语义封装 ----
     def read_device_info(self) -> dict:

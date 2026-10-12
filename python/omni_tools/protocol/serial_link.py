@@ -121,6 +121,11 @@ class SerialLink:
         """在 ``timeout`` 预算内读满 ``size`` 字节，提前结束则返回已读部分。
 
         与 ``read`` 的区别：超时为整段预算（非每字节），避免多字节响应被单次超时截断。
+
+        ``timeout`` 同时作为**首字节**与**字节间隔**的单次读超时上限：
+        固件执行完 FLM 再回包时（如整片擦除可达数十秒），若沿用建口时的
+        默认 ``timeout``（0.2s）会在数据尚未到达时就判定"无响应"。
+        因此这里以调用方给的预算为准，端口默认值仅在未传预算时兜底。
         """
         if self._ser is None:
             raise SerialLinkError("串口未打开")
@@ -130,12 +135,15 @@ class SerialLink:
         buf = bytearray()
         deadline = time.monotonic() + timeout
         try:
-            # 单次读的超时用剩余预算，保证总耗时不超过 timeout
+            # 单次读的超时用剩余预算，保证总耗时不超过 timeout；
+            # 上限取"调用方预算"而非端口默认值，否则慢响应会被误判为无响应
+            first = True
             while len(buf) < size:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                self._ser.timeout = min(old or 0.2, remaining)
+                self._ser.timeout = remaining if first else min(remaining, old or remaining)
+                first = False
                 chunk = self._ser.read(size - len(buf))
                 if not chunk:
                     break

@@ -104,27 +104,42 @@ class PyOCDBackend(BackendInterface):
         Windows 上 WinUSB 探针被 pyOCD 会话独占打开后，ConnectHelper 枚举会
         看不到它（详见 detect_probe_changes 注释）。因此这里把"正持有活动会话
         但仍插着的探针"补充进来，避免会话建立后探针从设备列表/拔出检测中消失。
+
+        线程安全：J-Link DLL 不是线程安全的（详见 core/jlink_lock.py）。若此刻
+        已有其他线程在调用 DLL（连接/烧录/调试可能持续数十秒），本轮不做枚举，
+        直接用缓存返回 —— 既不并发调用同一个 DLL，也不阻塞调用方
+        （后台探针监控线程每 2s 就会调用本函数一次）。
         """
         from pyocd.core.helpers import ConnectHelper
+        from core.jlink_lock import JLINK_DLL_LOCK
 
-        probes = ConnectHelper.get_all_connected_probes(blocking=False)
         result = []
         seen = set()
-        for probe in probes:
-            uid = probe.unique_id
-            seen.add(uid)
-            # 首次发现时缓存探针信息；已连接的探针 product_name 会变化，用缓存保持一致
-            if uid not in self._probe_info_cache:
-                info = ProbeInfo(
-                    uid=uid,
-                    vendor=probe.vendor_name or "Unknown",
-                    product=probe.product_name or "Unknown",
-                    vid=getattr(probe, 'vid', 0) or 0,
-                    pid=getattr(probe, 'pid', 0) or 0,
-                    serial=getattr(probe, 'serial_number', None) or uid,
-                )
-                self._probe_info_cache[uid] = info
-            result.append(self._probe_info_cache[uid])
+
+        if JLINK_DLL_LOCK.acquire(blocking=False):
+            try:
+                probes = ConnectHelper.get_all_connected_probes(blocking=False)
+                for probe in probes:
+                    uid = probe.unique_id
+                    seen.add(uid)
+                    # 首次发现时缓存探针信息；已连接的探针 product_name 会变化，用缓存保持一致
+                    if uid not in self._probe_info_cache:
+                        info = ProbeInfo(
+                            uid=uid,
+                            vendor=probe.vendor_name or "Unknown",
+                            product=probe.product_name or "Unknown",
+                            vid=getattr(probe, 'vid', 0) or 0,
+                            pid=getattr(probe, 'pid', 0) or 0,
+                            serial=getattr(probe, 'serial_number', None) or uid,
+                        )
+                        self._probe_info_cache[uid] = info
+                    result.append(self._probe_info_cache[uid])
+            finally:
+                JLINK_DLL_LOCK.release()
+        else:
+            # DLL 正被其他线程占用：用缓存信息应答，不做枚举（也绝不并发调用 DLL）
+            result.extend(self._probe_info_cache.values())
+            seen.update(self._probe_info_cache)
 
         # 补上"我们正持有活动会话、但被枚举隐藏"的探针（用缓存的初始信息）
         with self._lock:

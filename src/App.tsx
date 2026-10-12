@@ -5,7 +5,10 @@ import FlashPage from './pages/flash'
 import RttPage from './pages/rtt'
 import MonitorPage from './pages/monitor'
 import SettingsPage from './pages/settings'
-import OmniToolPage from './pages/omni-tool'
+import OmniToolLayout from './pages/omni-tool/layout'
+import OmniToolIndexPage from './pages/omni-tool'
+import BootPage from './pages/omni-tool/boot'
+import FlasherPage from './pages/omni-tool/flasher'
 import ToolsLayout from './pages/tools'
 import FaultAnalyzer from './pages/tools/fault-analyzer'
 import MapAnalyzer from './pages/tools/map-analyzer'
@@ -47,7 +50,12 @@ export default function App() {
           <Route path="/commander" element={null} />
           <Route path="/rtt" element={<RttPage />} />
           <Route path="/monitor" element={<MonitorPage />} />
-          <Route path="/omni-tool" element={<OmniToolPage />} />
+          {/* OMNI Tool：布局页承载两个子功能（Boot 自身升级 / Flasher 在线烧录） */}
+          <Route path="/omni-tool" element={<OmniToolLayout />}>
+            <Route index element={<OmniToolIndexPage />} />
+            <Route path="boot" element={<BootPage />} />
+            <Route path="flasher" element={<FlasherPage />} />
+          </Route>
           {/* Zone 页面由 MainLayout 通过 keep-alive 常驻渲染（切换页面不丢失内容与 UI 状态）。
               此占位路由让父布局能匹配 /zone 路径（element 为 null，Outlet 渲染空），
               实际内容由 MainLayout 内的 ZonePage 承载。 */}

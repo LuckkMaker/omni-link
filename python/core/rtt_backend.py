@@ -31,6 +31,69 @@ POLL_INTERVAL = 0.01
 RTT_OP_LOCK_WAIT = 6.0
 RTT_OP_LOCK_STALE_S = 15.0
 
+# ---- 控制块搜索参数 -------------------------------------------------------
+# SEGGER RTT 控制块的 16 字节标识（不足 16 字节时 SEGGER 用 \0 补齐）。
+# 必须按 16 字节完整比较：只比较 "SEGGER RTT" 这 10 字节会在控制块尚未初始化
+# （全 0）或 RAM 中恰好存在同名常量时产生误判。
+RTT_CB_ID = b'SEGGER RTT'
+RTT_CB_ID_LEN = 16
+# 4 字节粗扫魔数。用 'SEGG' 的整字（小端 0x47474553）做第一道过滤，
+# 命中后再回读确认完整标识——把每个候选的读放大从 16 字节降到一次 16 字节读。
+RTT_MAGIC = b'SEGG'
+# 一次 read_memory_block32 读取的字数。实测 16KB/次在 CMSIS-DAP v2 下吞吐最佳，
+# 再大（32KB）不会有额外收益（瓶颈在每字 0.13ms 的传输开销，而非 USB 往返）。
+RTT_SCAN_WORDS_PER_READ = 4096
+# 遇到坏块时二分下探的最小粒度（字）。到该粒度仍失败即判定为真实读失败，
+# 避免把"某段 RAM 读不动"静默当成"没有控制块"。
+RTT_SCAN_MIN_WORDS = 16
+
+# ELF 中 RTT 控制块的符号名。pyOCD 官方 rtt_manager 也用这个名字。
+# 固件加载 ELF 时优先用符号地址直接定位，可完全跳过 RAM 全扫描（192KB 全扫
+# 在 CMSIS-DAP 下约 6.5s，是启动超时的主要来源）。
+RTT_CB_SYMBOL = '_SEGGER_RTT'
+
+
+def _halted_location(uid: str) -> str:
+    """目标处于暂停态时，返回 "PC=0x... (symbol) LR=0x..." 形式的定位串。
+
+    "找不到控制块" 最常见的根因是固件在初始化 RTT 之前就挂了（断言死循环、
+    HardFault、PHY 初始化失败后 main 返回…）。只报 "未检测到控制块" 会把用户
+    引向扫描逻辑；带上 PC/LR 与符号就能一眼看出真正原因。
+    """
+    try:
+        session = backend._get_session(uid)
+        if not session:
+            return ""
+        target = session.target
+        pc = target.read_core_register('pc')
+        try:
+            lr = target.read_core_register('lr')
+        except Exception:
+            lr = None
+    except Exception:
+        return ""
+
+    text = f"目标当前 PC=0x{pc:08X}"
+    try:
+        from core.elf_backend import elf_backend
+        if elf_backend.is_loaded(uid):
+            info = elf_backend.get_symbol_for_address(uid, pc)
+            if info:
+                name = info.get('name') if isinstance(info, dict) else str(info)
+                if name:
+                    text += f" ({name})"
+            try:
+                line = elf_backend.get_line_for_address(uid, pc)
+                if line:
+                    text += f" @ {line.get('file')}:{line.get('line')}"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if lr is not None:
+        text += f"，LR=0x{lr:08X}"
+    return text
+
 
 class RTTBackend:
     """RTT 后端
@@ -149,6 +212,7 @@ class RTTBackend:
             # 而 RTT 控制块通常在主 SRAM 中。J-Link RTT Viewer 也是扫描所有已知 RAM 区域。
 
             # 诊断：目标状态
+            state = "unknown"
             try:
                 state = target.get_state()
                 event_manager.log("info", f"RTT: target state before search: {state}")
@@ -178,22 +242,32 @@ class RTTBackend:
             except Exception as e:
                 event_manager.log("warning", f"RTT: halt failed (will try anyway): {e}")
 
-            # 诊断：读取每个 RAM region 起始处的 32 字节
-            sig = b'SEGGER RTT'
-            for r in ram_regions:
-                try:
-                    probe_bytes = target.read_memory_block8(r.start, 32)
-                    hex_str = ' '.join(f'{b:02X}' for b in probe_bytes)
-                    event_manager.log("info", f"RTT: first 32 bytes @0x{r.start:08X}: {hex_str}")
-                    if sig in bytes(probe_bytes):
-                        offset = bytes(probe_bytes).find(sig)
-                        event_manager.log("info", f"RTT: signature found at offset {offset} "
-                                          f"(addr 0x{r.start + offset:08X})")
-                except Exception as e:
-                    event_manager.log("warning", f"RTT: diagnostic read @0x{r.start:08X} failed: {e}")
+            # 目标当前停在哪：这是"控制块不存在"时最有价值的信息。
+            # 以前这里 dump 每个 RAM region 前 32 字节，但控制块几乎从不落在
+            # region 起始处（本固件在 0x20000840，region 起始 0x20000000 完全是
+            # 别的东西），所以那几行 hex 只会把人引向错误方向。
+            event_manager.log("info", f"RTT: 目标状态 {state}，开始定位控制块")
 
             cb = None
             last_error = None
+            # ELF 符号已经确认控制块地址上是未初始化数据（固件没跑到 SEGGER_RTT_Init）
+            symbol_checked = False
+            # 记录每个 region 的扫描结论，失败时汇总成可执行的错误信息
+            scan_failures: list[str] = []
+
+            def _try_parse_at(addr: int, origin: str):
+                """在指定地址解析控制块；不成立则返回 None。"""
+                try:
+                    cb_obj = RTTControlBlock.from_target(target, address=addr, size=0)
+                    cb_obj.start()
+                    if len(cb_obj.up_channels) > 0:
+                        event_manager.log("info", f"RTT: 控制块已确认 @0x{addr:08X}（{origin}）")
+                        return cb_obj
+                    event_manager.log("warning", f"RTT: 0x{addr:08X} 处有 RTT 标识但无 up channel"
+                                      f"（{origin}），忽略")
+                except Exception as e:
+                    event_manager.log("warning", f"RTT: 解析 0x{addr:08X} 失败（{origin}）: {e}")
+                return None
 
             def _search_control_block(limit_bytes: Optional[int] = None):
                 """在所有 RAM region 中搜索 RTT 控制块
@@ -204,20 +278,32 @@ class RTTBackend:
                 字节（快速探测）；None 时完整扫描整个 region。
                 """
                 nonlocal last_error
+                del scan_failures[:]
 
                 # 用户指定了地址，只搜索指定范围
                 if address is not None:
                     event_manager.log("info", f"RTT: searching at specified address 0x{address:08X}"
                                       f"{f' size=0x{size:X}' if size else ''}...")
-                    try:
-                        cb_obj = RTTControlBlock.from_target(target, address=address, size=size)
-                        cb_obj.start()
-                        if len(cb_obj.up_channels) > 0:
-                            return cb_obj
-                        last_error = "No up channels found"
-                    except Exception as e:
-                        last_error = str(e)
-                        event_manager.log("warning", f"RTT: search at 0x{address:08X} failed: {e}")
+                    if size:
+                        res = self._fast_scan_region(target, address, size)
+                        hit = res["hit"]
+                        if res["candidates"]:
+                            for cand in res["candidates"]:
+                                cb_obj = _try_parse_at(cand, "用户指定范围内候选")
+                                if cb_obj is not None:
+                                    return cb_obj
+                        if hit is None:
+                            if not res["candidates"]:
+                                last_error = (f"用户指定范围 0x{address:08X} "
+                                              f"(size=0x{size:X}) 中未找到控制块")
+                            if res["failures"]:
+                                scan_failures.extend(res["failures"])
+                            return None
+                    cb_obj = _try_parse_at(address, "用户指定地址")
+                    if cb_obj is not None:
+                        return cb_obj
+                    if not last_error:
+                        last_error = f"用户指定地址 0x{address:08X} 处没有可用的控制块"
                     return None
 
                 # 自动模式：遍历所有 RAM region，用大块 read32 粗扫定位控制块
@@ -228,31 +314,69 @@ class RTTBackend:
                     scope = f"first {effective // 1024}KiB" if effective else "all"
                     event_manager.log("info", f"RTT: scanning RAM region 0x{r.start:08X} "
                                       f"(size=0x{r.length:X}, scope={scope})...")
-                    hit = self._fast_scan_region(target, r, max_bytes=effective)
-                    if hit is None:
-                        event_manager.log("info", f"RTT: no control block in region 0x{r.start:08X}")
-                        continue
-                    event_manager.log("info",
-                                      f"RTT: signature found @0x{hit:08X}, parsing control block...")
-                    try:
-                        cb_obj = RTTControlBlock.from_target(target, address=hit, size=0)
-                        cb_obj.start()
-                        if len(cb_obj.up_channels) > 0:
-                            event_manager.log("info",
-                                              f"RTT: control block found in region 0x{r.start:08X}")
-                            return cb_obj
-                    except Exception as e:
-                        event_manager.log("info",
-                                          f"RTT: parse control block @0x{hit:08X} failed: {e}")
-                last_error = "Control block not found in any RAM region"
+                    res = self._fast_scan_region(target, r, max_bytes=effective)
+                    for f in res["failures"]:
+                        event_manager.log("warning", f"RTT: {f}")
+                        scan_failures.append(f)
+                    if res["candidates"]:
+                        for cand in res["candidates"]:
+                            cb_obj = _try_parse_at(cand, f"region 0x{r.start:08X} 候选")
+                            if cb_obj is not None:
+                                return cb_obj
+                    if res["hit"] is None:
+                        event_manager.log("info", f"RTT: no control block in region 0x{r.start:08X}"
+                                          + (f"（{len(res['failures'])} 段读取失败）"
+                                             if res["failures"] else ""))
+                if scan_failures:
+                    last_error = ("控制块未找到，且以下 RAM 段无法读取：" +
+                                  "；".join(scan_failures[:4]))
+                else:
+                    last_error = "Control block not found in any RAM region"
                 return None
 
-            # 第0轮：低地址快速探测（每个 RAM region 前 64KB），覆盖"固件已在运行、
-            # RTT 已初始化"的常见场景。不要一上来就全 RAM 扫描——SWD 下 APM32F4
-            # 双 RAM 192KB 全扫约 6.5s，势必触发 5s 启动超时。
-            event_manager.log("info",
-                              "RTT: 先做低地址快速探测（每个 RAM region 前 64KB）...")
-            cb = _search_control_block(limit_bytes=0x10000)
+            # 第0优先：ELF 符号 _SEGGER_RTT。固件一般都把控制块放在 .bss 里，
+            # 符号地址是确定值，一次读就能确认——完全不需要扫 RAM。
+            # 这是把"192KB 全扫 6.5s"降成"1 次读 8ms"的关键优化。
+            if address is None:
+                sym_addr = None
+                try:
+                    from core.elf_backend import elf_backend
+                    if elf_backend.is_loaded(uid):
+                        sym_addr = elf_backend.get_symbol_address(uid, RTT_CB_SYMBOL)
+                except Exception as e:
+                    event_manager.log("info", f"RTT: 查询 {RTT_CB_SYMBOL} 符号失败: {e}")
+                if sym_addr:
+                    in_ram = any(r.start <= sym_addr < r.start + r.length for r in ram_regions)
+                    if in_ram:
+                        event_manager.log("info", f"RTT: ELF 符号 {RTT_CB_SYMBOL} = "
+                                          f"0x{sym_addr:08X}，直接校验...")
+                        try:
+                            head = bytes(target.read_memory_block8(sym_addr, RTT_CB_ID_LEN))
+                        except Exception as e:
+                            head = b''
+                            event_manager.log("warning",
+                                              f"RTT: 读符号地址 0x{sym_addr:08X} 失败: {e}")
+                        # 只比较 "SEGGER RTT" 这 10 字节：acID 是 16 字节数组，
+                        # 后面的字节依 SEGGER 版本/编译期 SEGGER_RTT_SECTION 处理方式
+                        # 可能是残留值（我们不比 16 字节，否则会漏掉真实控制块，
+                        # 只是额外多走一遍扫描）。完整结构交给 pyOCD 解析器校验。
+                        if head.startswith(RTT_CB_ID):
+                            cb = _try_parse_at(sym_addr, f"{RTT_CB_SYMBOL} 符号")
+                        elif head:
+                            event_manager.log("info",
+                                              f"RTT: 符号地址 0x{sym_addr:08X} 处不是已初始化的控制块"
+                                              f"（当前 acID={head!r}）——固件可能还没跑到 "
+                                              f"SEGGER_RTT_Init()")
+                            symbol_checked = True
+                    elif sym_addr:
+                        event_manager.log("info", f"RTT: 符号 {RTT_CB_SYMBOL}=0x{sym_addr:08X} "
+                                          f"不在任何 RAM region 内，跳过")
+
+            # 第1轮：低地址快速探测（每个 RAM region 前 16KB）。控制块就在 .bss 前部
+            # 时（绝大多数固件）这一步即可命中；16KB@28KB/s ≈ 0.6s，远快于原来的 64KB。
+            if cb is None:
+                event_manager.log("info", "RTT: 低地址快速探测（每个 RAM region 前 16KB）...")
+                cb = _search_control_block(limit_bytes=0x4000)
 
             # 探测未命中且目标处于暂停态：主场景（如"下载程序后未复位运行"）固件
             # 尚未初始化 RTT。单纯 resume 不会重跑启动代码，必须复位运行，让固件
@@ -263,7 +387,16 @@ class RTTBackend:
             except Exception:
                 # 无法读取目标状态时保守按暂停态处理，尝试复位运行
                 target_halted = True
-            if cb is None and target_halted:
+            # 已经通过 ELF 符号确认控制块地址上放着"未初始化的控制块"时，
+            # 说明固件根本没跑到 SEGGER_RTT_Init()（或者压根没在跑）。
+            # 此时反复复位运行只是在烧时间（实测每次复位+全扫约 8s，
+            # 两轮就是 17s），改用一次完整扫描确认即可。
+            if cb is None and target_halted and symbol_checked:
+                event_manager.log("info",
+                                  "RTT: 控制块地址上仍是未初始化数据，跳过复位重试，"
+                                  "只做一次完整扫描确认...")
+                cb = _search_control_block()
+            elif cb is None and target_halted:
                 event_manager.log("info",
                                   "RTT: 未找到控制块，执行【复位并运行】让固件初始化 RTT...")
                 reset_attempts = 0
@@ -304,10 +437,22 @@ class RTTBackend:
                 cb = _search_control_block()
 
             if cb is None or len(cb.up_channels) == 0:
+                # 失败时给出可执行的诊断：
+                #   1) 目标"当前停在哪"——固件在初始化 RTT 之前就挂住/跑飞时，
+                #      控制块永远不存在，扫描再久也没用。带上 PC+符号一眼可见。
+                #   2) 扫描过程中真实读不动的 RAM 段，而不是含糊的"未检测到控制块"。
                 reason = f"（{last_error}）" if last_error else ""
-                msg = ("未检测到 SEGGER RTT 控制块" + reason +
-                       "。已尝试复位并运行固件，但目标 RAM 中仍未找到 RTT 控制块，"
-                       "请确认固件已链接并初始化 SEGGER RTT 库（SEGGER_RTT_ConfigUpBuffer）。")
+                where = _halted_location(uid)
+                msg = ("未检测到 SEGGER RTT 控制块" + reason + "。")
+                if where:
+                    msg += f"{where}——"
+                    msg += ("若该地址停在死循环/异常处理里，说明固件尚未执行到 "
+                            "SEGGER_RTT_Init()，控制块还没被写进 RAM；"
+                            "请先确认固件能正常启动。")
+                else:
+                    msg += ("请确认固件已链接并初始化 SEGGER RTT 库"
+                            "（SEGGER_RTT_Init / SEGGER_RTT_ConfigUpBuffer），"
+                            "或在启动参数中显式指定控制块地址。")
                 event_manager.log("error", f"RTT: {msg}")
                 return {"success": False, "error": msg}
 
@@ -622,43 +767,88 @@ class RTTBackend:
             if acquired:
                 op_lock.release()
 
+    def _read_region_block32(self, target, addr: int, words: int, failures: list) -> list:
+        """读取 words 个字；遇到坏块时二分下探定位真正读不动的段。
+
+        返回实际读到的 (起始地址, 字列表) 列表——可能是 0/1/多段。
+        以前这里一遇异常就 `return None`，把"这段 RAM 读不动"静默当成
+        "没有控制块"，用户看到的却是"未检测到 SEGGER RTT 控制块"这种误导性提示。
+        现在把失败段记进 failures，调用方会原样报给用户。
+        """
+        try:
+            return [(addr, target.read_memory_block32(addr, words))]
+        except Exception as e:
+            if words <= RTT_SCAN_MIN_WORDS:
+                failures.append(f"0x{addr:08X}~0x{addr + words * 4:08X} 读取失败（{e}）")
+                return []
+            half = words // 2
+            if half <= 0:
+                return []
+            out = self._read_region_block32(target, addr, half, failures)
+            out += self._read_region_block32(target, addr + half * 4, words - half,
+                                             failures)
+            return out
+
     def _fast_scan_region(self, target, region, max_bytes: Optional[int] = None,
-                          magic: bytes = b'SEGG',
-                          control_block_id: bytes = b'SEGGER RTT') -> Optional[int]:
-        """在单个 RAM region 中快速定位 4 字节对齐的 RTT 控制块签名。
+                          magic: bytes = RTT_MAGIC,
+                          control_block_id: bytes = RTT_CB_ID) -> dict:
+        """在单个 RAM region（或任意地址区间）中快速定位 RTT 控制块。
 
         用大块 read_memory_block32 批量读取，在 host 侧匹配 'SEGG' 前缀
-        （小端 word），命中后再逐字节确认完整 'SEGGER RTT' 签名，返回控制块
-        地址或 None。相比 pyOCD 逐 1KB read_memory_block8 的 _find_control_block，
-        大幅减少 SWD 事务次数，避免大 RAM region 全量扫描超出 5s 启动窗口。
+        （小端 word）。命中后再按字内偏移还原真实起始地址并回读 16 字节确认
+        完整 'SEGGER RTT' 标识——所以控制块即使不是 4 字节对齐也能找到。
+
+        返回 {"hit": Optional[int], "candidates": list[int], "failures": list[str]}：
+          hit        第一个确认命中的控制块地址（兼容旧调用方）
+          candidates 在范围内确认带完整标识的候选地址列表
+          failures   读取失败的 RAM 段描述（调用方必须报出来，不能吞掉）
+
         max_bytes 非 None 时只扫描 region 起始 max_bytes（0 或 None 表示全扫）。
+        region 也可以是整数起始地址（此时 max_bytes 必须给出长度）。
         """
         magic_int = int.from_bytes(magic, 'little')  # b'SEGG' -> 0x47474553
-        start = region.start
-        span = region.length if (max_bytes is None or max_bytes <= 0) else min(max_bytes, region.length)
+        if isinstance(region, int):
+            start = region
+            if max_bytes is None:
+                raise ValueError("region 为整数地址时必须给出 max_bytes 作为长度")
+            span = max_bytes
+        else:
+            start = region.start
+            span = region.length if (max_bytes is None or max_bytes <= 0) \
+                else min(max_bytes, region.length)
         region_end = start + span
-        words_per_read = 4096                        # 一次读 16KB
-        cid_len = len(control_block_id)
+        cid_len = max(RTT_CB_ID_LEN, len(control_block_id))
+        failures: list = []
+        candidates: list = []
+        hit = None
+
         addr = start
         while addr < region_end:
-            n = min(words_per_read, (region_end - addr) // 4)
+            n = min(RTT_SCAN_WORDS_PER_READ, (region_end - addr) // 4)
             if n <= 0:
                 break
-            try:
-                words = target.read_memory_block32(addr, n)
-            except Exception:
-                return None
-            for i, w in enumerate(words):
-                if (w & 0xFFFFFFFF) == magic_int:
-                    hit = addr + i * 4
-                    try:
-                        raw = target.read_memory_block8(hit, cid_len)
-                        if bytes(raw) == control_block_id:
-                            return hit
-                    except Exception:
+            for base, words in self._read_region_block32(target, addr, n, failures):
+                for i, w in enumerate(words):
+                    if (w & 0xFFFFFFFF) != magic_int:
                         continue
+                    # 字内偏移：控制块可能不 4 字节对齐（0/1/2/3）
+                    for off in range(4):
+                        cand = base + i * 4 + off
+                        if cand < start or cand + cid_len > region_end:
+                            continue
+                        if cand in candidates:
+                            continue
+                        try:
+                            raw = bytes(target.read_memory_block8(cand, cid_len))
+                        except Exception as e:
+                            failures.append(f"0x{cand:08X} 候选确认读取失败（{e}）")
+                            continue
+                        if raw.startswith(control_block_id):
+                            candidates.append(cand)
+                            if hit is None:
+                                hit = cand
             addr += n * 4
-        return None
+        return {"hit": hit, "candidates": candidates, "failures": failures}
 
     def get_core_state(self, uid: str) -> dict:
         """查询目标内核状态"""

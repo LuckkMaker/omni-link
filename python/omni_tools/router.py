@@ -56,6 +56,14 @@ class ReadBackRequest(BaseModel):
     size: Optional[int] = None
 
 
+class FlasherFlashRequest(BaseModel):
+    file_path: str
+    address: Optional[int] = None
+    target: str = "stm32f407ig"
+    erase: bool = True
+    verify: bool = True
+
+
 @router.get("/omni-tool/devices")
 async def list_devices():
     """扫描串口，标注 OMNI Tool 设备人格（boot/app）。"""
@@ -181,6 +189,47 @@ async def upgrade(req: UpgradeRequest):
     except Exception as e:  # noqa: BLE001
         logger.exception("omni-tool upgrade failed")
         raise HTTPException(status_code=500, detail=f"升级失败: {e}")
+
+
+@router.get("/omni-tool/flasher/status")
+async def flasher_status():
+    """在线烧录可用性：是否已连接 app 设备、支持的目标型号、单包负载上限。"""
+    return await asyncio.to_thread(session.flasher_status)
+
+
+@router.post("/omni-tool/flasher/flash")
+async def flasher_flash(req: FlasherFlashRequest):
+    """在线烧录外部目标：MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE -> CLOSE
+    -> 重 OPEN -> READ 校验 -> CLOSE -> MODE(DAP)。
+
+    进度经 WebSocket ``omni_tool.progress`` 推送。整片擦除耗时可达数十秒。
+    """
+    try:
+        return await asyncio.to_thread(
+            session.flasher_flash,
+            req.file_path,
+            req.address,
+            req.target,
+            req.erase,
+            req.verify,
+        )
+    except _EXPECTED as e:
+        raise _fail(e)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("omni-tool flasher flash failed")
+        raise HTTPException(status_code=500, detail=f"在线烧录失败: {e}")
+
+
+@router.post("/omni-tool/flasher/recover")
+async def flasher_recover():
+    """清场恢复：作废会话 + 硬复位目标 + 重建 SWD 链路 + 放开运行。"""
+    try:
+        return await asyncio.to_thread(session.flasher_recover)
+    except _EXPECTED as e:
+        raise _fail(e)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("omni-tool flasher recover failed")
+        raise HTTPException(status_code=500, detail=f"恢复失败: {e}")
 
 
 def cleanup() -> None:

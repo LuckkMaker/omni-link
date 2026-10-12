@@ -171,19 +171,24 @@ def _get_jlink_devices() -> list[dict]:
         devices: list[dict] = []
         try:
             import pylink
-            jlink = pylink.JLink()
-            n = jlink.num_supported_devices()
-            for i in range(n):
-                d = jlink.supported_device(i)
-                devices.append({
-                    "name": d.name,
-                    "flash_size": int(getattr(d, "FlashSize", 0) or 0),
-                    "ram_size": int(getattr(d, "RAMSize", 0) or 0),
-                    "core": _dec_bytes(getattr(d, "Core", "")),
-                    "manufacturer": _dec_bytes(
-                        getattr(d, "manufacturer", None) or getattr(d, "sManu", "")
-                    ),
-                })
+            from core.jlink_lock import JLINK_DLL_LOCK
+            # J-Link DLL 非线程安全：这段要连打近万次 JLINKARM_DEVICE_GetInfo，
+            # 必须整段持锁，否则会与探针监控线程（每 2s 枚举）并发调用同一个 DLL，
+            # 触发原生访问违例（OSError: exception: access violation reading 0x...）。
+            with JLINK_DLL_LOCK:
+                jlink = pylink.JLink()
+                n = jlink.num_supported_devices()
+                for i in range(n):
+                    d = jlink.supported_device(i)
+                    devices.append({
+                        "name": d.name,
+                        "flash_size": int(getattr(d, "FlashSize", 0) or 0),
+                        "ram_size": int(getattr(d, "RAMSize", 0) or 0),
+                        "core": _dec_bytes(getattr(d, "Core", "")),
+                        "manufacturer": _dec_bytes(
+                            getattr(d, "manufacturer", None) or getattr(d, "sManu", "")
+                        ),
+                    })
         except Exception:
             devices = []
         _jlink_devices_cache = devices

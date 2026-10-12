@@ -6,6 +6,7 @@ import { ConnectionConfigDialog } from '@/components/ConnectionConfigDialog'
 import { Badge } from '@/components/ui/badge'
 import { HoverScrollText } from '@/components/HoverScrollText'
 import { omniPersonalityBadge } from '@/pages/omni-tool/service'
+import { isOmniToolPath } from '@/pages/omni-tool/sections'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -68,7 +69,7 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   // 默认跟随当前页面（/omni-tool 用 OMNI Tool，其余页面用调试探针）；
   // 点击设备控件前的图标可手动切换，路由变化时恢复"跟随页面"。
   const location = useLocation()
-  const routeSource: Source = location.pathname === '/omni-tool' ? 'omni' : 'probe'
+  const routeSource: Source = isOmniToolPath(location.pathname) ? 'omni' : 'probe'
   const [pinnedSource, setPinnedSource] = useState<Source | null>(null)
   const source = pinnedSource ?? routeSource
   useEffect(() => {

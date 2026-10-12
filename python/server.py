@@ -93,6 +93,11 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     event_manager.set_loop(loop)
 
+    # J-Link DLL 非线程安全：把所有 pylink.JLink 调用串行化。
+    # 必须在探针监控线程以及任何 API 请求之前安装（详见 core/jlink_lock.py）。
+    from core.jlink_lock import install_pylink_lock
+    install_pylink_lock()
+
     # 启动探针热插拔监控
     probe_monitor.start(loop)
 

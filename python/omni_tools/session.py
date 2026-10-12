@@ -10,13 +10,13 @@ import base64
 import os
 import threading
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from core.events import event_manager
 
 from omni_tools import device_finder
 from omni_tools.device_finder import PERSONALITY_APP, PERSONALITY_BOOT, PERSONALITY_UNKNOWN
-from omni_tools.protocol.app_cmd import AppCmd
+from omni_tools.protocol.app_cmd import FLASH_MAX_PAYLOAD, AppCmd, AppCmdError
 from omni_tools.protocol.boot_iap import (
     APP_DEFAULT_ADDRESS,
     APP_END_ADDRESS,
@@ -41,6 +41,51 @@ _STAGE_SPAN = {
     "verify": (0.67, 0.31),
     "leave": (0.98, 0.02),
 }
+
+# 在线烧录各阶段占整体进度的权重（base, span）
+# 整片擦除最慢（固件预算 180s），故占比最大。
+_FLASHER_STAGE_SPAN = {
+    "mode": (0.00, 0.02),
+    "open": (0.02, 0.03),
+    "erase": (0.05, 0.45),
+    "write": (0.50, 0.30),
+    "verify": (0.80, 0.18),
+    "close": (0.98, 0.02),
+}
+
+# 目标侧等待预算（秒）——对应固件 Kconfig CONFIG_FLASHER_*_TIMEOUT_MS，
+# 上位机略留余量，保证固件先回错误而不是上位机先超时。
+# 整片擦除固件预算 180s，但实际可能更久（1MB/2MB 擦除本身要十几秒起），
+# 这里给足 240s，避免上位机先放弃而固件还在擦。
+_FLASH_MODE_TIMEOUT = 10.0
+_FLASH_HALT_TIMEOUT = 5.0
+_FLASH_PROGRAM_TIMEOUT = 15.0
+_FLASH_ERASE_CHIP_TIMEOUT = 240.0
+
+
+class FlasherTarget(NamedTuple):
+    """在线烧录支持的目标芯片。
+
+    固件 ``FLASHER_PLAN`` 阶段 B（在线下发 FLM）尚未实现，FLM 由固件内置，
+    因此目标表只覆盖固件硬编码的型号。后续接入在线 FLM 后在此追加即可。
+    """
+
+    name: str
+    base: int
+    end: int
+
+
+FLASHER_TARGETS = (
+    FlasherTarget("stm32f407ig", 0x08000000, 0x08100000),
+)
+
+
+def _weighted(stage: str, current: int, total: int, table: dict) -> float:
+    """按分段权重累计出整体百分比。"""
+    base, span = table.get(stage, (0.0, 0.0))
+    frac = (current / total) if total > 0 else 1.0
+    frac = max(0.0, min(1.0, frac))
+    return round((base + span * frac) * 100, 1)
 
 
 def _percent(stage: str, current: int, total: int) -> float:
@@ -170,6 +215,175 @@ class OmniToolSession:
             # 设备即将复位，端口将消失；主动关闭以避免占用
             self._disconnect_locked()
             return {"success": True, "message": "已进入 bootloader，等待重新枚举"}
+
+    # ---- 在线烧录（app 作为 CMSIS-DAP / SWD 探针，烧外部目标 MCU） ----
+    def flasher_status(self) -> dict:
+        """查询在线烧录可用性：需连接 app 人格设备。"""
+        with self._lock:
+            return {
+                "available": self._app is not None,
+                "personality": self._personality,
+                "port": self._port,
+                "max_payload": FLASH_MAX_PAYLOAD,
+                "targets": [t.name for t in FLASHER_TARGETS],
+            }
+
+    def flasher_flash(
+        self,
+        file_path: str,
+        address: Optional[int] = None,
+        target: str = "stm32f407ig",
+        erase: bool = True,
+        verify: bool = True,
+    ) -> dict:
+        """在线烧录外部目标：MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE -> CLOSE
+        -> 重 OPEN -> READ 校验 -> CLOSE -> MODE(DAP)。
+
+        进度经 WebSocket ``omni_tool.progress`` 推送。
+        """
+        app = self._require_app()
+
+        flash = next((t for t in FLASHER_TARGETS if t.name == target), None)
+        if flash is None:
+            raise OmniToolError(f"不支持的目标型号: {target}")
+
+        # 目标镜像按「地址 + 数据」载入；.hex 自带地址，.bin 取指定/该型号 Flash 起点
+        data, addr = self._load_firmware(file_path, address, flash.base)
+        if addr < flash.base or addr + len(data) > flash.end:
+            raise OmniToolError(
+                f"镜像超出 {flash.name} Flash 区: 0x{addr:08X}+{len(data)} "
+                f"∉ 0x{flash.base:08X}~0x{flash.end:08X}"
+            )
+
+        def report(stage: str, current: int, total: int, message: str) -> None:
+            event_manager.emit("omni_tool.progress", {
+                "stage": stage,
+                "message": message,
+                "current": current,
+                "total": total,
+                "percent": _weighted(stage, current, total, _FLASHER_STAGE_SPAN),
+            })
+
+        with self._lock:
+            if self._busy:
+                raise OmniToolError("已有操作正在进行")
+            self._busy = True
+            name = os.path.basename(file_path)
+            session_opened = False
+            try:
+                event_manager.log("info", f"[OMNI Tool] 开始在线烧录 {name} "
+                                          f"({len(data)} bytes @ 0x{addr:08X})")
+
+                # 1) 切换 FLASHER 模式：固件执行 swd_init() 连接目标
+                report("mode", 0, 0, "切换 FLASHER 模式")
+                app.mode_flasher(_FLASH_MODE_TIMEOUT)
+
+                # 2) 开启会话：halt 目标 + 装载 FLM
+                report("open", 0, 0, "开启烧写会话")
+                app.flash_open(_FLASH_HALT_TIMEOUT)
+                session_opened = True
+
+                # 3) 可选整片擦除（必须在 WRITE 之前，绕过懒擦除记账）
+                if erase:
+                    report("erase", 0, 0, "整片擦除（可能需数十秒）")
+                    app.flash_erase_chip(_FLASH_ERASE_CHIP_TIMEOUT)
+
+                # 4) 分块写入（≤56B/包；FLASH_MANAGER 内部做扇区懒擦除）
+                report("write", 0, len(data), "写入目标 Flash")
+                written = 0
+                while written < len(data):
+                    chunk = data[written:written + FLASH_MAX_PAYLOAD]
+                    app.flash_write(addr + written, chunk, _FLASH_PROGRAM_TIMEOUT)
+                    written += len(chunk)
+                    report("write", written, len(data), f"已写入 {written}/{len(data)}")
+
+                # 5) 关闭会话：刷残留缓冲 + 复位目标运行
+                report("close", 0, 0, "关闭烧写会话")
+                app.flash_close(_FLASH_HALT_TIMEOUT)
+                session_opened = False
+
+                # 6) 回读校验：CLOSE 后目标在 RUN 态无法回读，必须重 OPEN 重新 halt
+                verified = False
+                first_mismatch: Optional[int] = None
+                if verify:
+                    report("verify", 0, len(data), "重新开启会话以回读校验")
+                    app.flash_open(_FLASH_HALT_TIMEOUT)
+                    session_opened = True
+                    read_total = 0
+                    while read_total < len(data):
+                        want = min(FLASH_MAX_PAYLOAD, len(data) - read_total)
+                        chunk = data[read_total:read_total + want]
+                        got = app.flash_read(addr + read_total, want, _FLASH_PROGRAM_TIMEOUT)
+                        if got != chunk:
+                            for i, (g, w) in enumerate(zip(got, chunk)):
+                                if g != w:
+                                    first_mismatch = read_total + i
+                                    break
+                            break
+                        read_total += want
+                        report("verify", read_total, len(data), f"已校验 {read_total}/{len(data)}")
+                    verified = first_mismatch is None and read_total >= len(data)
+                    app.flash_close(_FLASH_HALT_TIMEOUT)
+                    session_opened = False
+                    if verified:
+                        event_manager.log("info", "[OMNI Tool] 回读校验通过")
+                    else:
+                        where = (f"0x{addr + first_mismatch:08X}"
+                                 if first_mismatch is not None else "?")
+                        event_manager.log("error", f"[OMNI Tool] 回读校验失败 @ {where}")
+
+                # 7) 交还 SWD 给 DAP，避免占用调试链路
+                report("close", 0, 0, "切回 DAP 模式")
+                app.mode_dap(_FLASH_MODE_TIMEOUT)
+
+                if first_mismatch is not None:
+                    raise OmniToolError(
+                        f"回读校验失败（首个不一致位置 0x{addr + first_mismatch:08X}）"
+                    )
+
+                event_manager.log("info", "[OMNI Tool] 在线烧录完成")
+                return {
+                    "success": True,
+                    "verified": verified,
+                    "address": addr,
+                    "size": len(data),
+                    "message": "在线烧录完成",
+                }
+            except Exception:
+                # 失败即作废会话并重建 SWD 链路，让用户能直接重试而不必重插。
+                # 这里吞掉清场异常：不能因清场失败而盖掉真正的烧录错误。
+                if session_opened:
+                    try:
+                        app.flash_recover(_FLASH_HALT_TIMEOUT)
+                    except Exception:  # noqa: BLE001
+                        pass
+                try:
+                    app.mode_dap(_FLASH_MODE_TIMEOUT)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            finally:
+                self._busy = False
+
+    def flasher_recover(self) -> dict:
+        """显式恢复：作废会话 + 硬复位目标 + 重建 SWD 链路 + 放开运行。
+
+        仅在设备处于 FLASHER 模式时有意义：烧录失败会自动清场并切回 DAP，
+        此时手动 RECOVER 会收到固件的 ``ENODEV``（Flasher 未激活），属预期。
+        """
+        with self._lock:
+            app = self._require_app()
+            try:
+                app.flash_recover(_FLASH_HALT_TIMEOUT)
+            except AppCmdError as e:
+                if "0x13" in str(e):
+                    raise OmniToolError(
+                        "设备当前不在 FLASHER 模式（ENODEV），无需恢复。"
+                        "烧录失败时已自动清场，可直接重新烧录"
+                    ) from e
+                raise
+            event_manager.log("info", "[OMNI Tool] 已执行 RECOVER，目标已复位并重建 SWD 链路")
+            return {"success": True, "message": "已恢复，可重新开始烧录"}
 
     # ---- 升级（完整闭环） ----
     def upgrade(self, file_path: str, address: Optional[int] = None) -> dict:
@@ -320,13 +534,27 @@ class OmniToolSession:
             raise OmniToolError("当前设备不是 bootloader")
         return self._boot
 
+    def _require_app(self) -> AppCmd:
+        """取 app 命令通道；boot 设备无法烧外部目标（在线烧录只走 app 人格）。"""
+        self._require_link()
+        if self._app is None:
+            raise OmniToolError("在线烧录需连接 app 模式的 OMNI Tool（当前设备是 bootloader）")
+        return self._app
+
     @staticmethod
-    def _load_firmware(file_path: str, addr: Optional[int] = None) -> tuple[bytes, int]:
+    def _load_firmware(
+        file_path: str,
+        addr: Optional[int] = None,
+        default_address: int = APP_DEFAULT_ADDRESS,
+    ) -> tuple[bytes, int]:
         """读取固件镜像，返回 ``(数据, 实际起始地址)``。
 
-        - ``.bin``：不含地址，起始地址取 ``addr``（缺省 App 区起点）
+        - ``.bin``：不含地址，起始地址取 ``addr``（缺省 ``default_address``）
         - ``.hex``：Intel HEX 自带地址；未显式指定 ``addr`` 时采用文件内的起始地址
           （忽略 HEX 里可能高于 App 区起点的 vector table 偏移，保证写入 App 区）
+
+        ``default_address`` 区分两种用途：boot 自升级用 App 区起点，
+        在线烧录外部目标用目标芯片的 Flash 起点。
         """
         if not file_path or not os.path.exists(file_path):
             raise OmniToolError(f"固件文件不存在: {file_path}")
@@ -349,7 +577,7 @@ class OmniToolSession:
         elif ext == ".bin":
             with open(file_path, "rb") as f:
                 data = f.read()
-            target = addr if addr is not None else APP_DEFAULT_ADDRESS
+            target = addr if addr is not None else default_address
         else:
             raise OmniToolError(f"仅支持 .bin / .hex 文件，当前: {ext or '无后缀'}")
 

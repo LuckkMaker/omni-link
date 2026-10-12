@@ -46,12 +46,13 @@ export const rttService = {
   async start(uid: string, opts: RttStartOptions): Promise<RttStartResult> {
     const client = await api()
     const { data } = await client.post(`/api/probes/${uid}/rtt/start`, opts, {
-      // 20 秒超时（后端 RTT_START_TIMEOUT=15s + 5s 余量）：
-      // 后端启动流程含低地址探测 + 复位运行 + 控制块重搜，主场景耗时可到 10s+，
-      // 且后端只有真挂起时才会在 15s 返回 408。前端超时必须大于后端，
+      // 45 秒超时（后端 RTT_START_TIMEOUT=30s + 15s 余量）：
+      // 后端最坏路径 = 16KB 探测 + 两次(复位运行 + 全 RAM 扫描)，实测约 16s，
+      // 后端只有真挂起时才会在 30s 返回 408。前端超时必须大于后端，
       // 否则会把后端仍在正常进行的启动误判为失败（日志显示已找到/已启动，
       // 前端却弹"启动失败"）。
-      timeout: 20000,
+      // 正常路径（ELF 符号 _SEGGER_RTT 命中，或控制块在 .bss 前部）是亚秒级。
+      timeout: 45000,
     })
     return data
   },
