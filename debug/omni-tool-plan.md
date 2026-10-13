@@ -1,8 +1,9 @@
 # OMNI Tool 上位机功能开发计划
 
-> 状态：规划中（方案已确认，未开始编码）
+> 状态：**M1 / M2 已完成并在实机验证**（M3 预留，未实现）
 > 目标版本：omni-link 0.5.x
 > 关联固件：`omni-emb/applications/industrial/omni_tool_app`、`omni-emb/applications/industrial/omni_tool_boot`
+> 协议基线：`HOST_COMMANDS.md` **v0.3**（模式 B 镜像型）
 
 本文是给 **OMNI Tool（多功能调试工具）** 配套上位机功能的开发计划。上位机承载在 omni-link 内，以独立模块形式接入，不改动既有功能。
 
@@ -59,15 +60,18 @@ OMNI Tool 是运行在 STM32F407IG/H743II 上的多功能调试工具，支持 C
 | 命令 | ID | 本轮用途 |
 |---|---|---|
 | INFO | `0x00` | 读厂商/产品/固件版本/能力/包参数 |
-| MODE | `0x01` | 切模式；`0xFF`=BOOT（写 magic `0xABCD1234`@`0x20000000` + 复位） |
-| FLASH | `0x20` | 离线烧录（本轮不用） |
+| MODE | `0x01` | 切模式；`0x03`=FLASHER、`0x02`=DAP、`0xFF`=BOOT（写 magic `0xABCD1234`@`0x20000000` + 复位） |
+| FLASH | `0x20` | **在线烧录**（M2 已用）：模式 A `OPEN/WRITE/ERASE/CLOSE/READ/RECOVER` + 模式 B `OPEN_IMAGE/IMAGE_DATA/IMAGE_VERIFY` |
 | EXECUTE_COMMANDS | `0x7F` | 批量执行 |
 | QUEUE_COMMANDS | `0x7E` | 协议层排队标记 |
 
 - INFO 子项：`0x01` VENDOR、`0x02` PRODUCT、`0x03` SER_NUM（**固件为 TODO**）、`0x04` FW_VER、`0xF0` CAPABILITIES（**当前 `0x00 0x00`**）、`0xFE` PACKET_COUNT、`0xFF` PACKET_SIZE。
-- 错误码：`[1]` 为 `0x00` 成功，否则 `(uint8_t)(-errno)`（`0x05` EIO / `0x13` ENODEV / `0x16` EINVAL / `0x5F` ENOTSUP / `0x72` EALREADY）。
+- 错误码：`[1]` 为 `0x00` 成功，否则 `(uint8_t)(-errno)`。注意固件 `omni/errno.h` **不是 Linux 取值**：
+  `0x05` EIO / `0x13` ENODEV / `0x16` EINVAL / `0x4D` EBADMSG / `0x74` ETIMEDOUT /
+  `0x78` EALREADY / `0x86` ENOTSUP / `0x8A` EILSEQ。
+  （Linux 的 `ENOTSUP=95`、`EALREADY=114`、`ETIMEDOUT=110` 都是错的，别抄。）
 - `MODE(BOOT)` **不回包**即复位，上位机须按"无响应 = 成功进入 boot"处理。
-- 文档：`omni_tool_app/docs/HOST_COMMANDS.md`（v0.1）。
+- 文档：`omni_tool_app/docs/HOST_COMMANDS.md`（**v0.3**）。
 
 ### 2.3 omni-link 侧可复用能力
 
@@ -168,26 +172,49 @@ app(0x1001) 回归，读取版本确认升级成功
 4. 异常路径（拔线、无响应、地址越界、校验失败）均给出可读错误且不卡死。
 5. 源码态 + 安装版均可正常运行。
 
-### M2 — 在线烧录（已实现）
+### M2 — 在线烧录（已实现，协议 v0.3）
 
-把 omni_tool_app 当作 SWD 探针，经其 **CDC 命令通道**的 `FLASH(0x20)` 命令在线烧写**外部目标 MCU**：
+把 omni_tool_app 当作 SWD 探针，经其 **CDC 命令通道**的 `FLASH(0x20)` 命令在线烧写**外部目标 MCU**。
+
+**上位机统一走固件的镜像型会话**，`.hex` 与 `.bin` 一视同仁：
 
 ```
-MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE×N -> CLOSE
--> 重 OPEN -> READ×N 逐字节比对 -> CLOSE -> MODE(DAP)
+MODE(FLASHER) -> OPEN_IMAGE(base,crc32) -> IMAGE_DATA×N(<=60B/包) -> IMAGE_VERIFY -> CLOSE
+-> 重 OPEN -> READ×N(<=56B/包) 逐段比对 -> CLOSE -> MODE(DAP)
 ```
 
-> 实现说明（2026-10-12）：**与 M1 的 boot 自升级是两条独立链路**——M1 走 boot 固件的
-> Modbus RTU IAP（给工具自身刷固件），M2 走 app 固件的 64B 小端命令包（给外部目标烧固件）。
+固件保留的**地址型会话**（`OPEN`/`WRITE`）只用于两件事：**整片擦除清场**、**回读校验**。
 
-关键实现约束（对齐固件 `HOST_COMMANDS.md` v0.2）：
+| 命令 | 帧（LE） | 用途 |
+|---|---|---|
+| `OPEN_IMAGE(0x06)` | `0x20 0x06 \| base(4) \| crc32(4)` | 开镜像会话（`.hex` 忽略 base） |
+| `IMAGE_DATA(0x07)` | `0x20 0x07 \| len(2) \| bytes[<=60]` | 喂文件原始字节，可任意切分 |
+| `IMAGE_VERIFY(0x08)` | `0x20 0x08` | 校验整镜像 CRC32 |
+| `OPEN/WRITE/ERASE/CLOSE/READ/RECOVER` | 同 v0.2 | 清场（`ERASE` 仅此用）与回读校验 |
 
-- 单包负载 **≤ 56B**（64B 包减去 `[0]=cmd [1]=op [2..5]=addr [6..7]=size` 共 8B 头）。
+关键实现约束（对齐固件 `HOST_COMMANDS.md` v0.3）：
+
 - **回读校验必须重新 `OPEN`**：`CLOSE` 后目标进入 RUN 态，此时 `READ` 回 `EIO(0x05)`。
-- 任一子命令失败即**作废会话**，上位机须先 `RECOVER(0x05)` 或重新 `OPEN` 再继续。
-- 超时按目标侧分级预算（对应固件 `CONFIG_FLASHER_*_TIMEOUT_MS`，上位机略留余量）。
+- 任一子命令失败即**作废会话**，上位机须先 `RECOVER(0x05)` 或重新 `OPEN_IMAGE` 再继续。
+- 超时按目标侧分级预算（对应固件 `CONFIG_FLASHER_*_TIMEOUT_MS`，上位机略留余量）：
+  `MODE` 10s / halt 5s / 单包编程 15s / **整片擦除 240s**。
 - **目标型号仅 `stm32f407ig`**：固件 `FLASHER_PLAN` 阶段 B（在线下发 FLM）尚未实现，
   FLM 由固件内置；多型号需等固件支持在线下发 FLM 后再扩展上位机目标表。
+
+**为什么不用让用户选模式**（已核对固件 `stream_app.c` / `flash_decoder.c`）：
+`OPEN_IMAGE` 后固件自己判定格式（`.hex` 看记录前缀、`.bin` 看 NVIC 向量表）并解出地址，
+两者**最终都进同一个 `flash_manager_data()`**，即 `setup_next_sector()` 的**扇区懒擦除**。
+所以镜像模式**不需要主机下发任何擦除命令** —— 关掉整片擦除也能正确写入，
+这正是 `verify_flash.py --hex` 的行为。暴露模式选择只会让用户选错。
+
+**主机侧仍要先解一遍 hex**（与固件 `verify_flash.py` 同一定义），做三件事：
+拦坏文件（校验和 / 非 HEX 行 / 记录截断）、**强制记录地址递增**（固件按扇区懒擦除，
+回跳写已写扇区会擦掉已落盘数据）、算整镜像 CRC32（`zlib.crc32`，与固件 `image_crc.c`
+逐位实现一致）交给 `OPEN_IMAGE`。格式按**内容**嗅探而非扩展名。
+
+错误码 v0.3 把「文件有问题」与「链路有问题」分开，便于排查方向不用猜：
+`0x4D EBADMSG`（CRC 不符 / 非 BIN 非 HEX）、`0x8A EILSEQ`（hex 本身不合法）→ 查**文件**；
+`0x05 EIO` / `0x74 ETIMEDOUT` → 查**接线与供电**。
 
 ### M2 页面归属
 
@@ -196,7 +223,23 @@ MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE×N -> CLOSE
 | 路由 | 页面 | 内容 |
 |------|------|------|
 | `/omni-tool/boot` | Boot | 原 M1 功能：给工具自身刷固件（app → boot IAP） |
-| `/omni-tool/flasher` | Flasher | M2：在线烧录外部目标（选固件 / 整片擦除开关 / 回读校验开关 / 烧录 / RECOVER） |
+| `/omni-tool/flasher` | Flasher | M2：在线烧录外部目标（选固件 / 段与 CRC32 预览 / 整片擦除开关 / 回读校验开关 / 烧录 / RECOVER） |
+
+后端端点：`/api/omni-tool/flasher/{status, analyze, flash, recover}`。
+`analyze` **只解析不烧录**，供前端在选完文件后立刻显示"写到哪些地址、CRC32 是多少"。
+
+### M2 实机验收（OMNI-Tool v0.1.0 @ COM23，stm32f407ig 目标）
+
+| 场景 | 结果 |
+|---|---|
+| `GPIO_Toggle.hex`（对齐 `verify_flash.py --hex 0x08000000`） | ✅ 4104B，CRC32 `0xB9252999` 一致，逐字节一致，1.9s |
+| `omni.bin`（同样走镜像模式） | ✅ 14160B，CRC32 `0x0C12AEF2` 一致，逐字节一致，4.0s |
+| hex + 整片擦除（地址模式清场） | ✅ 通过 |
+| `omni.bin` + 整片擦除 | ✅ 通过 |
+| 坏 hex（校验和错误） | ✅ `analyze` 与 `flash` 均在开烧前拒绝 |
+| 二进制内容但扩展名 `.hex` | ✅ 正确当作 bin 镜像烧，不损坏镜像 |
+
+> 详细适配说明见 `docs/omni-tool-flasher.md`。
 
 ### M3 — 预留（本轮不实现）
 
@@ -253,11 +296,15 @@ MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE×N -> CLOSE
 
 | 资料 | 位置 |
 |---|---|
-| app 上位机指令文档 | `omni_tool_app/docs/HOST_COMMANDS.md` |
+| app 上位机指令文档（**协议 v0.3，模式 A/B**） | `omni_tool_app/docs/HOST_COMMANDS.md` |
+| 烧写参考脚本（`--hex` 走模式 B） | `omni_tool_app/verify_flash.py` |
+| hex/CRC32 主机侧自检 | `omni_tool_app/_selftest_hex.py` |
 | 离线烧录规划 | `omni_tool_app/docs/FLASHER_PLAN.md` |
 | app 开发路线图 | `omni_tool_app/docs/DEV_ROADMAP.md` |
 | boot IAP 测试工具与说明 | `omni_tool_boot/boot_iap_test.py`、`boot_iap_test_README.md` |
 | boot IAP 实现 | `omni_tool_boot/src/iap_app.c` |
 | app 命令路由实现 | `omni_tool_app/src/cmd_app.c`、`src/cmd_app.h` |
+| 模式 B 固件侧实现 | `omni_tool_app/src/svc_flasher.c`、`src/flasher/image_crc.c`、`src/flasher/intelhex.c` |
+| **在线烧录上位机适配说明** | `docs/omni-tool-flasher.md` |
 | omni-link 后端架构 | `docs/tech/architecture.md` |
 | omni-link 后端入口 | `python/server.py` |

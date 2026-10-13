@@ -1,10 +1,11 @@
 import { create } from 'zustand'
-import { parseFile, readFile } from '@/services/file.service'
+import { readFile } from '@/services/file.service'
 import { useLogStore } from '@/stores/log.store'
 import { useNotificationStore } from '@/stores/notification.store'
 import {
   omniToolErrorMessage,
   omniToolService,
+  type OmniFlasherSegment,
   type OmniFlasherStatus,
   type OmniProgress,
 } from './service'
@@ -16,12 +17,20 @@ const TARGET_FLASH_BASE = 0x08000000
 export interface FlasherImage {
   path: string
   title: string
+  /** 后端按内容嗅探出的真实格式（比扩展名可靠） */
   format: 'bin' | 'hex'
+  /** 文件原始字节数 */
+  fileSize: number
+  /** 解出的有效数据字节数（hex 通常远小于文件大小） */
   size: number
-  /** 起始地址：.bin 用目标 Flash 起点，.hex 用文件自带地址 */
+  /** 起始地址：hex 取文件自带首段地址，bin 用目标 Flash 起点 */
   address: number
   /** base64 数据，供 Hex 预览 */
   data: string | null
+  /** 地址段（hex 可能多段） */
+  segments: OmniFlasherSegment[]
+  /** 整镜像 CRC32（固件侧校验用） */
+  crc32: number
   loading: boolean
 }
 
@@ -29,6 +38,8 @@ export interface FlasherResult {
   address: number
   size: number
   verified: boolean
+  isHex: boolean
+  segments: number
 }
 
 interface FlasherStore {
@@ -38,7 +49,7 @@ interface FlasherStore {
   target: string
   /** 已加载的镜像（单文件：一次烧一个目标） */
   image: FlasherImage | null
-  /** 烧录选项 */
+  /** 烧录前先整片擦除（默认关：固件 flash manager 会做扇区懒擦除） */
   chipErase: boolean
   readbackVerify: boolean
   busy: boolean
@@ -92,7 +103,9 @@ export const useFlasherStore = create<FlasherStore>((set, get) => ({
   status: null,
   target: 'stm32f407ig',
   image: null,
-  chipErase: true,
+  // 默认不整片擦除：固件 flash manager 会做扇区懒擦除（跨扇区才擦），
+  // 与 verify_flash.py 的默认行为一致，也更快。
+  chipErase: false,
   readbackVerify: true,
   busy: false,
   lastResult: null,
@@ -138,28 +151,54 @@ export const useFlasherStore = create<FlasherStore>((set, get) => ({
       image: {
         path,
         title,
-        format: path.toLowerCase().endsWith('.hex') ? 'hex' : 'bin',
+        format: 'bin',
+        fileSize: 0,
         size: 0,
         address: TARGET_FLASH_BASE,
         data: null,
+        segments: [],
+        crc32: 0,
         loading: true,
       },
       lastResult: null,
     })
 
     try {
-      const [info, data] = await Promise.all([parseFile(path), readFile(path)])
-      // .hex 自带起始地址；.bin 不含地址，烧到目标 Flash 起点
-      const format: 'bin' | 'hex' = info.format === 'hex' ? 'hex' : 'bin'
-      const address = format === 'hex' ? (data.base_address || TARGET_FLASH_BASE) : TARGET_FLASH_BASE
+      // 后端按**内容**判定格式（扩展名不可靠），顺带做 hex 合法性校验与 CRC32 计算。
+      // 先 analyze 再读预览：analyze 失败说明文件本身有问题，别浪费一次读文件。
+      const info = await omniToolService.flasherAnalyze(path)
+      const data = await readFile(path)
+      const format: 'bin' | 'hex' = info.is_hex ? 'hex' : 'bin'
+      const address = info.segments[0]?.address ?? TARGET_FLASH_BASE
       set((s) =>
         s.image?.path === path
-          ? { image: { ...s.image, data: data.data, size: data.size, loading: false, format, address } }
+          ? {
+              image: {
+                ...s.image,
+                data: data.data,
+                format,
+                address,
+                fileSize: info.file_size,
+                size: info.total,
+                segments: info.segments,
+                crc32: info.crc32,
+                loading: false,
+              },
+            }
           : {}
       )
-      log('info', `已加载 ${title}（${formatBytes(data.size)}）@ ${formatHex(address)}`)
+      const segDesc =
+        info.segments.length > 1
+          ? `${info.segments.length} 段（${formatHex(address)} 起）`
+          : formatHex(address)
+      log(
+        'info',
+        `已加载 ${title}：${info.is_hex ? 'HEX 直烧（模式 B）' : 'BIN（模式 A）'}，` +
+          `${formatBytes(info.total)} @ ${segDesc}，CRC32=0x${info.crc32.toString(16).toUpperCase()}`
+      )
     } catch (e) {
-      log('error', `加载固件失败：${omniToolErrorMessage(e)}`)
+      const msg = omniToolErrorMessage(e)
+      log('error', `加载固件失败：${msg}`)
       set((s) => (s.image?.path === path ? { image: null } : {}))
     }
   },
@@ -191,12 +230,27 @@ export const useFlasherStore = create<FlasherStore>((set, get) => ({
         erase: chipErase,
         verify: readbackVerify,
       })
-      set({ lastResult: { address: res.address, size: res.size, verified: res.verified } })
-      log('info', `在线烧录完成：${formatBytes(res.size)} @ ${formatHex(res.address)}${res.verified ? '（校验通过）' : '（未校验）'}`)
+      set({
+        lastResult: {
+          address: res.address,
+          size: res.size,
+          verified: res.verified,
+          isHex: res.is_hex ?? image.format === 'hex',
+          segments: res.segments ?? image.segments.length,
+        },
+      })
+      log(
+        'info',
+        `在线烧录完成（${res.is_hex ? 'HEX' : 'BIN'} 镜像模式）：` +
+          `${formatBytes(res.size)} @ ${formatHex(res.address)}` +
+          `${res.verified ? '（校验通过）' : '（未校验）'}`
+      )
       useNotificationStore.getState().update(activeNotifId, {
         type: 'success',
         title: '烧录完成',
-        message: `${formatBytes(res.size)} @ ${formatHex(res.address)}${res.verified ? ' · 校验通过' : ''}`,
+        message:
+          `${formatBytes(res.size)} @ ${formatHex(res.address)}` +
+          `${res.verified ? ' · 校验通过' : ''}`,
         progress: 100,
         autoClose: true,
         autoCloseDelay: 4000,

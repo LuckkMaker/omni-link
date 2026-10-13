@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import { HexViewer } from '@/pages/flash/components/HexViewer'
+import { cn } from '@/lib/utils'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { useOmniToolStore } from './store'
 import { useFlasherStore } from './flasher.store'
@@ -141,7 +142,7 @@ export default function FlasherPage() {
       ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2">
-        {/* 配置卡片：目标型号 + 选项 */}
+        {/* 配置卡片：目标型号 + 烧写模式 + 选项 */}
         <div className="shrink-0 space-y-2 rounded-md border border-border p-3">
           <div className="flex items-center gap-2">
             <span className="text-xs font-medium">目标芯片</span>
@@ -151,6 +152,7 @@ export default function FlasherPage() {
             </span>
           </div>
 
+          {/* 烧录选项 */}
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
             <label className="flex items-center gap-2">
               <Switch
@@ -174,9 +176,13 @@ export default function FlasherPage() {
           </div>
 
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            关闭「整片擦除」时由固件 flash manager 做扇区懒擦除，速度更快；
-            开启后先整片擦除再写入，最稳妥。回读校验需在写完并 CLOSE 后**重新 OPEN**
-            再次 halt 目标，因此耗时约为写入的 0.6 倍。
+            bin 与 hex 一律走固件**镜像模式**（<code className="font-mono">OPEN_IMAGE</code>）：固件自己
+            判定格式并解出地址，hex 可直接烧，不用先转 bin。两种格式最终都进同一个 flash manager，
+            **扇区懒擦除由固件完成**（跨扇区才擦），所以关掉「整片擦除」也能正确写入。
+            开启整片擦除时会先用地址模式走一趟 <code className="font-mono">OPEN → ERASE → CLOSE</code> 清场，
+            耗时可达数十秒。
+            回读校验需在写完 <code className="font-mono">CLOSE</code> 后**重新 OPEN** 再次 halt 目标，
+            因此耗时约为写入的 0.6 倍。
           </p>
         </div>
 
@@ -204,7 +210,17 @@ export default function FlasherPage() {
                 {image.loading ? (
                   <Loader2 className="mr-1 inline size-3 animate-spin" />
                 ) : null}
-                {formatBytes(image.size)} @ {formatHex(image.address)}
+                {formatBytes(image.size)}
+                {image.format === 'hex' && image.fileSize !== image.size ? (
+                  <span className="ml-1 opacity-70">
+                    ({image.fileSize} B 文本)
+                  </span>
+                ) : null}
+                {' @ '}
+                {formatHex(image.address)}
+                {image.segments.length > 1 ? (
+                  <span className="ml-1 opacity-70">{image.segments.length} 段</span>
+                ) : null}
               </span>
               <Button
                 variant="ghost"
@@ -236,6 +252,29 @@ export default function FlasherPage() {
           </div>
         ) : null}
 
+        {/* 段信息与 CRC32（hex 可能多段；CRC32 是模式 B 的固件侧校验依据） */}
+        {image && !image.loading && image.segments.length > 0 ? (
+          <div className="shrink-0 rounded-md border border-border bg-muted/30 p-3 text-xs">
+            <div className="font-medium">镜像信息</div>
+            <div className="mt-1 space-y-0.5 text-muted-foreground">
+              {image.segments.slice(0, 8).map((s) => (
+                <div key={s.address}>
+                  段 {formatHex(s.address)} – {formatHex(s.address + s.size)}（
+                  {formatBytes(s.size)}）
+                </div>
+              ))}
+              {image.segments.length > 8 ? (
+                <div className="opacity-70">… 另有 {image.segments.length - 8} 段</div>
+              ) : null}
+              {image.crc32 ? (
+                <div className="font-mono">
+                  整镜像 CRC32 = 0x{image.crc32.toString(16).toUpperCase().padStart(8, '0')}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         {/* 上次结果 */}
         {lastResult ? (
           <div className="shrink-0 rounded-md border border-border bg-muted/30 p-3 text-xs">
@@ -244,7 +283,8 @@ export default function FlasherPage() {
               上次烧录成功
             </div>
             <div className="mt-1 text-muted-foreground">
-              {formatBytes(lastResult.size)} @ {formatHex(lastResult.address)}
+              {formatBytes(lastResult.size)} @ {formatHex(lastResult.address)} ·{' '}
+              {lastResult.isHex ? 'HEX' : 'BIN'} 镜像模式 · {lastResult.segments} 段
               {lastResult.verified ? ' · 回读校验通过' : ' · 未执行校验'}
             </div>
           </div>
@@ -261,11 +301,17 @@ export default function FlasherPage() {
             <div>固件：{image?.title ?? '未选择'}</div>
             <div>
               地址：{formatHex(image?.address ?? 0)} · {formatBytes(image?.size ?? 0)}
+              {image && image.segments.length > 1 ? ` · ${image.segments.length} 段` : ''}
+            </div>
+            <div>
+              方式：镜像模式（{image?.format === 'hex' ? 'HEX' : 'BIN'}，地址由固件解析）
             </div>
             <div className="mt-2">
               {chipErase
                 ? '将先整片擦除目标 Flash 再写入，耗时可能达数十秒以上。'
-                : '不做整片擦除，由固件按扇区懒擦除。'}
+                : '不做整片擦除，由固件按扇区懒擦除（跨扇区才擦）。'}
+              固件侧会校验整镜像 CRC32
+              {readbackVerify ? '，写完再回读逐字节比对' : '（本次未开启回读校验）'}。
               过程中请勿断开 SWD 或给目标断电。
             </div>
           </>

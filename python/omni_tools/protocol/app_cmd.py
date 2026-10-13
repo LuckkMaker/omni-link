@@ -46,23 +46,32 @@ FLASH_ERASE_CHIP = 0x02
 FLASH_CLOSE = 0x03
 FLASH_READ = 0x04
 FLASH_RECOVER = 0x05
+# 模式 B（镜像型，协议 v0.3）：地址由固件从文件内容解析，主机只递文件字节
+FLASH_OPEN_IMAGE = 0x06
+FLASH_IMAGE_DATA = 0x07
+FLASH_IMAGE_VERIFY = 0x08
 
 # 单包负载上限：64B 包头占 [0]=cmd [1]=op [2..5]=addr [6..7]=size，共 8 字节
 FLASH_MAX_PAYLOAD = 64 - 8
+# 模式 B 无地址字段，头占 [0]=cmd [1]=op [2..3]=len 共 4 字节，故比模式 A 多 4 字节
+FLASH_MAX_IMAGE_PAYLOAD = 64 - 4
 
 # 能力位
 CAP_GPIO = 1 << 0
 CAP_UART = 1 << 1
 
 # errno -> 名称（固件 omni/errno.h 取值，非 Linux）
+# 0x4D/0x8A 为 v0.3 模式 B 新增：把"文件有问题"与"链路有问题"分开
 ERRNO_NAME = {
     0x00: "OK",
     0x05: "EIO",
     0x13: "ENODEV",
     0x16: "EINVAL",
+    0x4D: "EBADMSG",
     0x74: "ETIMEDOUT",
     0x78: "EALREADY",
     0x86: "ENOTSUP",
+    0x8A: "EILSEQ",
 }
 
 
@@ -201,6 +210,35 @@ class AppCmd:
         if len(data) < size:
             raise AppCmdError(f"FLASH READ 数据不完整: 期望 {size} 字节, 收到 {len(data)}")
         return data
+
+    # ---- FLASH 模式 B（镜像型，协议 v0.3） ----
+    def flash_open_image(self, base: int, crc32: int, timeout: float) -> None:
+        """开启镜像会话：地址由固件从文件内容解析。
+
+        ``base`` 只对 ``.bin`` 有意义（``.hex`` 忽略）；``crc32`` 为期望的整镜像
+        CRC32，传 0 表示不做 CRC 校验。
+        """
+        payload = struct.pack("<II", base & 0xFFFFFFFF, crc32 & 0xFFFFFFFF)
+        self._check(
+            self._flash(FLASH_OPEN_IMAGE, payload, timeout=timeout),
+            "OPEN_IMAGE",
+        )
+
+    def flash_image_data(self, chunk: bytes, timeout: float) -> None:
+        """喂入一块**文件原始字节**（``len(chunk)`` ≤ :data:`FLASH_MAX_IMAGE_PAYLOAD`）。
+
+        无地址字段，可任意切分，不必对齐 hex 记录边界（固件解析器有状态、可跨包续解）。
+        """
+        if len(chunk) > FLASH_MAX_IMAGE_PAYLOAD:
+            raise AppCmdError(f"单包负载超限: {len(chunk)} > {FLASH_MAX_IMAGE_PAYLOAD}")
+        if not chunk:
+            raise AppCmdError("IMAGE_DATA 不接受空负载")
+        payload = struct.pack("<H", len(chunk)) + chunk
+        self._check(self._flash(FLASH_IMAGE_DATA, payload, timeout=timeout), "IMAGE_DATA")
+
+    def flash_image_verify(self, timeout: float) -> None:
+        """校验固件侧累加的整镜像 CRC32。"""
+        self._check(self._flash(FLASH_IMAGE_VERIFY, timeout=timeout), "IMAGE_VERIFY")
 
     # ---- 语义封装 ----
     def read_device_info(self) -> dict:

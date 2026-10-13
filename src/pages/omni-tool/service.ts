@@ -94,10 +94,42 @@ export interface OmniFlasherStatus {
   available: boolean
   personality: OmniPersonality
   port: string | null
-  /** 单包负载上限（64B 协议包去掉 8B 头） */
+  /** 模式 A 单包负载上限（64B 协议包减去 8B 头） */
   max_payload: number
+  /** 模式 B 单包负载上限（64B 减去 4B 头，无地址字段） */
+  max_image_payload: number
   /** 支持的目标型号（由固件内置 FLM 决定） */
   targets: string[]
+}
+
+/**
+ * 烧写模式说明（固件协议 v0.3）：
+ *
+ * 上位机**统一使用镜像型会话**（`OPEN_IMAGE` / `IMAGE_DATA` / `IMAGE_VERIFY`），
+ * `.hex` 与 `.bin` 都一样 —— 固件自己判定格式并解出地址，两者最终进同一个
+ * flash manager，**扇区懒擦除由固件完成**，主机无需下发擦除命令。
+ *
+ * 固件仍保留地址型会话（`OPEN` / `WRITE`），仅用于"先整片擦除再清场"这一步，
+ * 因为镜像型会话本身不支持 `ERASE`。
+ */
+
+/** 单个地址段（hex 可能有多个不连续段） */
+export interface OmniFlasherSegment {
+  address: number
+  size: number
+}
+
+/** 镜像分析结果：选完文件即可知道写到哪些地址、CRC32 是多少 */
+export interface OmniFlasherAnalyze {
+  /** 文件内容是否为 Intel HEX 文本 */
+  is_hex: boolean
+  /** 文件原始字节数 */
+  file_size: number
+  segments: OmniFlasherSegment[]
+  /** 解出的有效数据字节数 */
+  total: number
+  /** 整镜像 CRC32（传给固件做校验） */
+  crc32: number
 }
 
 /** 在线烧录结果 */
@@ -107,6 +139,12 @@ export interface OmniFlasherResult {
   verified: boolean
   address: number
   size: number
+  /** 文件是否为 HEX 文本 */
+  is_hex?: boolean
+  /** 写入的地址段数 */
+  segments?: number
+  /** 整镜像 CRC32 */
+  crc32?: number | null
   message: string
 }
 
@@ -198,7 +236,13 @@ export const omniToolService = {
 
   async flasherFlash(
     filePath: string,
-    opts: { address?: number; target?: string; erase?: boolean; verify?: boolean } = {}
+    opts: {
+      address?: number
+      target?: string
+      /** 烧录前先整片擦除（用地址型会话清场） */
+      erase?: boolean
+      verify?: boolean
+    } = {}
   ): Promise<OmniFlasherResult> {
     const client = await api()
     const { data } = await client.post(
@@ -207,10 +251,21 @@ export const omniToolService = {
         file_path: filePath,
         address: opts.address,
         target: opts.target ?? 'stm32f407ig',
-        erase: opts.erase ?? true,
+        erase: opts.erase ?? false,
         verify: opts.verify ?? true,
       },
       { timeout: 0 } // 整片擦除 + 分块写入 + 回读校验耗时可达数分钟
+    )
+    return data
+  },
+
+  /** 只解析不烧录：预览会用哪个模式、写到哪些地址、CRC32 是多少 */
+  async flasherAnalyze(filePath: string, address?: number): Promise<OmniFlasherAnalyze> {
+    const client = await api()
+    const { data } = await client.post(
+      '/api/omni-tool/flasher/analyze',
+      { file_path: filePath, address },
+      { timeout: 20000 } // 大 hex 解析需时
     )
     return data
   },

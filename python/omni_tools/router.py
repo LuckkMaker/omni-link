@@ -60,8 +60,13 @@ class FlasherFlashRequest(BaseModel):
     file_path: str
     address: Optional[int] = None
     target: str = "stm32f407ig"
-    erase: bool = True
+    erase: bool = False
     verify: bool = True
+
+
+class FlasherAnalyzeRequest(BaseModel):
+    file_path: str
+    address: Optional[int] = None
 
 
 @router.get("/omni-tool/devices")
@@ -197,10 +202,30 @@ async def flasher_status():
     return await asyncio.to_thread(session.flasher_status)
 
 
+@router.post("/omni-tool/flasher/analyze")
+async def flasher_analyze(req: FlasherAnalyzeRequest):
+    """只解析不烧录：返回该文件的地址段与 CRC32。
+
+    供前端在选完文件后立刻显示，避免点了烧录才发现镜像有问题。
+    """
+    try:
+        return await asyncio.to_thread(session.flasher_analyze, req.file_path, req.address)
+    except _EXPECTED as e:
+        raise _fail(e)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("omni-tool flasher analyze failed")
+        raise HTTPException(status_code=500, detail=f"解析失败: {e}")
+
+
 @router.post("/omni-tool/flasher/flash")
 async def flasher_flash(req: FlasherFlashRequest):
-    """在线烧录外部目标：MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE -> CLOSE
-    -> 重 OPEN -> READ 校验 -> CLOSE -> MODE(DAP)。
+    """在线烧录外部目标（统一走固件镜像型会话）。
+
+    ``.hex`` 与 ``.bin`` 都用 ``OPEN_IMAGE``：固件自己判定格式并解出地址，
+    两者最终进同一个 flash manager，**扇区懒擦除由固件完成**，主机无需下发擦除命令。
+
+    ``erase=true`` 时先用地址型会话走一趟 ``OPEN -> ERASE -> CLOSE`` 清场，
+    再进镜像会话（镜像会话本身不支持 ``ERASE``）。
 
     进度经 WebSocket ``omni_tool.progress`` 推送。整片擦除耗时可达数十秒。
     """

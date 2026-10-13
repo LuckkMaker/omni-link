@@ -10,13 +10,19 @@ import base64
 import os
 import threading
 import time
+import zlib
 from typing import NamedTuple, Optional
 
 from core.events import event_manager
 
 from omni_tools import device_finder
 from omni_tools.device_finder import PERSONALITY_APP, PERSONALITY_BOOT, PERSONALITY_UNKNOWN
-from omni_tools.protocol.app_cmd import FLASH_MAX_PAYLOAD, AppCmd, AppCmdError
+from omni_tools.protocol.app_cmd import (
+    FLASH_MAX_IMAGE_PAYLOAD,
+    FLASH_MAX_PAYLOAD,
+    AppCmd,
+    AppCmdError,
+)
 from omni_tools.protocol.boot_iap import (
     APP_DEFAULT_ADDRESS,
     APP_END_ADDRESS,
@@ -78,6 +84,95 @@ class FlasherTarget(NamedTuple):
 FLASHER_TARGETS = (
     FlasherTarget("stm32f407ig", 0x08000000, 0x08100000),
 )
+
+
+# ---------------------------- 主机侧 Intel HEX 解析 ----------------------------
+# 用于模式 B 的"先解一遍"：校验和/地址递增在主机侧就拦下来，同时拿到
+# 回读校验用的地址段与整镜像 CRC32。固件侧另有一份（src/flasher/intelhex.c）。
+
+
+def looks_like_ihex(blob: bytes) -> bool:
+    """内容嗅探：跳过前导空白后以 ``:`` 开头即 Intel HEX 文本。
+
+    按扩展名判断不可靠（有的工程把 hex 存成 .txt 或干脆没有扩展名），所以看内容。
+    """
+    return blob.lstrip(b"\r\n\t\v\f ").startswith(b":")
+
+
+def parse_ihex(blob: bytes) -> list[tuple[int, bytes]]:
+    """解析 Intel HEX，返回按地址升序、已合并的 ``[(起始地址, bytes), ...]``。
+
+    顺带校验每行校验和，并**强制记录地址递增** —— 固件侧 flash manager 按扇区懒擦除，
+    回头写更早的扇区会先把它擦掉，导致已落盘的数据丢失。必须在主机侧就报错，
+    不能让它静默丢数据（固件 ``HOST_COMMANDS.md`` v0.3 §3.4.2 的明确要求）。
+    """
+    segs: list[tuple[int, bytearray]] = []
+    base = 0  # 扩展地址基址
+
+    try:
+        text = blob.decode("ascii")
+    except UnicodeDecodeError as e:
+        raise OmniToolError(f"不是 ASCII 文本，无法作为 Intel HEX: {e}") from e
+
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith(":"):
+            raise OmniToolError(f"第 {lineno} 行不是 HEX 记录: {line[:16]!r}")
+        try:
+            rec = bytes.fromhex(line[1:])
+        except ValueError as e:
+            raise OmniToolError(f"第 {lineno} 行含非十六进制字符: {e}") from e
+        if len(rec) < 5:
+            raise OmniToolError(f"第 {lineno} 行记录过短")
+        if len(rec) != rec[0] + 5:
+            raise OmniToolError(f"第 {lineno} 行数据长度与 byte count 不符")
+
+        count = rec[0]
+        addr = (rec[1] << 8) | rec[2]
+        rtype = rec[3]
+        payload = rec[4:4 + count]
+        if (sum(rec) & 0xFF) != 0:
+            raise OmniToolError(f"第 {lineno} 行校验和错误")
+
+        if rtype == 0x00:  # 数据记录
+            full = base + addr
+            if segs and full < segs[-1][0] + len(segs[-1][1]):
+                raise OmniToolError(
+                    f"第 {lineno} 行地址 0x{full:08X} 回退到已写区间：固件按扇区懒擦除，"
+                    "回头写会把已写数据擦掉，请先把镜像整理成地址递增"
+                )
+            if segs and full == segs[-1][0] + len(segs[-1][1]):
+                segs[-1][1].extend(payload)  # 与上一段相邻，合并
+            else:
+                segs.append((full, bytearray(payload)))
+        elif rtype == 0x01:  # EOF
+            break
+        elif rtype == 0x02:  # 扩展段地址
+            base = ((payload[0] << 8) | payload[1]) << 4
+        elif rtype == 0x04:  # 扩展线性地址
+            base = ((payload[0] << 8) | payload[1]) << 16
+        elif rtype in (0x03, 0x05):  # 起始地址记录，忽略
+            pass
+        else:
+            raise OmniToolError(f"第 {lineno} 行未知记录类型 0x{rtype:02X}")
+
+    if not segs:
+        raise OmniToolError("HEX 文件里没有数据记录")
+    return [(a, bytes(d)) for a, d in segs]
+
+
+def image_crc32(segs: list[tuple[int, bytes]]) -> int:
+    """整镜像 CRC32：按地址递增顺序覆盖所有解出的数据字节（不含段间间隙）。
+
+    与固件 ``src/flasher/image_crc.c`` 同一定义（标准 CRC-32 / IEEE 802.3），
+    所以直接用 ``zlib.crc32``。
+    """
+    crc = 0
+    for _, data in segs:
+        crc = zlib.crc32(data, crc)
+    return crc & 0xFFFFFFFF
 
 
 def _weighted(stage: str, current: int, total: int, table: dict) -> float:
@@ -225,19 +320,60 @@ class OmniToolSession:
                 "personality": self._personality,
                 "port": self._port,
                 "max_payload": FLASH_MAX_PAYLOAD,
+                "max_image_payload": FLASH_MAX_IMAGE_PAYLOAD,
                 "targets": [t.name for t in FLASHER_TARGETS],
             }
+
+    def flasher_analyze(self, file_path: str, address: Optional[int] = None) -> dict:
+        """只解析不烧录：返回该文件的地址段与 CRC32。
+
+        供前端在选完文件后立刻显示"写到哪些地址、CRC32 是多少"，
+        避免用户点了烧录才发现镜像有问题。
+        """
+        raw = self._read_file(file_path)
+        is_hex = looks_like_ihex(raw)
+        flash = FLASHER_TARGETS[0]
+        if is_hex:
+            segs = parse_ihex(raw)
+            self._check_segments(segs, flash)
+            return {
+                "is_hex": True,
+                "file_size": len(raw),
+                "segments": [{"address": a, "size": len(d)} for a, d in segs],
+                "total": sum(len(d) for _, d in segs),
+                "crc32": image_crc32(segs),
+            }
+        addr = address if address is not None else flash.base
+        self._check_segments([(addr, raw)], flash)
+        return {
+            "is_hex": False,
+            "file_size": len(raw),
+            "segments": [{"address": addr, "size": len(raw)}],
+            "total": len(raw),
+            "crc32": image_crc32([(addr, raw)]),
+        }
 
     def flasher_flash(
         self,
         file_path: str,
         address: Optional[int] = None,
         target: str = "stm32f407ig",
-        erase: bool = True,
+        erase: bool = False,
         verify: bool = True,
     ) -> dict:
-        """在线烧录外部目标：MODE(FLASHER) -> OPEN -> (ERASE) -> WRITE -> CLOSE
-        -> 重 OPEN -> READ 校验 -> CLOSE -> MODE(DAP)。
+        """在线烧录外部目标，**统一走固件镜像型会话（模式 B）**。
+
+        ``.hex`` 与 ``.bin`` 都用 ``OPEN_IMAGE``：固件自己判定格式并解出地址
+        （``.hex`` 来自记录，``.bin`` 用 ``base``，``base=0`` 则取目标默认区间起点）。
+        两者最终都进同一个 flash manager，**扇区懒擦除由固件完成**，主机无需下发擦除命令。
+
+        时序：
+            ``MODE(FLASHER) -> OPEN_IMAGE(base, crc32) -> IMAGE_DATA×N
+            -> IMAGE_VERIFY -> CLOSE -> 重 OPEN -> READ×N 比对 -> CLOSE -> MODE(DAP)``
+
+        ``erase=True`` 时额外先走一趟**地址型**会话专用于整片擦除
+        （``OPEN -> ERASE -> CLOSE``），擦完再进镜像会话 —— 这是固件支持的清场方式，
+        因为镜像型会话本身不支持 ``ERASE``。
 
         进度经 WebSocket ``omni_tool.progress`` 推送。
         """
@@ -247,21 +383,29 @@ class OmniToolSession:
         if flash is None:
             raise OmniToolError(f"不支持的目标型号: {target}")
 
-        # 目标镜像按「地址 + 数据」载入；.hex 自带地址，.bin 取指定/该型号 Flash 起点
-        data, addr = self._load_firmware(file_path, address, flash.base)
-        if addr < flash.base or addr + len(data) > flash.end:
-            raise OmniToolError(
-                f"镜像超出 {flash.name} Flash 区: 0x{addr:08X}+{len(data)} "
-                f"∉ 0x{flash.base:08X}~0x{flash.end:08X}"
-            )
+        raw = self._read_file(file_path)
+        is_hex = looks_like_ihex(raw)
 
-        def report(stage: str, current: int, total: int, message: str) -> None:
+        # 主机侧先解一遍：校验和 / 地址递增在这里就拦下，同时拿到回读校验用的段与 CRC32
+        if is_hex:
+            segs = parse_ihex(raw)
+            base = 0  # hex 的地址来自文件记录，base 无意义
+        else:
+            base = address if address is not None else flash.base
+            segs = [(base, raw)]
+        self._check_segments(segs, flash)
+
+        total = sum(len(d) for _, d in segs)
+        crc = image_crc32(segs)
+        addr = segs[0][0]
+
+        def report(stage: str, current: int, total_: int, message: str) -> None:
             event_manager.emit("omni_tool.progress", {
                 "stage": stage,
                 "message": message,
                 "current": current,
-                "total": total,
-                "percent": _weighted(stage, current, total, _FLASHER_STAGE_SPAN),
+                "total": total_,
+                "percent": _weighted(stage, current, total_, _FLASHER_STAGE_SPAN),
             })
 
         with self._lock:
@@ -271,74 +415,94 @@ class OmniToolSession:
             name = os.path.basename(file_path)
             session_opened = False
             try:
-                event_manager.log("info", f"[OMNI Tool] 开始在线烧录 {name} "
-                                          f"({len(data)} bytes @ 0x{addr:08X})")
+                event_manager.log(
+                    "info",
+                    f"[OMNI Tool] 开始在线烧录 {name} "
+                    f"({'HEX' if is_hex else 'BIN'} 镜像模式, {total} bytes, {len(segs)} 段, "
+                    f"CRC32=0x{crc:08X})",
+                )
 
                 # 1) 切换 FLASHER 模式：固件执行 swd_init() 连接目标
                 report("mode", 0, 0, "切换 FLASHER 模式")
                 app.mode_flasher(_FLASH_MODE_TIMEOUT)
 
-                # 2) 开启会话：halt 目标 + 装载 FLM
-                report("open", 0, 0, "开启烧写会话")
-                app.flash_open(_FLASH_HALT_TIMEOUT)
-                session_opened = True
-
-                # 3) 可选整片擦除（必须在 WRITE 之前，绕过懒擦除记账）
+                # 2) 可选整片擦除：镜像会话不支持 ERASE，用地址型会话走一趟 OPEN→ERASE→CLOSE
                 if erase:
                     report("erase", 0, 0, "整片擦除（可能需数十秒）")
-                    app.flash_erase_chip(_FLASH_ERASE_CHIP_TIMEOUT)
+                    app.flash_open(_FLASH_HALT_TIMEOUT)
+                    session_opened = True
+                    try:
+                        app.flash_erase_chip(_FLASH_ERASE_CHIP_TIMEOUT)
+                    finally:
+                        app.flash_close(_FLASH_HALT_TIMEOUT)
+                        session_opened = False
 
-                # 4) 分块写入（≤56B/包；FLASH_MANAGER 内部做扇区懒擦除）
-                report("write", 0, len(data), "写入目标 Flash")
-                written = 0
-                while written < len(data):
-                    chunk = data[written:written + FLASH_MAX_PAYLOAD]
-                    app.flash_write(addr + written, chunk, _FLASH_PROGRAM_TIMEOUT)
-                    written += len(chunk)
-                    report("write", written, len(data), f"已写入 {written}/{len(data)}")
+                # 3) 镜像会话：地址由固件解析，CRC32 期望值在这里给出
+                report("open", 0, 0, "开启镜像会话")
+                app.flash_open_image(base, crc, _FLASH_HALT_TIMEOUT)
+                session_opened = True
 
-                # 5) 关闭会话：刷残留缓冲 + 复位目标运行
+                # 4) 递文件原始字节（≤60B/包，可任意切分；固件解析器有状态、可跨包续解）
+                report("write", 0, len(raw), "下发镜像数据")
+                sent = 0
+                while sent < len(raw):
+                    chunk = raw[sent:sent + FLASH_MAX_IMAGE_PAYLOAD]
+                    app.flash_image_data(chunk, _FLASH_PROGRAM_TIMEOUT)
+                    sent += len(chunk)
+                    report("write", sent, len(raw), f"已下发 {sent}/{len(raw)}")
+
+                # 5) 固件侧校验整镜像 CRC32
+                report("verify", 0, total, "固件侧校验整镜像 CRC32")
+                app.flash_image_verify(_FLASH_PROGRAM_TIMEOUT)
+
+                # 6) 关闭会话：刷残留缓冲 + 复位目标运行（固件内部会再校验一次 CRC32）
                 report("close", 0, 0, "关闭烧写会话")
                 app.flash_close(_FLASH_HALT_TIMEOUT)
                 session_opened = False
 
-                # 6) 回读校验：CLOSE 后目标在 RUN 态无法回读，必须重 OPEN 重新 halt
+                # 7) 回读校验：CLOSE 后目标在 RUN 态无法回读，必须重 OPEN 重新 halt。
+                #    走模式 A 的 READ（镜像会话是单向的，没有 READ）。
                 verified = False
                 first_mismatch: Optional[int] = None
                 if verify:
-                    report("verify", 0, len(data), "重新开启会话以回读校验")
+                    report("verify", 0, total, "重新开启会话以回读校验")
                     app.flash_open(_FLASH_HALT_TIMEOUT)
                     session_opened = True
                     read_total = 0
-                    while read_total < len(data):
-                        want = min(FLASH_MAX_PAYLOAD, len(data) - read_total)
-                        chunk = data[read_total:read_total + want]
-                        got = app.flash_read(addr + read_total, want, _FLASH_PROGRAM_TIMEOUT)
-                        if got != chunk:
-                            for i, (g, w) in enumerate(zip(got, chunk)):
-                                if g != w:
-                                    first_mismatch = read_total + i
-                                    break
+                    for seg_addr, seg_data in segs:
+                        off = 0
+                        while off < len(seg_data):
+                            want = min(FLASH_MAX_PAYLOAD, len(seg_data) - off)
+                            chunk = seg_data[off:off + want]
+                            got = app.flash_read(seg_addr + off, want, _FLASH_PROGRAM_TIMEOUT)
+                            if got != chunk:
+                                for i, (g, w) in enumerate(zip(got, chunk)):
+                                    if g != w:
+                                        first_mismatch = seg_addr + off + i
+                                        break
+                                break
+                            off += want
+                            read_total += want
+                            report("verify", read_total, total, f"已校验 {read_total}/{total}")
+                        if first_mismatch is not None:
                             break
-                        read_total += want
-                        report("verify", read_total, len(data), f"已校验 {read_total}/{len(data)}")
-                    verified = first_mismatch is None and read_total >= len(data)
+                    verified = first_mismatch is None and read_total >= total
                     app.flash_close(_FLASH_HALT_TIMEOUT)
                     session_opened = False
                     if verified:
                         event_manager.log("info", "[OMNI Tool] 回读校验通过")
                     else:
-                        where = (f"0x{addr + first_mismatch:08X}"
+                        where = (f"0x{first_mismatch:08X}"
                                  if first_mismatch is not None else "?")
                         event_manager.log("error", f"[OMNI Tool] 回读校验失败 @ {where}")
 
-                # 7) 交还 SWD 给 DAP，避免占用调试链路
+                # 8) 交还 SWD 给 DAP，避免占用调试链路
                 report("close", 0, 0, "切回 DAP 模式")
                 app.mode_dap(_FLASH_MODE_TIMEOUT)
 
                 if first_mismatch is not None:
                     raise OmniToolError(
-                        f"回读校验失败（首个不一致位置 0x{addr + first_mismatch:08X}）"
+                        f"回读校验失败（首个不一致位置 0x{first_mismatch:08X}）"
                     )
 
                 event_manager.log("info", "[OMNI Tool] 在线烧录完成")
@@ -346,7 +510,10 @@ class OmniToolSession:
                     "success": True,
                     "verified": verified,
                     "address": addr,
-                    "size": len(data),
+                    "size": total,
+                    "is_hex": is_hex,
+                    "segments": len(segs),
+                    "crc32": crc,
                     "message": "在线烧录完成",
                 }
             except Exception:
@@ -540,6 +707,32 @@ class OmniToolSession:
         if self._app is None:
             raise OmniToolError("在线烧录需连接 app 模式的 OMNI Tool（当前设备是 bootloader）")
         return self._app
+
+    @staticmethod
+    def _read_file(file_path: str) -> bytes:
+        """读取固件文件原始字节（在线烧录不做主机侧转换，模式交给固件判定）。"""
+        if not file_path or not os.path.exists(file_path):
+            raise OmniToolError(f"固件文件不存在: {file_path}")
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise OmniToolError(f"读取固件文件失败: {e}") from e
+        if not data:
+            raise OmniToolError("固件文件为空")
+        return data
+
+    @staticmethod
+    def _check_segments(segs: list[tuple[int, bytes]], flash: FlasherTarget) -> None:
+        """检查各段是否落在目标芯片 Flash 区间内（烧之前拦下，不白烧一遍）。"""
+        for addr, data in segs:
+            if not data:
+                continue
+            if addr < flash.base or addr + len(data) > flash.end:
+                raise OmniToolError(
+                    f"段 0x{addr:08X}+{len(data)} 超出 {flash.name} Flash 区 "
+                    f"(0x{flash.base:08X}~0x{flash.end:08X})"
+                )
 
     @staticmethod
     def _load_firmware(
