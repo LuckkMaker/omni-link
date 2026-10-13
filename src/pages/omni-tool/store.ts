@@ -65,6 +65,10 @@ interface OmniToolStore {
   /** 列表中已选中的设备端口（与"是否已连接"分离） */
   selectedPort: string | null
   serialAvailable: boolean
+  /** 是否有扫描在进行中（UI 显示转圈，并阻止重入扫描） */
+  refreshing: boolean
+  /** 最近一次扫描完成的时间戳（0 = 从未扫描），用于判断列表是否过期 */
+  lastScanAt: number
   session: OmniSessionState
   info: OmniInfo | null
   /** 文件 tab 列表（首项恒为固定的 Device Memory，不可删除） */
@@ -77,6 +81,12 @@ interface OmniToolStore {
   busy: boolean
 
   refreshDevices: () => Promise<void>
+  /**
+   * 强制重新扫描（忽略节流窗口）。用于打开设备下拉、切换设备池等
+   * "用户明确要看最新列表"的时机——设备人格切换后 USB 会重新枚举，
+   * 列表不刷新就只会看到旧的 app 端口和旧序列号。
+   */
+  refreshDevicesNow: () => Promise<void>
   refreshDevicesUntil: (personality: OmniPersonality, timeoutMs?: number) => Promise<boolean>
   selectPort: (port: string | null) => void
   connect: (port: string) => Promise<void>
@@ -186,6 +196,12 @@ function endOperation(
   endBusy()
 }
 
+/** 自动扫描的最小间隔：打开下拉等高频时机共享同一次扫描，避免打爆串口枚举 */
+const SCAN_THROTTLE_MS = 1500
+
+/** 正在进行的扫描（避免并发请求；进行中的调用复用同一 Promise） */
+let scanInFlight: Promise<void> | null = null
+
 /** 等待设备以指定人格重新枚举（app <-> boot 切换后端口会变化） */
 async function waitForPersonality(
   target: OmniPersonality,
@@ -205,6 +221,8 @@ const INITIAL_STATE = {
   devices: [] as OmniDevice[],
   selectedPort: null as string | null,
   serialAvailable: true,
+  refreshing: false,
+  lastScanAt: 0,
   session: { connected: false, port: null, personality: 'unknown', busy: false } as OmniSessionState,
   info: null as OmniInfo | null,
   tabs: [
@@ -237,19 +255,42 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
   onProgress: (p) => updateProgress(p),
 
   refreshDevices: async () => {
+    // 节流：距上次扫描不足 SCAN_THROTTLE_MS 时直接跳过，交给打开下拉时的
+    // refreshDevicesNow 强制刷新，避免高频时机反复枚举串口。
+    if (useOmniToolStore.getState().lastScanAt &&
+        Date.now() - useOmniToolStore.getState().lastScanAt < SCAN_THROTTLE_MS) {
+      return
+    }
+    await useOmniToolStore.getState().refreshDevicesNow()
+  },
+
+  refreshDevicesNow: async () => {
+    // 复用在途扫描：并发调用（打开下拉 + 路由进入 + 轮询）共享一次结果
+    if (scanInFlight) return scanInFlight
+    set({ refreshing: true })
+    scanInFlight = (async () => {
+      try {
+        const res = await omniToolService.scan()
+        set((s) => {
+          // 保留已选设备；若已消失则回退到第一台，避免选择与列表不一致
+          const stillThere = res.omni_devices.some((d) => d.port === s.selectedPort)
+          return {
+            devices: res.omni_devices,
+            serialAvailable: res.serial_available,
+            selectedPort: stillThere ? s.selectedPort : (res.omni_devices[0]?.port ?? null),
+            lastScanAt: Date.now(),
+          }
+        })
+      } catch (e) {
+        log('error', omniToolErrorMessage(e))
+      } finally {
+        set({ refreshing: false })
+      }
+    })()
     try {
-      const res = await omniToolService.scan()
-      set((s) => {
-        // 保留已选设备；若已消失则回退到第一台，避免选择与列表不一致
-        const stillThere = res.omni_devices.some((d) => d.port === s.selectedPort)
-        return {
-          devices: res.omni_devices,
-          serialAvailable: res.serial_available,
-          selectedPort: stillThere ? s.selectedPort : (res.omni_devices[0]?.port ?? null),
-        }
-      })
-    } catch (e) {
-      log('error', omniToolErrorMessage(e))
+      await scanInFlight
+    } finally {
+      scanInFlight = null
     }
   },
 
@@ -260,7 +301,8 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
   refreshDevicesUntil: async (personality: OmniPersonality, timeoutMs = 15000) => {
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      await get().refreshDevices()
+      // 轮询必须绕过节流，否则 500ms 间隔的等待会被 1.5s 节流窗口吞掉
+      await get().refreshDevicesNow()
       const hit = get().devices.some((d) => d.personality === personality)
       if (hit || Date.now() >= deadline) return hit
       await new Promise((r) => setTimeout(r, 500))

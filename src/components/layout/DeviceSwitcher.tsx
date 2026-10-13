@@ -64,6 +64,8 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
 
   const [configDialogOpen, setConfigDialogOpen] = useState(false)
   const [initialError, setInitialError] = useState<string | null>(null)
+  // OMNI 设备下拉是否展开（展开时轮询设备列表，等待 USB 重新枚举）
+  const [omniMenuOpen, setOmniMenuOpen] = useState(false)
 
   // ── 连接来源切换 ──
   // 默认跟随当前页面（/omni-tool 用 OMNI Tool，其余页面用调试探针）；
@@ -84,6 +86,7 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   const omniBusy = useOmniToolStore((s) => s.busy)
   const omniConnected = omniSession.connected
   const selectedPort = useOmniToolStore((s) => s.selectedPort)
+  const omniRefreshing = useOmniToolStore((s) => s.refreshing)
   // 已连接时以实际会话端口为准，否则用列表中的选中项
   const omniSelected =
     omniDevices.find((d) => d.port === (omniSession.port ?? selectedPort)) ?? null
@@ -100,12 +103,33 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
     }
   }, [status, fetchDevices])
 
-  // 切到 OMNI 来源且尚无设备列表时自动扫描一次
+  // 切到 OMNI 来源时扫描一次设备列表。
+  // 注意：不能只在列表为空时扫——设备从 app 切到 boot 重新枚举后，列表里
+  // 仍留着旧的 app 条目（非空），不重扫就永远看不到 boot 设备与新序列号。
   useEffect(() => {
-    if (status && source === 'omni' && omniDevices.length === 0) {
-      useOmniToolStore.getState().refreshDevices()
+    if (status && source === 'omni') {
+      useOmniToolStore.getState().refreshDevicesNow()
     }
-  }, [status, source, omniDevices.length])
+  }, [status, source])
+
+  // 打开 OMNI 设备下拉：强制重新扫描，让列表反映最新的 USB 枚举结果。
+  // 设备人格切换（app <-> boot）会让端口与序列号变化，只有重新枚举后才拿得到。
+  const handleOmniOpenChange = (open: boolean) => {
+    setOmniMenuOpen(open)
+    if (open && status) {
+      useOmniToolStore.getState().refreshDevicesNow()
+    }
+  }
+
+  // 下拉打开期间轮询：Windows 上 app -> boot 的 USB 重枚举可能耗时数秒，
+  // 单次扫描容易正好落在枚举中途，导致列表仍是旧人格。关闭后停止，避免无谓枚举。
+  useEffect(() => {
+    if (!omniMenuOpen || !status) return
+    const timer = setInterval(() => {
+      useOmniToolStore.getState().refreshDevicesNow()
+    }, 1200)
+    return () => clearInterval(timer)
+  }, [omniMenuOpen, status])
 
   // 连接/断开（调试探针）
   const toggleProbeConnection = () => {
@@ -181,7 +205,7 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
         {source === 'omni' ? (
           <>
             {/* OMNI Tool：下拉仅"选择"，连接/断开由右侧按钮执行（与调试探针三段式一致） */}
-            <DropdownMenu>
+            <DropdownMenu open={omniMenuOpen} onOpenChange={handleOmniOpenChange}>
               <DropdownMenuTrigger asChild>
                 <button
                   disabled={omniBusy}
@@ -204,6 +228,11 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
                     <div className="px-2 py-1.5 text-xs text-muted-foreground">
                       当前会话：{omniSession.port}
                       <span className="ml-1 opacity-70">（列表刷新中）</span>
+                    </div>
+                  ) : omniRefreshing ? (
+                    /* 正在扫描：设备刚复位/跳转时枚举尚未完成，给出明确反馈 */
+                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                      正在扫描 OMNI Tool 设备…
                     </div>
                   ) : (
                     <div className="px-2 py-1.5 text-xs text-muted-foreground">
@@ -231,8 +260,10 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
                     </DropdownMenuItem>
                   ))
                 )}
-                <DropdownMenuItem onSelect={() => useOmniToolStore.getState().refreshDevices()}>
-                  <RefreshCw className="size-3.5" />
+                <DropdownMenuItem
+                  onSelect={() => useOmniToolStore.getState().refreshDevicesNow()}
+                >
+                  <RefreshCw className={cn('size-3.5', omniRefreshing && 'animate-spin')} />
                   <span>刷新设备</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
