@@ -131,6 +131,17 @@ export function DeviceSwitcher({ collapsed = false }: { collapsed?: boolean }) {
     return () => clearInterval(timer)
   }, [omniMenuOpen, status])
 
+  // 已连接时的低频巡检：设备被拔掉、或被烧成别的固件后重新枚举，后端仍会认为
+  // 链路是打开的，只有重新枚举才能发现端口已不再是 OMNI Tool（store 会据此自动
+  // 断开），否则页面会一直停在"已连接 COMxx"的假状态上。
+  useEffect(() => {
+    if (!status || source !== 'omni' || !omniConnected) return
+    const timer = setInterval(() => {
+      useOmniToolStore.getState().refreshDevicesNow()
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [status, source, omniConnected])
+
   // 连接/断开（调试探针）
   const toggleProbeConnection = () => {
     if (!selectedProbe) return

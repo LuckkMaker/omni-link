@@ -271,6 +271,37 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
     scanInFlight = (async () => {
       try {
         const res = await omniToolService.scan()
+
+        // 会话自愈：工具被拔掉、或被烧成别的固件后重新枚举（USB 描述符变了，
+        // 端口不再以 OMNI 人格出现，或取不到序列号）时，后端仍认为链路是打开的，
+        // 页面就会停在"已连接 COMxx"这种假状态上。这里做一次轻量探测判断链路
+        // 是否还活着，探测失败即断开。只有可疑时才探测，正常轮询不产生额外串口
+        // 流量；busy 时跳过，避免与正在进行的操作抢串口。
+        const cur = useOmniToolStore.getState()
+        const livePort = cur.session.connected ? cur.session.port : null
+        if (livePort && !cur.busy) {
+          const matched = res.omni_devices.find((d) => d.port === livePort)
+          if (!matched || !matched.serial_number) {
+            const alive = await omniToolService
+              .info()
+              .then(() => true)
+              .catch(() => false)
+            if (!alive) {
+              // 先清前端会话，再通知后端断开（后端可能已自行断开，失败可忽略）
+              set({
+                session: { connected: false, port: null, personality: 'unknown', busy: false },
+                info: null,
+              })
+              try {
+                await omniToolService.disconnect()
+              } catch {
+                /* 忽略 */
+              }
+              log('warning', `设备 ${livePort} 已不再是 OMNI Tool（固件被替换或已拔出），已断开`)
+            }
+          }
+        }
+
         set((s) => {
           // 保留已选设备；若已消失则回退到第一台，避免选择与列表不一致
           const stillThere = res.omni_devices.some((d) => d.port === s.selectedPort)
