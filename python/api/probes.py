@@ -11,6 +11,18 @@ from core import database
 
 router = APIRouter()
 
+# ── 连接参数与超时 ──────────────────────────────────────────
+# HTTP 层兜底：backend.connect 内部已有 15s 的 pyOCD open 超时，但那只覆盖
+# “拿到会话”这一步；探针枚举/DLL 调用等也可能卡住。这里再加一层，保证请求
+# 一定能返回（504），不会出现 CLI 干等 30s 后只看到 “timed out”（实机报告 P1-1）。
+CONNECT_HTTP_TIMEOUT = 20.0
+# set_target 会 disconnect + 重新 open，与 connect 同量级
+SET_TARGET_HTTP_TIMEOUT = 30.0
+# 时钟频率范围（Hz）。J-Link DLL 的下限是 5 kHz，低于它只会得到
+# “Given speed is too slow. Minimum is 5.” 这种没有单位的报错（P2-2）。
+MIN_SPEED_HZ = 5_000
+MAX_SPEED_HZ = 50_000_000
+
 
 class SetTargetRequest(BaseModel):
     part_number: str
@@ -29,16 +41,27 @@ class ConnectRequest(BaseModel):
 
 
 @router.get("")
-async def list_probes():
-    """列出所有已连接探针（含连接状态）"""
-    probes = backend.get_probe_states()
+async def list_probes(refresh: bool = False):
+    """列出所有已连接探针（含连接状态）
+
+    默认返回后台监控线程维护的快照（每 2s 刷新），不逐请求做 USB 枚举：
+    后端被挂起的硬件操作拖住时，探针列表不应跟着一起卡死（P1-2）。
+    ``?refresh=true`` 才强制重新枚举（GUI 手动刷新/CLI 需要即时结果时使用）。
+    """
+    if refresh:
+        probes = await asyncio.to_thread(backend.get_probe_states)
+    else:
+        probes = backend.get_cached_probe_states()
     return {"probes": probes}
 
 
 @router.get("/states")
-async def get_probe_states():
-    """获取所有探针状态（轻量级，仅返回 uid + state）"""
-    probes = backend.get_probe_states()
+async def get_probe_states(refresh: bool = False):
+    """获取所有探针状态（轻量级，仅返回 uid + state，默认读快照）"""
+    if refresh:
+        probes = await asyncio.to_thread(backend.get_probe_states)
+    else:
+        probes = backend.get_cached_probe_states()
     return {
         "probes": [
             {"uid": p["uid"], "state": p["state"]}
@@ -49,13 +72,35 @@ async def get_probe_states():
 
 @router.post("/{uid}/connect")
 async def connect_probe(uid: str, req: ConnectRequest | None = None):
-    """连接指定探针（可指定目标型号、接口、速度）"""
+    """连接指定探针（目标型号必填，可指定接口、速度）
+
+    ``--target`` 是硬性前置条件：pyOCD 没有目标型号就无法建立内存映射，
+    继续猜默认型号既可能选错芯片，也可能在 pyOCD 内部长时间探测（P1-1）。
+    """
     target = req.target if req else None
     interface = req.interface if req else "swd"
     speed = req.speed if req else None
     connect_mode = req.connect_mode if req else None
     force = req.force if req else False
     jlink_device = req.jlink_device if req else None
+
+    # 允许复用此前通过 /target 设置过的默认型号
+    if not target:
+        target = backend.get_pending_target()
+    if not target:
+        raise HTTPException(
+            status_code=400,
+            detail=("缺少目标芯片型号（--target 必填）。可用 `omni target list` 查询型号，"
+                    "或在连接前用 `omni probe target <uid> --part <型号>` 设置默认目标。"),
+        )
+    if speed is not None and not (MIN_SPEED_HZ <= speed <= MAX_SPEED_HZ):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"时钟频率超出范围：--speed {speed} Hz = {speed / 1000:g} kHz。"
+                    f"J-Link 支持 {MIN_SPEED_HZ // 1000} kHz ~ {MAX_SPEED_HZ // 1_000_000} MHz，"
+                    "例如 --speed 4000000 表示 4 MHz，--speed 5000 为下限 5 kHz。"),
+        )
+
     # J-Link 设备名兜底：未显式指定时，若所选目标设备（内置型号等）自带 jlink_device 则自动使用，
     # 让用户选中内置型号即可开箱连接 J-Link，无需手填。
     if not jlink_device and target:
@@ -67,18 +112,25 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
             pass
     # 连接涉及 J-Link open / 目标复位等同步阻塞调用（可耗时数秒甚至卡死），
     # 放线程池执行，避免堵死事件循环导致 /api/system/shutdown 等端点无响应。
-    success = await asyncio.to_thread(
-        backend.connect, uid,
-        target=target, interface=interface, speed=speed,
-        connect_mode=connect_mode, force=force, device=jlink_device,
-    )
+    try:
+        success = await asyncio.wait_for(
+            asyncio.to_thread(
+                backend.connect, uid,
+                target=target, interface=interface, speed=speed,
+                connect_mode=connect_mode, force=force, device=jlink_device,
+            ),
+            timeout=CONNECT_HTTP_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        msg = (f"连接超时（{int(CONNECT_HTTP_TIMEOUT)} 秒）。目标可能未上电/未复位，"
+               "或探针被其他调试工具占用。本次连接尝试已标记失效，请检查接线后重试；"
+               "若后端仍无响应，执行 `omni backend stop` 后重启。")
+        await asyncio.to_thread(backend.abort_connect, uid, msg)
+        raise HTTPException(status_code=504, detail=msg)
+
     if not success:
         # 获取后端存储的具体错误信息，避免丢失诊断细节
-        error_detail = "Connection failed"
-        with backend._lock:
-            session = backend._sessions.get(uid)
-            if session and session.error:
-                error_detail = session.error
+        error_detail = backend.get_session_error(uid) or "Connection failed"
         raise HTTPException(status_code=500, detail=error_detail)
 
     target = backend.get_target_info(uid)
@@ -114,10 +166,24 @@ async def get_target(uid: str):
 
 @router.post("/{uid}/target")
 async def set_target(uid: str, req: SetTargetRequest):
-    """手动设置目标芯片型号"""
-    success = backend.set_target(uid, req.part_number)
+    """手动设置目标芯片型号
+
+    set_target 内部会 disconnect + 重新 open（同步阻塞），必须放线程池并加
+    HTTP 超时，否则会堵死事件循环（/api/probes/states 等全部无响应，P1-2）。
+    """
+    try:
+        success = await asyncio.wait_for(
+            asyncio.to_thread(backend.set_target, uid, req.part_number),
+            timeout=SET_TARGET_HTTP_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        msg = (f"设置目标超时（{int(SET_TARGET_HTTP_TIMEOUT)} 秒）：目标或探针无响应。"
+               "会话已标记失效，请检查接线后重试。")
+        await asyncio.to_thread(backend.abort_connect, uid, msg)
+        raise HTTPException(status_code=504, detail=msg)
     if not success:
-        raise HTTPException(status_code=500, detail=f"Failed to set target: {req.part_number}")
+        error_detail = backend.get_session_error(uid) or f"Failed to set target: {req.part_number}"
+        raise HTTPException(status_code=500, detail=error_detail)
 
     # 目标切换后 session 重建，重置 Commander 上下文
     from core.commander_backend import commander_backend
@@ -240,7 +306,7 @@ async def jlink_devices(
 
 @router.post("/refresh")
 async def refresh_probes():
-    """手动触发探针列表刷新"""
-    probes = backend.get_probe_states()
+    """手动触发探针列表刷新（强制硬件枚举，结果同时刷新快照并推送前端）"""
+    probes = await asyncio.to_thread(backend.get_probe_states)
     event_manager.emit("probe.list", {"probes": probes})
     return {"probes": probes}

@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import base64
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -64,10 +65,11 @@ class RttDeviceResetRequest(BaseModel):
 
 @router.get("/probes/{uid}/rtt/status")
 def rtt_status(uid: str):
-    """查询 RTT 状态"""
+    """查询 RTT 状态（含上行缓存统计，便于 CLI/CI 诊断丢包）"""
     return {
         "running": rtt_backend.is_running(uid),
         "connected": backend.is_connected(uid),
+        "capture": rtt_backend.get_capture_stats(uid),
     }
 
 
@@ -119,10 +121,35 @@ def rtt_channels(uid: str):
     return result
 
 
+@router.get("/probes/{uid}/rtt/data")
+def rtt_data(
+    uid: str,
+    since: int = 0,
+    max_bytes: int = 65536,
+    channel: Optional[int] = None,
+):
+    """增量读取 RTT up channel 数据（REST 出口，与 WebSocket 共用同一份环形缓存）。
+
+    - ``since=0``：从当前最旧可用块开始；CLI ``--follow`` 用上一次返回的 ``cursor`` 续读。
+    - ``max_bytes``：单次字节预算（按整块返回，不拆块，因此可能略超）。
+    - ``lost=true``：请求的 ``since`` 已被环形缓存覆盖，部分历史数据丢失。
+    - ``session_reset=true``：``since`` 超出当前后端进程的 RTT 序号（后端重启后 seq
+      从 1 开始），本次已从当前最旧数据重读。同一后端进程内 seq 跨 ``rtt start``
+      单调递增，旧游标可以继续使用。
+    - ``text``：把本次返回的块按 UTF-8（非法字节替换）解码后的文本，便于 `curl` / 简单断言；
+      需要无损数据时用 ``chunks[].data``（base64）。
+    """
+    result = rtt_backend.read_capture(uid, since=since, max_bytes=max_bytes, channel=channel)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result.get("error"))
+    raw = b"".join(base64.b64decode(chunk["data"]) for chunk in result.get("chunks", []))
+    result["text"] = raw.decode("utf-8", "replace")
+    return result
+
+
 @router.post("/probes/{uid}/rtt/send")
 def rtt_send(uid: str, req: RttSendRequest):
     """发送二进制数据到 down channel"""
-    import base64
     try:
         data = base64.b64decode(req.data)
     except Exception:

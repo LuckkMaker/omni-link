@@ -29,6 +29,7 @@ from core.core_peripherals import (
 from core.elf_backend import elf_backend
 from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend, register_session_closed
+from core.rtt_backend import rtt_backend
 from core.soft_bp import (
     install_handler as _softbp_install,
     uninstall_handler as _softbp_uninstall,
@@ -39,6 +40,53 @@ from core.soft_bp import (
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+# 目标状态/核心寄存器读取的 HTTP 超时（秒）。
+# 目标失联或 SWD 链路异常时，pyOCD 的寄存器读可能长时间不返回；这些接口被前端
+# 高频轮询，必须有上限，否则会拖住事件循环（实机报告 P1-2）。
+STATUS_READ_TIMEOUT = 5.0
+REGISTERS_READ_TIMEOUT = 8.0
+# 等待“调试/刷新协调锁”的秒数：该锁由 commander 调试命令与 RTT 轮询协作使用。
+REGISTERS_LOCK_TIMEOUT = 3.0
+
+
+def _failure_detail(result: dict, fallback: str) -> str:
+    """从 commander 风格的结果里提取可读错误。
+
+    底层失败时错误可能放在 ``error``（字符串）或 ``errors``（列表，如寄存器逐项
+    读取）。只检查 ``error`` 会把“失败但有 errors[]”误判成成功（实机报告 P2-1）。
+    """
+    err = result.get("error")
+    if err:
+        return str(err)
+    errors = result.get("errors") or []
+    if errors:
+        first = errors[0]
+        if isinstance(first, dict):
+            name = first.get("name") or "?"
+            msg = first.get("error") or first.get("message") or "unknown error"
+            return f"{name}: {msg}"
+        return str(first)
+    return fallback
+
+
+def _raise_if_failed(result: dict, fallback: str, status_code: int = 400) -> None:
+    """result 未成功就抛 HTTPException（不再要求 error 非空）。"""
+    if not result.get("success"):
+        raise HTTPException(status_code=status_code, detail=_failure_detail(result, fallback))
+
+
+def _mark_target_halted(uid: str, halted: bool) -> None:
+    """把 Zone 侧的暂停/运行同步给 RTT 轮询线程。
+
+    RTT 轮询每 3s 会把“非用户暂停”的 halted 目标自动 resume（用于从硬件复位
+    的 reset-catch 中恢复）。Zone/CLI 的 halt 不走 rtt_backend.halt_target，
+    不同步的话目标会在 halt 后又被自动跑起来，导致随后读寄存器偶发失败。
+    """
+    try:
+        rtt_backend.set_user_halted(uid, halted)
+    except Exception:
+        pass
 
 
 # ── 请求模型 ──────────────────────────────
@@ -154,8 +202,8 @@ async def zone_halt(uid: str):
             result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
     finally:
         _softbp_unsuppress(uid)
-    if not result["success"] and result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
+    _raise_if_failed(result, "暂停失败")
+    _mark_target_halted(uid, True)
     return {"success": True}
 
 
@@ -185,8 +233,7 @@ async def zone_step(uid: str, req: StepRequest = StepRequest()):
         if not target.is_halted():
             with monitor_backend.pause_during(uid):
                 halt_result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
-            if not halt_result["success"] and halt_result.get("error"):
-                raise HTTPException(status_code=400, detail=halt_result["error"])
+            _raise_if_failed(halt_result, "暂停失败")
 
         core = target.selected_core_or_raise
         with monitor_backend.pause_during(uid):
@@ -198,6 +245,7 @@ async def zone_step(uid: str, req: StepRequest = StepRequest()):
                 halted = await asyncio.to_thread(_step_over_out, core, session, 'out')
     finally:
         _softbp_unsuppress(uid)
+    _mark_target_halted(uid, True)
     return {"success": True, "mode": mode, "halted": halted}
 
 
@@ -211,6 +259,7 @@ async def zone_continue(uid: str):
     from core.monitor_backend import monitor_backend
     session = backend._get_session(uid)
     if session is not None and not session.target.is_halted():
+        _mark_target_halted(uid, False)
         return {"success": True}
     _softbp_suppress(uid)
     try:
@@ -218,8 +267,8 @@ async def zone_continue(uid: str):
             result = await asyncio.to_thread(commander_backend.execute, uid, "continue")
     finally:
         _softbp_unsuppress(uid)
-    if not result["success"] and result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
+    _raise_if_failed(result, "继续运行失败")
+    _mark_target_halted(uid, False)
     return {"success": True}
 
 
@@ -246,11 +295,11 @@ async def zone_run_to_cursor(uid: str, req: RunToCursorRequest):
     if not session.target.is_halted():
         with monitor_backend.pause_during(uid):
             result = await asyncio.to_thread(commander_backend.execute, uid, "halt")
-        if not result["success"] and result.get("error"):
-            raise HTTPException(status_code=400, detail=result["error"])
+        _raise_if_failed(result, "暂停失败")
 
     # 已停在目标行：无需运行
     if (core.read_core_register('pc') & ~1) == address:
+        _mark_target_halted(uid, True)
         return {"success": True, "address": address, "halted": True}
 
     # 移除当前 PC 的武装断点，避免 resume 后立即再次触发；结束后恢复
@@ -275,6 +324,7 @@ async def zone_run_to_cursor(uid: str, req: RunToCursorRequest):
                 pass
         if restore is not None:
             restore()
+    _mark_target_halted(uid, bool(halted))
     return {"success": True, "address": address, "halted": halted}
 
 
@@ -305,22 +355,21 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
                 # 无法解析符号（未加载 ELF 或不含入口符号），回退到复位并暂停
                 with monitor_backend.pause_during(uid):
                     result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
-                if not result["success"] and result.get("error"):
-                    raise HTTPException(status_code=400, detail=result["error"])
+                _raise_if_failed(result, "复位失败")
+                _mark_target_halted(uid, True)
                 return {"success": True, "mode": mode, "symbol": None, "address": None}
 
         with monitor_backend.pause_during(uid):
             if mode in ('halt', 'break_symbol'):
                 # halt / break_symbol：先复位并暂停目标，确保已知状态
                 result = await asyncio.to_thread(commander_backend.execute, uid, "reset halt")
-                if not result["success"] and result.get("error"):
+                if not result["success"]:
                     # 兼容部分目标无 reset halt，改走 reset
                     result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
             else:
                 # run：复位后继续运行
                 result = await asyncio.to_thread(commander_backend.execute, uid, "reset")
-            if not result["success"] and result.get("error"):
-                raise HTTPException(status_code=400, detail=result["error"])
+            _raise_if_failed(result, "复位失败")
 
             # 复位会经 reset-catch（VECTOR_CATCH）清除目标上已武装的全部断点并禁用 FPB
             # （见 pyocd BreakpointManager._pre/_post_reset_catch_handler）。复位后需
@@ -358,6 +407,14 @@ async def zone_reset(uid: str, req: ResetRequest = ResetRequest()):
                     commander_backend.execute, uid, f"rmbreak 0x{symbol_addr:x}"
                 )
 
+        # 同步“用户期望的暂停态”：halt=暂停；run=运行；break_symbol 取决于是否命中
+        if mode == 'halt':
+            _mark_target_halted(uid, True)
+        elif mode == 'break_symbol':
+            _mark_target_halted(uid, bool(halted))
+        else:
+            _mark_target_halted(uid, False)
+
         return {
             "success": True,
             "mode": mode,
@@ -377,24 +434,62 @@ async def zone_status(uid: str):
     执行 session.target.is_halted()（需要 SWD 握手），探针争用时会阻塞整个事件循环数秒，
     导致所有请求（含汇编加载、调试操作）都被延迟。
     """
-    return await asyncio.to_thread(_sync_status, uid)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_sync_status, uid), timeout=STATUS_READ_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        # 前端高频轮询：这里不抛 5xx（会刷屏），而是返回 success=false，
+        # 让调用方知道“当前状态不可信”，同时不阻塞其它请求。
+        return {
+            "success": False,
+            "connected": backend.is_connected(uid),
+            "state": "unknown",
+            "pc": None,
+            "error": f"状态查询超时（{STATUS_READ_TIMEOUT:g} 秒）：目标可能已挂死或 SWD 链路异常",
+        }
 
 
 def _sync_status(uid: str) -> dict:
-    """同步状态读取（在 to_thread 中执行）"""
+    """同步状态读取（在 to_thread 中执行）
+
+    connected 必须以 pyOCD session 实际状态为准：仅看 backend 的状态字典会把
+    “session 已关闭/目标失联”误报成 connected=true（实机报告 P2-1）。
+    """
     if not backend.is_connected(uid):
         return {"success": True, "connected": False, "state": "disconnected", "pc": None}
+    if not backend.session_healthy(uid):
+        return {
+            "success": False,
+            "connected": False,
+            "state": "disconnected",
+            "pc": None,
+            "error": "调试会话已失效（pyOCD session 已关闭），请重新连接探针",
+        }
     session = backend._get_session(uid)
-    state = "unknown"
-    pc = None
+    if session is None:
+        return {
+            "success": False,
+            "connected": False,
+            "state": "disconnected",
+            "pc": None,
+            "error": "调试会话已失效，请重新连接探针",
+        }
     try:
-        if session and session.target.is_halted():
+        if session.target.is_halted():
             state = "halted"
             pc = session.target.read_core_register("pc") & ~1
         else:
             state = "running"
-    except Exception:
-        pass
+            pc = None
+    except Exception as e:
+        return {
+            "success": False,
+            "connected": True,
+            "state": "unknown",
+            "pc": None,
+            "error": f"读取目标状态失败: {e}",
+        }
     return {"success": True, "connected": True, "state": state, "pc": pc}
 
 
@@ -1079,35 +1174,105 @@ _CORE_REG_ORDER = [
 
 @router.get("/probes/{uid}/zone/registers/core")
 async def zone_registers_core(uid: str):
-    """读取 CPU 核心寄存器（名称/值/描述），供 Registers 面板列表展示"""
+    """读取 CPU 核心寄存器（名称/值/描述），供 Registers 面板列表展示
+
+    读取循环放线程池并加超时：目标失联时 pyOCD 的寄存器读可能长时间不返回，
+    在事件循环里直接读会拖住所有路由（P1-2）。session 失效或无任何寄存器可读时
+    返回 503，而不是“success=true + 空数组”（P2-1）。
+    """
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_read_core_registers, uid),
+            timeout=REGISTERS_READ_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(f"读取寄存器超时（{REGISTERS_READ_TIMEOUT:g} 秒）：目标可能已挂死或 SWD 链路异常。"
+                    "请断开并重新连接探针；若后端仍无响应，执行 `omni backend stop` 后重启。"),
+        )
+    if not result["success"]:
+        raise HTTPException(
+            status_code=result.pop("_status_code", 503),
+            detail=result.get("error") or "读取寄存器失败",
+        )
+    result.pop("_status_code", None)
+    return result
+
+
+def _read_core_registers(uid: str) -> dict:
+    """读取核心寄存器（纯同步，在线程池中执行）"""
     if not backend.is_connected(uid):
-        raise HTTPException(status_code=400, detail="Probe not connected")
+        return {"success": False, "error": "Probe not connected",
+                "registers": [], "errors": [], "_status_code": 400}
+    if not backend.session_healthy(uid):
+        return {"success": False,
+                "error": "调试会话已失效（pyOCD session 已关闭），请重新连接探针",
+                "registers": [], "errors": [], "_status_code": 503}
     session = backend._get_session(uid)
     if not session:
-        raise HTTPException(status_code=400, detail="Probe not connected")
+        return {"success": False, "error": "Probe not connected",
+                "registers": [], "errors": [], "_status_code": 400}
+
+    # 与 RTT 轮询/其它调试命令串行访问 target：
+    # pyOCD target 不是线程安全的，RTT 每 10ms 读一次内存，若这里并发读寄存器，
+    # 偶发的单个寄存器读取失败会让 PC 等关键寄存器缺失（表现为“没有匹配的寄存器”）。
+    op_lock = backend.get_op_lock(uid)
+    if not op_lock.acquire(timeout=REGISTERS_LOCK_TIMEOUT):
+        return {
+            "success": False,
+            "error": "调试操作进行中（等待 3 秒仍未释放）：请稍后重试，或先停止 RTT/等待当前命令完成。",
+            "registers": [],
+            "errors": [],
+            "_status_code": 409,
+        }
     try:
-        core = session.target.selected_core_or_raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Target not available: {e}")
-
-    registers = []
-    errors = []
-    for name in _CORE_REG_ORDER:
         try:
-            value = core.read_core_register(name)
-            # 浮点寄存器可能返回 float，统一转整数展示
-            if isinstance(value, float):
-                value = int(value)
-            registers.append({
-                "name": name.upper(),
-                "value": value,
-                "description": _CORE_REG_DESCRIPTIONS.get(name, ""),
-                "group": _CORE_REG_GROUP.get(name, "core"),
-            })
+            core = session.target.selected_core_or_raise
         except Exception as e:
-            errors.append({"name": name, "error": str(e)})
+            return {"success": False, "error": f"Target not available: {e}",
+                    "registers": [], "errors": [], "_status_code": 503}
 
-    return {"success": True, "registers": registers, "errors": errors}
+        registers = []
+        errors = []
+        for name in _CORE_REG_ORDER:
+            try:
+                value = core.read_core_register(name)
+                # 浮点寄存器可能返回 float，统一转整数展示
+                if isinstance(value, float):
+                    value = int(value)
+                registers.append({
+                    "name": name.upper(),
+                    "value": value,
+                    "description": _CORE_REG_DESCRIPTIONS.get(name, ""),
+                    "group": _CORE_REG_GROUP.get(name, "core"),
+                })
+            except Exception as e:
+                errors.append({"name": name, "error": str(e)})
+
+        if not registers and errors:
+            # 一个都读不到。先区分“目标在运行（需暂停）”和“会话失效”：
+            # 前者是正常状态，直接报 503 + “会话失效”会误导用户去重连探针。
+            msgs = [str(e.get("error", "")) for e in errors if isinstance(e, dict)]
+            if any("not halted" in m.lower() for m in msgs):
+                return {
+                    "success": False,
+                    "error": "目标正在运行，核心寄存器需在暂停态读取：请先执行 `omni debug halt` 再重试。",
+                    "registers": [],
+                    "errors": errors,
+                    "_status_code": 409,
+                }
+            # 目标大概率已失联（典型错误 "Target is not connected."）
+            return {
+                "success": False,
+                "error": _failure_detail({"errors": errors}, "读取寄存器失败"),
+                "registers": [],
+                "errors": errors,
+                "_status_code": 503,
+            }
+        return {"success": True, "registers": registers, "errors": errors}
+    finally:
+        op_lock.release()
 
 
 # ── Core Peripherals（NVIC，Keil 范式：按中断源） ──────────

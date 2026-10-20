@@ -13,7 +13,7 @@ export async function eraseFlash(
     type,
     address,
     size,
-  })
+  }, { timeout: 0 })
   return data as FlashResult
 }
 
@@ -33,7 +33,7 @@ export async function programFlash(
     verify,
     reset,
     base_address: baseAddress,
-  })
+  }, { timeout: 0 })
   return result as FlashResult
 }
 
@@ -49,7 +49,7 @@ export async function verifyFlash(
     file_path: filePath,
     data: data ?? '',
     base_address: baseAddress,
-  })
+  }, { timeout: 0 })
   return result as FlashResult
 }
 

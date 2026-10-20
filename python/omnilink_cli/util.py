@@ -23,13 +23,13 @@ def resolve_uid(c, args) -> str | None:
 
     多探针场景不能盲取 probes[0]：机器上可能同时挂着已连接的 J-Link 和未连接的
     CMSIS-DAP，取到后者会让所有依赖探针的命令误报「Probe not connected」。
+
+    注意：后端通信错误（ApiError）必须向上抛，由 cli.main 统一给出「后端无响应 /
+    未启动」的提示；吞掉它会变成误导性的「缺少探针 uid」（实机报告 P1-3）。
     """
     if getattr(args, "uid", None):
         return args.uid
-    try:
-        probes = c.get("/api/probes").get("probes", [])
-    except Exception:
-        return None
+    probes = c.get("/api/probes").get("probes", [])
     if not probes:
         return None
     for p in probes:

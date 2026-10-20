@@ -138,7 +138,14 @@ export interface DeviceRamRegion {
 /** Flash 操作结果 */
 export interface FlashResult {
   success: boolean
-  bytes_written: number
+  /** 写入类操作（program/fill）实际写入的字节数；其它操作响应中不存在 */
+  bytes_written?: number
+  /** 校验操作实际比对的字节数（verify 专用） */
+  bytes_verified?: number
+  /** 擦除操作实际擦除的字节数（erase 专用） */
+  bytes_erased?: number
+  /** 本次操作前是否自动停止了 RTT 会话 */
+  rtt_stopped?: boolean
   duration_ms: number
   error?: string | null
 }

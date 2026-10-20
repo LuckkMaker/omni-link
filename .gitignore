@@ -57,9 +57,22 @@ python/data/packs/installed_packs.json
 .env.*
 !.env.example
 
+# ── 代码签名证书（含私钥，切勿提交）──────
+*.pfx
+*.p12
+*.pvk
+*.snk
+certs/
+
 # ── 日志 ─────────────────────────────────
 *.log
 logs/
+
+# ── CLI 运行时状态（omni backend 常驻记录）──
+python/omnilink_cli/.backend_runtime.json
+python/omnilink_cli/.backend.handshake.jsonl
+# CLI 持久化配置（wheel 安装后记录后端目录，含本机绝对路径，不提交）
+python/omnilink_cli/cli.config.json
 
 # ── 临时/备份文件 ────────────────────────
 *.tmp
@@ -82,6 +95,7 @@ coverage/
 .eslintcache
 .parcel-cache/
 .vite/
+.vitest-cache/
 
 # ── electron-vite 临时构建配置 ───────────
 electron.vite.config.*.mjs
@@ -123,3 +137,9 @@ ehthumbs_vista.db
 *.prof
 *.profraw
 /.workbuddy
+
+# ── DSH 内嵌运行时（构建期生成，体积大，不提交）──
+# .dsh-runtime/ 由 scripts/dsh-runtime.ps1 生成：Node 24 + @deepseek-ai/dsh 全树 + 预烘焙 DSH_HOME
+.dsh-runtime/
+# 可行性 spike 的临时安装目录
+.dsh-spike/

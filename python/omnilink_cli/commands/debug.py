@@ -9,6 +9,7 @@ CLI 每条命令都是独立进程，因此 `omni debug elf load` 之后可直�
 
 import json
 import os
+import sys
 import urllib.parse
 
 from ..client import ApiClient
@@ -41,7 +42,8 @@ def add_parser(sub):
                    help="into=进入(默认) / over=跳过 / out=跳出")
     s.set_defaults(func=run_command(_step))
 
-    s = ps.add_parser("reset", parents=[common_parser()], help="复位目标")
+    s = ps.add_parser("reset", parents=[common_parser()],
+                      help="复位目标（默认复位并暂停，与 flash reset 默认运行相反）")
     _uid(s)
     s.add_argument("--mode", choices=["halt", "run", "break-symbol"], default="halt",
                    help="halt=复位暂停(默认) / run=复位运行 / break-symbol=复位运行并停在入口符号")
@@ -254,7 +256,8 @@ def _status(c: ApiClient, args):
         return 1
     data = c.post(f"/api/probes/{uid}/zone/debug/status")
     finish(args, data, _state_text(data))
-    return 0
+    # 会话失效/状态不可信时 success=false：必须让脚本拿到非零退出码（P2-1）
+    return 0 if data.get("success", True) else 1
 
 
 def _halt(c: ApiClient, args):
@@ -470,6 +473,7 @@ def _regs(c: ApiClient, args):
     if not uid:
         return 1
     data = c.get(f"/api/probes/{uid}/zone/registers/core")
+    failed = data.get("success") is False
     regs = data.get("registers", [])
     if args.filter:
         needle = args.filter.lower()
@@ -478,10 +482,28 @@ def _regs(c: ApiClient, args):
         if args.filter:
             data = {**data, "registers": regs}
         finish(args, data, "")
-        return 0
+        return 1 if failed else 0
+    if failed:
+        print(f"错误: {data.get('error') or '读取寄存器失败'}")
+        return 1
+    errors = data.get("errors") or []
     if not regs:
+        # 过滤后为空时不要一律说“没有匹配的寄存器”：该寄存器可能恰好读取失败
+        # （RTT 轮询/调试操作并发时可能发生），要给出真实错误而不是误导性的空结果。
+        if args.filter and errors:
+            needle = args.filter.lower()
+            failed_regs = [e for e in errors if needle in str(e.get("name", "")).lower()]
+            if failed_regs:
+                first = failed_regs[0]
+                print(f"错误: 读取寄存器 {first.get('name')} 失败: {first.get('error')}",
+                      file=sys.stderr)
+                return 1
         print("没有匹配的寄存器")
         return 0
+    if errors:
+        first = errors[0]
+        print(f"警告: {len(errors)} 个寄存器读取失败（首个: {first.get('name')}: {first.get('error')}）",
+              file=sys.stderr)
     rows = [[r.get("name"), _addr(r.get("value")), r.get("group") or "", r.get("description") or ""]
             for r in regs]
     print(render_table(["寄存器", "值", "分组", "说明"], rows))
@@ -1018,10 +1040,15 @@ def _state_text(data: dict, bare: bool = False) -> str:
     pc = data.get("pc")
     pc_s = _addr(pc) if isinstance(pc, int) else "-"
     state = data.get("state", "unknown")
+    error = data.get("error")
     if bare:
-        return f"{state}  PC {pc_s}"
+        text = f"{state}  PC {pc_s}"
+        return f"{text}  错误: {error}" if error else text
     connected = "是" if data.get("connected") else "否"
-    return f"连接: {connected}  状态: {state}  PC: {pc_s}"
+    text = f"连接: {connected}  状态: {state}  PC: {pc_s}"
+    if error:
+        text += f"  错误: {error}"
+    return text
 
 
 def _resolve_addr(c: ApiClient, uid: str, text: str):

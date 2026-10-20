@@ -18,5 +18,5 @@ def common_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true", default=False,
                    help="仅设置退出码，不输出任何内容")
     p.add_argument("--timeout", type=int, default=30, metavar="SEC",
-                   help="后端 HTTP 超时秒数（默认 30）")
+                   help="后端 HTTP 超时秒数（默认 30；flash 烧录/擦除默认 180，校验/回读/填充默认 120）")
     return p

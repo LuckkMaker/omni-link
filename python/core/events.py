@@ -62,9 +62,10 @@ class EventManager:
                         "data": {"timestamp": datetime.now().isoformat()}
                     }))
                 elif action == "refresh_probes":
-                    # 客户端请求立即刷新探针列表
+                    # 客户端请求刷新探针列表：返回监控线程维护的快照，避免在事件循环里
+                    # 直接做 USB 枚举（会话被独占时枚举可能阻塞数秒）。
                     from core.pyocd_backend import backend
-                    probes = backend.get_probe_states()
+                    probes = backend.get_cached_probe_states()
                     await websocket.send_text(json.dumps({
                         "event": "probe.list",
                         "data": {"probes": probes}

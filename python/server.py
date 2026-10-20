@@ -193,7 +193,26 @@ def load_config_port():
         return None
 
 
+def _configure_stdio() -> None:
+    """把后端 stdout/stderr 固定为 UTF-8。
+
+    后端 stderr 由 CLI/Electron 重定向到 UTF-8 日志文件；若 Python 按系统 locale
+    （中文 Windows=cp936）写日志，日志文件里就会是 GBK 字节，用 UTF-8 打开即乱码。
+    stdout 只输出握手 JSON（ASCII），不受影响。尊重用户显式设置的 PYTHONIOENCODING。
+    """
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main():
+    _configure_stdio()
     parser = argparse.ArgumentParser(description="OMNI Link Backend Server")
     parser.add_argument("--port", type=int, default=None,
                         help="监听端口 (默认读取 backend.config.json，未配置则自动分配)")

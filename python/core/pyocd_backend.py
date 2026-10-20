@@ -77,7 +77,17 @@ class PyOCDBackend(BackendInterface):
         self._missing_polls: dict[str, int] = {}
         self._pending_target: str | None = None  # 连接时使用的目标型号
         self._probe_info_cache: dict[str, ProbeInfo] = {}  # 缓存探针初始信息（避免连接后名称变化）
-        self._cancel_flag: threading.Event = threading.Event()
+        # Flash 操作的取消标志。
+        # 历史实现只有一个 Event：如果用户在“没有操作进行”时点了取消，标志会一直留着，
+        # 下一次 program/erase 在第一个分块就 Self-cancel（表现为“莫名失败”）。
+        # 改为按操作序号打标：每次操作开始 _op_seq+1，取消只对当前序号有效。
+        self._cancel_lock = threading.Lock()
+        self._op_seq = 0
+        self._cancel_for_op: int | None = None
+        # 探针列表/状态快照：由监控线程每 2s 刷新，/api/probes 等只读接口直接返回，
+        # 不再逐请求做 USB 枚举（实机报告 P1-2：后端无响应时状态接口也一起阻塞）。
+        self._states_snapshot: list[dict] | None = None
+        self._states_at: float = 0.0
         # 调试/刷新协调锁（per-UID）：用户调试操作（halt/step/continue/reset）持有
         # （阻塞获取），周期刷新（read_memory_direct 等）try-acquire，获取不到直接跳过，
         # 保证调试操作不被周期性刷新并发访问 pyOCD target 影响。
@@ -87,16 +97,46 @@ class PyOCDBackend(BackendInterface):
     # ── 探针扫描 ──────────────────────────────────────────────
 
     def cancel_operation(self):
-        """取消正在进行的 Flash 操作（check_blank / read_back / erase / program）"""
-        self._cancel_flag.set()
+        """取消正在进行的 Flash 操作（check_blank / read_back / erase / program）
+
+        没有操作在跑时忽略请求：否则残留的取消标志会让下一次操作在首个分块就中止。
+        """
+        with self._cancel_lock:
+            if self._op_seq <= 0:
+                event_manager.log("warning", "当前没有正在进行的 Flash 操作，取消请求已忽略")
+                return
+            self._cancel_for_op = self._op_seq
         event_manager.log("warning", "操作取消请求已发送")
 
+    def _begin_operation(self) -> None:
+        """Flash 操作开始：推进操作序号，使此前的取消请求自然失效。"""
+        with self._cancel_lock:
+            self._op_seq += 1
+            self._cancel_for_op = None
+
     def _check_cancel(self) -> bool:
-        """检查取消标志，如果已取消则重置并返回 True"""
-        if self._cancel_flag.is_set():
-            self._cancel_flag.clear()
-            return True
-        return False
+        """检查当前操作是否被取消（只认本操作开始后发出的取消请求）"""
+        with self._cancel_lock:
+            if self._cancel_for_op is not None and self._cancel_for_op == self._op_seq:
+                self._cancel_for_op = None
+                return True
+            return False
+
+    @staticmethod
+    def _flash_error(phase: str, exc: Exception, elapsed_ms: int, detail: str = "") -> str:
+        """把 pyOCD 的笼统异常包装成可定位的错误文本（实机报告 P3-3）。
+
+        pyOCD 的 FlashLoader 在算法超时/目标掉电时会抛 "Unspecified error."，
+        没有地址和阶段信息，CLI 只能看到一句无意义的话。这里补上阶段、对象与耗时，
+        并针对最常见的笼统错误给出排查方向。
+        """
+        msg = str(exc).strip() or type(exc).__name__
+        hint = ""
+        if msg.rstrip(".").strip().lower() == "unspecified error":
+            hint = ("（pyOCD/Flash 算法未给出更多细节；请检查目标供电、SWD 频率与 Flash 算法是否匹配，"
+                    "并查看后端日志 .backend.log）")
+        ctx = f"，{detail}" if detail else ""
+        return f"{phase}失败{ctx}，耗时 {elapsed_ms}ms：{msg}{hint}"
 
     def list_probes(self) -> list[ProbeInfo]:
         """返回所有可见探针（缓存初始信息，避免连接后名称变化）。
@@ -152,8 +192,19 @@ class PyOCDBackend(BackendInterface):
         return result
 
     def get_probe_states(self) -> list[dict]:
-        """返回所有探针及其连接状态"""
+        """返回所有探针及其连接状态（会做一次硬件枚举，慢）。
+
+        调用方若是 HTTP 只读接口，应优先用 ``get_cached_probe_states()``。
+        """
         probes = self.list_probes()
+        states = self._build_probe_states(probes)
+        with self._lock:
+            self._states_snapshot = states
+            self._states_at = time.time()
+        return states
+
+    def _build_probe_states(self, probes: list[ProbeInfo]) -> list[dict]:
+        """由已枚举到的探针列表拼装状态（不触碰硬件）。"""
         result = []
         with self._lock:
             for p in probes:
@@ -166,6 +217,18 @@ class PyOCDBackend(BackendInterface):
                     "target": target.to_dict() if target else None,
                 })
         return result
+
+    def get_cached_probe_states(self) -> list[dict]:
+        """返回最近一次快照（由监控线程每 2s 刷新）。
+
+        P1-2：后端被挂起的硬件操作拖住时，状态查询不应排队等锁/等 USB 枚举；
+        首次调用（还没有快照）才做一次真实枚举。
+        """
+        with self._lock:
+            snapshot = self._states_snapshot
+        if snapshot is not None:
+            return list(snapshot)
+        return self.get_probe_states()
 
     # ── 热插拔检测 ──────────────────────────────────────────────
 
@@ -217,6 +280,13 @@ class PyOCDBackend(BackendInterface):
                     self._known_probe_uids.discard(uid)
                     self._missing_polls.pop(uid, None)
                     self._probe_info_cache.pop(uid, None)
+
+        # 同一次枚举顺带刷新状态快照：/api/probes、/api/probes/states 直接读快照，
+        # 不再各自触发 USB 枚举（P1-2）。
+        states = self._build_probe_states(current_probes)
+        with self._lock:
+            self._states_snapshot = states
+            self._states_at = time.time()
 
         return added, removed
 
@@ -447,7 +517,9 @@ class PyOCDBackend(BackendInterface):
                 else:
                     event_manager.emit("probe.disconnected", {"uid": probe_uid, "reason": "error"})
                 with self._lock:
-                    session_info.state = ProbeState.ERROR
+                    # 没有建立任何 session：回落到“未连接”，用户可直接重试，
+                    # 不让探针卡在 error（错误文本仍保留在 session.error 供 API 透传）。
+                    session_info.state = ProbeState.DISCONNECTED
                     session_info.error = last_error
                 return False
 
@@ -498,7 +570,9 @@ class PyOCDBackend(BackendInterface):
 
         except Exception as e:
             with self._lock:
-                session_info.state = ProbeState.ERROR
+                # 未拿到 session 的失败同样回落到 disconnected；已有 session 的异常
+                # 仍标记 error，避免把“连着但状态异常”误报成未连接。
+                session_info.state = ProbeState.DISCONNECTED if session is None else ProbeState.ERROR
                 session_info.error = str(e)
             event_manager.log("error", f"Connection failed: {e}")
             event_manager.emit("probe.disconnected", {"uid": probe_uid, "reason": "error"})
@@ -634,6 +708,51 @@ class PyOCDBackend(BackendInterface):
     def is_connected(self, probe_uid: str) -> bool:
         """检查探针是否已连接"""
         return self.get_state(probe_uid) == ProbeState.CONNECTED
+
+    def session_healthy(self, probe_uid: str) -> bool:
+        """会话是否真的可用（状态为 CONNECTED 且 pyOCD session 仍处于打开状态）。
+
+        与 ``is_connected`` 的区别：后者只看我们自己的状态字典。底层 session 可能
+        已被外部工具关闭/目标失联，此时状态仍是 CONNECTED，直接读寄存器会得到
+        "Target is not connected."（实机报告 P2-1）。
+        """
+        with self._lock:
+            session_info = self._sessions.get(probe_uid)
+            if session_info is None or session_info.state != ProbeState.CONNECTED:
+                return False
+            py_session = session_info.session
+        if py_session is None:
+            return False
+        try:
+            return bool(py_session.is_open)
+        except Exception:
+            return False
+
+    def get_session_error(self, probe_uid: str) -> str | None:
+        """最近一次连接失败的具体原因（供 API 透传，替代笼统的 Connection failed）。"""
+        with self._lock:
+            session_info = self._sessions.get(probe_uid)
+            return session_info.error if session_info else None
+
+    def get_pending_target(self) -> str | None:
+        """连接时使用的默认目标型号（由 set_target 记录）。"""
+        return self._pending_target
+
+    def abort_connect(self, probe_uid: str, error: str) -> None:
+        """连接/设置目标超时后强制把会话标记为失效（HTTP 已返回，线程仍在跑）。
+
+        pyOCD 的 open() 是原生阻塞调用，无法从 Python 侧取消；这里只做三件事：
+        标记状态、保留错误、通知前端，让后续请求快速失败而不是继续排队。
+        """
+        with self._lock:
+            session_info = self._sessions.get(probe_uid)
+            if session_info is None:
+                session_info = ProbeSession(uid=probe_uid)
+                self._sessions[probe_uid] = session_info
+            session_info.state = ProbeState.ERROR
+            session_info.error = error
+        event_manager.log("error", f"Connect aborted: {error}")
+        event_manager.emit("probe.disconnected", {"uid": probe_uid, "reason": "timeout"})
 
     def _get_session(self, probe_uid: str):
         """获取已连接的 pyOCD session，未连接则返回 None"""
@@ -891,13 +1010,16 @@ class PyOCDBackend(BackendInterface):
         size: int = 0,
     ) -> FlashResult:
         """擦除 Flash"""
+        self._begin_operation()
         session = self._get_session(probe_uid)
         if not session:
             return FlashResult(success=False, error="Not connected")
 
         start_time = time.time()
+        erased_bytes = 0
         try:
             from pyocd.flash.flash import Flash
+            from pyocd.core.memory_map import MemoryType
 
             # 擦除前复位并暂停目标，确保目标处于已知状态。
             # 目标可能正在运行用户代码，Flash 控制器状态未知，直接擦除
@@ -914,6 +1036,12 @@ class PyOCDBackend(BackendInterface):
 
             if erase_type == "chip":
                 event_manager.log("info", "Erasing chip...")
+                # 芯片可能由多个 FlashRegion 组成（如 STM32F407：64K + 64K + 896K），
+                # get_boot_memory() 只返回第一个 region；全片擦除的字节数要按所有
+                # FLASH region 求和，否则 bytes_erased 会误报成 64KB。
+                chip_bytes = sum(
+                    r.length for r in session.target.memory_map if r.type == MemoryType.FLASH
+                ) or region.length
                 # 使用 Flash.erase_all() 进行全片擦除
                 flash.init(Flash.Operation.ERASE)
                 try:
@@ -923,12 +1051,13 @@ class PyOCDBackend(BackendInterface):
                             "unit": "operations",
                         })
                         flash.erase_all()
+                        erased_bytes = chip_bytes
                         event_manager.emit("flash.progress", {
                             "phase": "erase", "current": 1, "total": 1, "percent": 100,
                             "unit": "operations",
                         })
                     else:
-                        # 不支持 erase_all 时，逐扇区擦除
+                        # 不支持 erase_all 时，逐扇区擦除（仅 boot region）
                         sector_size = getattr(region, 'sector_size', 0) or 16384
                         total_sectors = region.length // sector_size
                         for i in range(total_sectors):
@@ -940,6 +1069,7 @@ class PyOCDBackend(BackendInterface):
                                 "percent": round((i + 1) / total_sectors * 100, 2),
                                 "unit": "sectors",
                             })
+                        erased_bytes = region.length
                         event_manager.emit("flash.progress", {
                             "phase": "erase", "current": total_sectors, "total": total_sectors, "percent": 100,
                             "unit": "sectors",
@@ -1002,6 +1132,7 @@ class PyOCDBackend(BackendInterface):
                                 raise FlashOperationCancelled()
                             flash.erase_sector(addr)
                             erased += 1
+                            erased_bytes += region.sector_size
                             event_manager.emit("flash.progress", {
                                 "phase": "erase", "current": erased, "total": total_sectors,
                                 "percent": round(erased / total_sectors * 100, 2) if total_sectors > 0 else 100,
@@ -1024,6 +1155,7 @@ class PyOCDBackend(BackendInterface):
                 flash.init(Flash.Operation.ERASE)
                 try:
                     flash.erase_sector(address)
+                    erased_bytes = region.sector_size
                 finally:
                     flash.uninit()
                 event_manager.emit("flash.progress", {
@@ -1031,20 +1163,29 @@ class PyOCDBackend(BackendInterface):
                     "unit": "operations",
                 })
 
+            # 擦除完成后复位一次：与 Flash 算法/控制器状态解耦，保证紧接着的
+            # blank-check / read / program 读到真实内容（复位前调试口可能读到旧值）。
+            try:
+                session.target.reset_and_halt()
+            except Exception as e:
+                event_manager.log("warning", f"Erase: 擦除后复位失败（后续读取可能不准确）: {e}")
+
             duration = int((time.time() - start_time) * 1000)
-            event_manager.log("info", f"Erase complete ({duration}ms)")
-            return FlashResult(success=True, duration_ms=duration)
+            event_manager.log("info", f"Erase complete ({duration}ms, {erased_bytes} bytes)")
+            return FlashResult(success=True, duration_ms=duration, bytes_erased=erased_bytes)
         except FlashOperationCancelled:
             canceled_ms = int((time.time() - start_time) * 1000)
             event_manager.log("warning", f"Erase cancelled ({canceled_ms}ms)")
             return FlashResult(success=False, error="Operation cancelled by user", duration_ms=canceled_ms)
         except Exception as e:
             logger.exception("Erase failed")
-            event_manager.log("error", f"Erase failed: {e}")
+            failed_ms = int((time.time() - start_time) * 1000)
+            error_text = self._flash_error("擦除", e, failed_ms)
+            event_manager.log("error", error_text)
             return FlashResult(
                 success=False,
-                error=str(e),
-                duration_ms=int((time.time() - start_time) * 1000),
+                error=error_text,
+                duration_ms=failed_ms,
             )
 
     def program(
@@ -1065,6 +1206,7 @@ class PyOCDBackend(BackendInterface):
             reset: 烧录后是否复位
             base_address: BIN 文件的烧录基地址
         """
+        self._begin_operation()
         session = self._get_session(probe_uid)
         if not session:
             return FlashResult(success=False, error="Not connected")
@@ -1186,11 +1328,14 @@ class PyOCDBackend(BackendInterface):
             return FlashResult(success=False, error="Operation cancelled by user", duration_ms=canceled_ms)
         except Exception as e:
             logger.exception("Programming failed")
-            event_manager.log("error", f"Programming failed: {e}")
+            failed_ms = int((time.time() - start_time) * 1000)
+            detail = os.path.basename(file_path) if file_path else "内存数据"
+            error_text = self._flash_error("烧录", e, failed_ms, detail)
+            event_manager.log("error", error_text)
             return FlashResult(
                 success=False,
-                error=str(e),
-                duration_ms=int((time.time() - start_time) * 1000),
+                error=error_text,
+                duration_ms=failed_ms,
             )
         finally:
             # 清理临时文件
@@ -1200,14 +1345,22 @@ class PyOCDBackend(BackendInterface):
                 except Exception:
                     pass
 
-    def verify(self, probe_uid: str, file_path: str, data: str = "", base_address: int | None = None) -> FlashResult:
+    def verify(self, probe_uid: str, file_path: str, data: str = "", base_address: int | None = None,
+               reset_target: bool = True) -> FlashResult:
         """校验 Flash 内容：读取 Flash 并与文件/数据逐字节对比
 
         Args:
             file_path: 固件文件路径（与 data 二选一）
             data: base64 编码的固件数据（与 file_path 二选一）
             base_address: 数据的基地址（使用 data 时必须提供）
+            reset_target: 读取 Flash 前是否先 reset_and_halt。
+
+        读取 Flash 为什么必须先复位：Flash 算法写完后，调试口在芯片复位前可能继续
+        读到陈旧内容（实机稳定复现：chip erase → program 内部校验必报
+        0x08000000 处不一致，复位后读即正确）。因此凡是 Flash 地址的校验，默认
+        先 reset_and_halt 再读；RAM 地址仍只 halt，避免复位清掉待校验数据。
         """
+        self._begin_operation()
         session = self._get_session(probe_uid)
         if not session:
             return FlashResult(success=False, error="Not connected")
@@ -1229,17 +1382,29 @@ class PyOCDBackend(BackendInterface):
 
         start_time = time.time()
         try:
-            # 停止目标，确保 Flash 读取稳定
-            session.target.halt()
-
             if not segments:
                 ext = os.path.splitext(file_path)[1].lower()
                 event_manager.log("info", f"Verifying {ext} file...")
 
-                # 提取文件中的数据段 [(address, data_bytes), ...]
+                # 提取文件中的数据段 [(address, data_bytes), ...]（只读分析，不触碰目标状态）
                 segments = self._extract_file_data(session, file_path, ext, base_address)
                 if not segments:
                     return FlashResult(success=False, error="No data segments found in file")
+
+            def _is_flash_addr(addr: int) -> bool:
+                region = session.target.memory_map.get_region_for_address(addr)
+                return bool(region is not None and getattr(region, "is_flash", False))
+
+            # Flash 数据：复位后再读，避免读到陈旧 Flash；RAM 数据只暂停。
+            if reset_target and segments and all(_is_flash_addr(a) for a, _ in segments):
+                try:
+                    session.target.reset_and_halt()
+                except Exception as e:
+                    event_manager.log("warning",
+                                      f"Verify: reset_and_halt 失败，回退到 halt（可能读到旧数据）: {e}")
+                    session.target.halt()
+            else:
+                session.target.halt()
 
             total_bytes = sum(len(d) for _, d in segments)
             verified_bytes = 0
@@ -1250,6 +1415,13 @@ class PyOCDBackend(BackendInterface):
             # 32KB 分块读取（v2 WinUSB 单次事务上限 ~8192 words = 32KB）
             # 4字节对齐时用 block32（比 block8 快 2-3 倍），非对齐回退 block8
             chunk_size = 32768
+
+            def _read_chunk(chunk_addr: int, length: int) -> bytes:
+                if chunk_addr % 4 == 0 and length % 4 == 0:
+                    words = session.target.read_memory_block32(chunk_addr, length // 4)
+                    return array.array('I', words).tobytes()
+                return bytes(session.target.read_memory_block8(chunk_addr, length))
+
             for seg_addr, seg_data in segments:
                 for offset in range(0, len(seg_data), chunk_size):
                     if self._check_cancel():
@@ -1257,29 +1429,35 @@ class PyOCDBackend(BackendInterface):
                     read_len = min(chunk_size, len(seg_data) - offset)
                     addr = seg_addr + offset
 
-                    if addr % 4 == 0 and read_len % 4 == 0:
-                        # block32 + array 转换：USB 传输量减半，速度提升 2-3 倍
-                        words = session.target.read_memory_block32(addr, read_len // 4)
-                        flash_data = array.array('I', words).tobytes()
-                    else:
-                        flash_data = bytes(session.target.read_memory_block8(addr, read_len))
-
+                    flash_data = _read_chunk(addr, read_len)
                     file_chunk = seg_data[offset:offset + read_len]
 
                     if flash_data != file_chunk:
-                        # 找到第一个不匹配的字节
-                        for i in range(read_len):
-                            if flash_data[i] != file_chunk[i]:
-                                mismatch_addr = addr + i
-                                event_manager.log("error",
-                                    f"Verify failed at 0x{mismatch_addr:08X}: "
-                                    f"expected 0x{file_chunk[i]:02X}, got 0x{flash_data[i]:02X}")
-                                break
-                        return FlashResult(
-                            success=False,
-                            error=f"Verification failed at 0x{mismatch_addr:08X}",
-                            duration_ms=int((time.time() - start_time) * 1000),
-                        )
+                        # 刚烧录/擦除后立即读，偶尔会拿到尚未完全落盘的旧数据。
+                        # 复读一次再判定，避免把成功烧录误报成校验失败
+                        # （实机：chip erase 后首次 program 的内部 verify 曾误报）。
+                        time.sleep(0.05)
+                        retry_data = _read_chunk(addr, read_len)
+                        if retry_data == file_chunk:
+                            event_manager.log(
+                                "warning",
+                                f"Verify: transient read mismatch at 0x{addr:08X}, re-read OK")
+                            flash_data = retry_data
+                        else:
+                            flash_data = retry_data
+                            # 找到第一个不匹配的字节
+                            for i in range(read_len):
+                                if flash_data[i] != file_chunk[i]:
+                                    mismatch_addr = addr + i
+                                    event_manager.log("error",
+                                        f"Verify failed at 0x{mismatch_addr:08X}: "
+                                        f"expected 0x{file_chunk[i]:02X}, got 0x{flash_data[i]:02X}")
+                                    break
+                            return FlashResult(
+                                success=False,
+                                error=f"Verification failed at 0x{mismatch_addr:08X}",
+                                duration_ms=int((time.time() - start_time) * 1000),
+                            )
 
                     verified_bytes += read_len
                     event_manager.emit("flash.progress", {
@@ -1294,13 +1472,16 @@ class PyOCDBackend(BackendInterface):
             })
             duration = int((time.time() - start_time) * 1000)
             event_manager.log("info", f"Verify OK ({total_bytes} bytes, {duration}ms)")
-            return FlashResult(success=True, duration_ms=duration)
+            return FlashResult(success=True, duration_ms=duration, bytes_verified=total_bytes)
         except FlashOperationCancelled:
             return FlashResult(success=False, error="Operation cancelled by user")
         except Exception as e:
             logger.exception("Verify failed")
-            event_manager.log("error", f"Verify failed: {e}")
-            return FlashResult(success=False, error=str(e))
+            failed_ms = int((time.time() - start_time) * 1000)
+            detail = os.path.basename(file_path) if file_path else "内存数据"
+            error_text = self._flash_error("校验", e, failed_ms, detail)
+            event_manager.log("error", error_text)
+            return FlashResult(success=False, error=error_text, duration_ms=failed_ms)
 
     def _extract_file_data(self, session, file_path: str, ext: str, base_address: int | None = None) -> list[tuple[int, bytes]]:
         """从固件文件中提取数据段，返回 [(address, data_bytes), ...]"""
@@ -1431,6 +1612,7 @@ class PyOCDBackend(BackendInterface):
         if not (0 <= value <= 255):
             return FlashResult(success=False, error="Value must be 0-255")
 
+        self._begin_operation()
         start_time = time.time()
         try:
             data = bytes([value]) * size
@@ -1439,8 +1621,18 @@ class PyOCDBackend(BackendInterface):
             region = session.target.memory_map.get_region_for_address(address)
             if region and region.is_flash:
                 # Flash：使用 FlashLoader（自动处理擦除+编程）
-                from pyocd.flash.flash_loader import FlashLoader
+                from pyocd.flash.loader import FlashLoader
                 event_manager.log("info", f"Filling flash 0x{address:08X}..0x{address + size - 1:08X} with 0x{value:02X}")
+
+                # 填充范围必须落在单个 region 内；跨 region/越界交给 loader 会报
+                # 不直观的 ValueError，这里提前给出可执行的错误。
+                if not region.contains_range(start=address, end=address + size - 1):
+                    return FlashResult(
+                        success=False,
+                        error=(f"填充范围 0x{address:08X}..0x{address + size - 1:08X} "
+                               f"超出 Flash region 0x{region.start:08X}..0x{region.start + region.length - 1:08X}，"
+                               "请缩小范围或分批填充。"),
+                    )
 
                 # 填充前先复位并暂停目标（与 program 函数的 pre_reset 行为一致）
                 # 原因：目标可能正在运行用户代码，Flash 控制器状态未知，直接编程会失败
@@ -1450,7 +1642,8 @@ class PyOCDBackend(BackendInterface):
                 # 注意：FlashLoader 需要传入 session（提供 .board/.options），传入 session.target
                 # 会因缺少 .board/.options 属性导致 AttributeError（参照 program 函数 FileProgrammer(session, ...) 用法）
                 CHUNK_SIZE = 0x10000  # 64KB
-                loader = FlashLoader(session)
+                # chip_erase="sector"：与 program 一致，避免 auto 在已擦除 Flash 上跳过擦除
+                loader = FlashLoader(session, chip_erase="sector")
                 for offset in range(0, size, CHUNK_SIZE):
                     chunk = data[offset:offset + CHUNK_SIZE]
                     loader.add_data(address + offset, chunk)
@@ -1461,6 +1654,12 @@ class PyOCDBackend(BackendInterface):
                         "percent": round((offset + len(chunk)) / size * 100, 2),
                     })
                 loader.commit()
+
+                # 与 erase/program 一致：结束后复位一次，保证后续读取/校验拿到真实内容
+                try:
+                    session.target.reset_and_halt()
+                except Exception as e:
+                    event_manager.log("warning", f"Fill: 填充后复位失败（后续读取可能不准确）: {e}")
             else:
                 # RAM：直接写入
                 event_manager.log("info", f"Filling RAM 0x{address:08X}..0x{address + size - 1:08X} with 0x{value:02X}")
@@ -1480,8 +1679,10 @@ class PyOCDBackend(BackendInterface):
             return FlashResult(success=True, bytes_written=size, duration_ms=duration)
         except Exception as e:
             logger.exception("Fill memory failed")
-            event_manager.log("error", f"Fill memory failed: {e}")
-            return FlashResult(success=False, error=str(e))
+            failed_ms = int((time.time() - start_time) * 1000)
+            error_text = self._flash_error("填充", e, failed_ms)
+            event_manager.log("error", error_text)
+            return FlashResult(success=False, error=error_text, duration_ms=failed_ms)
 
     def check_blank(
         self,
@@ -1505,6 +1706,7 @@ class PyOCDBackend(BackendInterface):
             dict: success, is_blank, blank_bytes, total_bytes, scanned_bytes,
                   first_nonblank_addr, early_terminated, duration_ms
         """
+        self._begin_operation()
         session = self._get_session(probe_uid)
         if not session:
             return {"success": False, "error": "Not connected"}
@@ -1665,6 +1867,7 @@ class PyOCDBackend(BackendInterface):
         Returns:
             dict: success, base64_data, base_address, bytes_read, duration_ms
         """
+        self._begin_operation()
         session = self._get_session(probe_uid)
         if not session:
             return {"success": False, "error": "Not connected"}

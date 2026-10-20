@@ -12,6 +12,65 @@ omni (本包)  ──HTTP──▶  OMNI Link Python 后端 (server.py)  ──�
 
 这意味着：**执行任何实际命令前，都需要有一个正在运行的后端**。唯一例外是 `omni backend` 自身（负责拉起/停止后端）。
 
+## 版本记录
+
+### 0.2.3（2026-10-20）
+
+- 修复 `rtt read --since <过期游标> --json` 的 stdout 被中文警告污染、无法被
+  `ConvertFrom-Json` 解析的问题：`--json` 模式不再向 stderr 输出 `session_reset`/`lost`
+  警告，改为在 JSON 响应中增加 `warning` 字段；stdout 始终是纯 JSON/JSONL，人类可读模式
+  的警告仍在 stderr。
+- `rtt read --json --out FILE` 不再输出“已追加写入”stderr 提示，避免合并捕获时污染 JSON。
+
+### 0.2.2（2026-10-20）
+
+- 修复 `flash erase --type chip` 后 `program` 内部校验误报 `Verify failed at 0x08000000`：
+  Flash 算法写完后调试口在复位前可能读到陈旧内容。`program` 的内部校验与独立
+  `flash verify` 现在先 `reset_and_halt` 再读取；`erase` / `fill`（Flash）结束也会复位一次。
+- 修复 `flash fill`：导入路径改为 `pyocd.flash.loader`（原 `flash_loader` 不存在）；
+  Flash 填充使用 `chip_erase="sector"`，并校验范围落在单个 region 内。
+- `flash fill --value` 支持 `0x55` 等十六进制写法（仍限制 0-255）。
+- RTT `--since`：`seq` 改为在同一后端进程内跨 `rtt start` 单调递增（只清缓存、不重置编号），
+  旧会话的 `next_seq` 可继续作为游标；后端重启后才从 1 开始，并返回 `session_reset` 提示，
+  不再静默返回 0 字节。
+- `probe list` 新增 `--refresh`；文档说明其状态来自 1~2s 监控快照，连接权威状态用
+  `probe status`。
+- 文档明确 `flash reset`（默认复位后运行）与 `debug reset`（默认复位并暂停）的默认值相反。
+
+### 0.2.1（2026-10-20）
+
+- Flash 操作前自动停止 RTT 轮询（Flash 算法需要独占 SWD）：修复 RTT 会话运行时全片擦除
+  被 30s 超时掐断、重试排队超时的问题；响应中的 `rtt_stopped` 告知是否自动停止。
+- `flash program` / `erase` 默认 HTTP 超时提高到 **180s**；`verify` / `blank-check` /
+  `read` / `fill` 为 120s（仍可用 `--timeout` 覆盖）。
+- `flash erase --json` 返回 `bytes_erased`，不再返回误导性的 `bytes_written: 0`；
+  各操作只输出本操作有意义的计数字段。
+- 同一探针的 Flash 操作串行化：重复请求立即 409，避免客户端超时后并发擦除/烧录。
+- 修复 `debug halt` 后立即 `debug regs` 的偶发竞态：RTT 轮询与寄存器读取共享 target
+  （现通过调试协调锁串行），且 Zone 的 halt 不再被 RTT 自动 resume 覆盖。
+- 文档修正：`commander exec list` 是 pyOCD 的探针/目标列表，列出 pyOCD 命令应使用
+  `commander exec help`。
+
+### 0.2.0（2026-10-20）
+
+- **新增命令 `omni rtt read`**：读取 SEGGER RTT 上行数据。支持 `--follow`（持续跟踪）、
+  `--duration`、`--out`（原始字节落盘）、`--channel`、`--since`、`--json`（follow 为 JSONL）。
+- `probe connect`：`--target` 改为必填（帮助与 argparse 双重标注）；`--speed` 校验
+  5 kHz ~ 50 MHz 并给出 `Hz/kHz` 单位提示；连接失败回落到 `disconnected`，修正参数后可直接重试。
+- `commander exec`：命令之后出现的已知全局选项（`--uid/--backend-port/--timeout/--managed/--json/--quiet`）
+  自动前移，`--json` 在任意位置均可用。
+- `flash verify --json`：不再返回误导性的 `bytes_written`，改为 `bytes_verified`。
+- `debug regs` / `debug status`：会话失效时返回 `success:false` 与非零退出码；
+  寄存器接口区分“目标运行中（409，提示先 halt）”与“会话失效（503）”。
+- 修复管道/重定向下中文输出 `�`（U+FFFD）：CLI stdout/stderr 显式固定 UTF-8，后端日志同步修复；
+  构建脚本新增源码编码检查与打包后帮助输出校验。
+- 后端配套：RTT 上行环形缓存（REST 与 WebSocket 共用）、探针列表状态快照、
+  connect/set-target/寄存器读取的 HTTP 超时、commander 调试锁有限等待。
+
+### 0.1.0
+
+- 首个版本：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `device` / `rtt` 基础命令。
+
 ## 安装
 
 ### 方式一：wheel 安装（推荐，日常测试）
@@ -88,11 +147,19 @@ omni backend stop
 | `--managed` | 临时拉起托管后端，执行完自动关停 |
 | `--json` | 输出结构化 JSON，供脚本/CI 消费 |
 | `--quiet` | 不输出内容，仅设置退出码 |
-| `--timeout SEC` | 后端 HTTP 超时秒数（默认 30） |
+| `--timeout SEC` | 后端 HTTP 超时秒数（默认 30；`flash program/erase` 默认 180，`verify/blank-check/read/fill` 默认 120） |
 
-> ⚠️ `omni commander exec` 的全局选项**必须写在命令之前**（因其命令参数用 `REMAINDER` 收集）：
-> `omni commander exec --uid 852001270 read32 0x080000C0 4` ✅
-> `omni commander exec read32 0x080000C0 4 --uid 852001270` ❌
+> ℹ️ `omni commander exec` 的命令参数用 `REMAINDER` 收集。为兼容常见写法，CLI 解析前会把
+> 命令之后出现的**已知全局选项**（`--uid` / `--backend-port` / `--timeout` / `--managed` /
+> `--json` / `--quiet`）自动前移，因此下面两种写法都可用：
+>
+> ```powershell
+> omni commander exec --uid 852001270 read32 0x080000C0 4   # 推荐
+> omni commander exec "read32 0x080000C0 4" --timeout 15    # 也可
+> ```
+>
+> 其它以 `--` 开头的选项（不属于全局选项）仍须写在命令之前，否则会作为命令参数传给 pyOCD。
+> `--` 之后的内容不会被提取。
 
 ## 命令参考
 
@@ -119,25 +186,36 @@ omni backend stop
 
 | 子命令 | 说明 |
 | --- | --- |
-| `list` | 枚举探针（UID / 厂商 / 产品 / 串号 / 连接状态） |
+| `list` | 枚举探针（UID / 厂商 / 产品 / 串号 / 连接状态；状态来自 1~2s 监控快照） |
 | `connect <uid>` | 连接探针并指定目标芯片 |
 | `disconnect <uid>` | 断开探针（等待底层关闭，释放 J-Link 等探针句柄） |
-| `status <uid>` | 查询连接状态与目标信息 |
+| `status <uid>` | 查询连接状态与目标信息（**连接的权威状态以此为准**） |
 | `target <uid> [--part PART]` | 查询或设置目标型号 |
+
+> `probe list` 为了性能读取后台监控快照（每 2s 刷新），刚 `connect` 后可能仍显示
+> `disconnected`；需要立即刷新用 `omni probe list --refresh`，或用 `omni probe status <uid>`。
 
 `connect` 选项：
 
 | 选项 | 说明 |
 | --- | --- |
-| `--target` | 目标芯片型号（如 `stm32f407xg`） |
+| `--target` | **必填**，目标芯片型号（如 `stm32f407xg`；用 `omni target list` 查询） |
 | `--interface` | `swd`（默认）/ `jtag` |
-| `--speed` | 时钟频率 Hz |
+| `--speed` | 时钟频率 Hz，范围 5000（5 kHz）~ 50000000（50 MHz），如 `4000000` = 4 MHz |
 | `--connect-mode` | `attach` 附加不复位 / `halt` 复位并暂停 / `pre-reset` 连接前复位 / `under-reset` 复位下连接 |
 | `--jlink-device` | **J-Link 必填**，SEGGER 数据库中的设备名（如 `G32F463XC`） |
 | `--force` | 已连接时强制按新参数重连 |
 
+> `--target` 由 CLI 与服务端双重校验：CLI 缺少时直接报用法错误（退出码 2 的同类错误），
+> 直接调 REST 则立即返回 400，不会把空目标交给 pyOCD 长时间探测。失败后探针回落到
+> `disconnected`，修正参数后可直接重试，无需先 `disconnect`。
+>
+> `--speed` 低于 J-Link 下限时不再只显示 DLL 原文 `Minimum is 5.`，而是明确给出
+> “`4000 Hz = 4 kHz`，下限 `5 kHz`（`--speed 5000`）”。
+
 ```powershell
 omni probe list
+omni probe list --refresh          # 强制重新枚举（刚 connect 后看即时状态）
 omni probe connect 852001270 --target stm32f407xg
 omni probe connect 852001270 --target G32F463XC --jlink-device G32F463XC
 omni probe status 852001270
@@ -161,28 +239,54 @@ omni target info stm32f407xg
 
 除 `--uid` 外，各子命令：
 
-| 子命令 | 说明 |
-| --- | --- |
-| `program <file>` | 烧录固件（hex/bin/elf），默认烧后校验并复位运行 |
-| `erase` | 擦除，`--type chip`（默认）/ `sector` / `sector_range` |
-| `verify <file>` | 校验 Flash 与固件文件是否一致 |
-| `blank-check` | 检查是否空白（默认整个 Flash），返回首个非空地址 |
-| `read` | 回读，`--type chip`（默认）/ `range`；`--out PATH` 让后端另存文件 |
-| `fill` | 填充内存区域（Flash/RAM），`--addr` `--size` 必填，`--value` 默认 `0xFF` |
-| `cancel` | 取消正在进行的 Flash 操作 |
-| `reset` | 复位目标，`--type hw`（默认）/ `sw`；`--no-run` 复位后停在暂停态 |
+| 子命令 | 说明 | 默认 HTTP 超时 |
+| --- | --- | --- |
+| `program <file>` | 烧录固件（hex/bin/elf），默认烧后校验并复位运行 | 180s |
+| `erase` | 擦除，`--type chip`（默认）/ `sector` / `sector_range` | 180s |
+| `verify <file>` | 校验 Flash 与固件文件是否一致 | 120s |
+| `blank-check` | 检查是否空白（默认整个 Flash），返回首个非空地址 | 120s |
+| `read` | 回读，`--type chip`（默认）/ `range`；`--out PATH` 让后端另存文件 | 120s |
+| `fill` | 填充内存区域（Flash/RAM），`--addr` `--size` 必填，`--value` 0-255（默认 `0xFF`，支持 `0x55`） | 120s |
+| `cancel` | 取消正在进行的 Flash 操作 | 30s |
+| `reset` | 复位目标，`--type hw`（默认）/ `sw`；**默认复位后运行**，`--no-run` 暂停 | 30s |
+
+> ⏱️ 全片擦除 1 MiB Flash 实测约 16s，叠加 RTT 轮询后可能超过 30s。`program` / `erase`
+> 的默认超时已放宽到 **180s**（`verify/read/blank-check/fill` 为 120s）；仍可用
+> `--timeout SEC` 显式覆盖。超时只影响 CLI 的 HTTP 等待，后端线程仍会继续执行。
 
 ```powershell
+# 全片擦除：默认 180s；建议先停 RTT（现在后端也会在 Flash 操作前自动停止 RTT）
+omni rtt stop
+omni flash erase --type chip --timeout 180
+
 omni flash program .\app.hex
 omni flash program .\app.bin --base-address 0x08000000 --no-reset
 omni flash verify .\app.hex
 omni flash blank-check --addr 0x08000000 --size 64
 omni flash read --type range --addr 0x08000000 --size 64 --json
-omni flash erase --type chip
+omni flash fill --addr 0x08000000 --size 256 --value 0x55   # 支持 0x 前缀
 omni flash reset --no-run
 ```
 
 > ⚠️ `program` / `erase` / `fill` 会真实改写芯片内容，执行前请确认目标板可擦写。
+
+> ℹ️ 所有 Flash 操作开始前，后端会自动暂停 Monitor 并停止 RTT 轮询（Flash 算法需要独占
+> SWD，RTT 每 10ms 的读会显著拖慢擦除，还可能并发访问 target）。响应中的
+> `rtt_stopped: true` 表示本次操作前主动停了 RTT；需要日志请重新 `omni rtt start`。
+> 同一探针同时只允许一个 Flash 操作，重复请求会立即返回 409 而不是排队到超时。
+
+> ℹ️ 计数字段按操作区分：`program`/`fill` → `bytes_written`；`verify` → `bytes_verified`；
+> `erase` → `bytes_erased`（chip 擦除为 Flash 区域大小，扇区擦除为实际擦除的扇区总大小）。
+> 响应中不会再出现与本次操作无关的 `0` 值计数字段。
+
+> ℹ️ **校验前会复位**：Flash 算法写完后，芯片复位前调试口可能读到陈旧内容（实机稳定复现：
+> chip erase → program 内部校验误报 `0x08000000` 不一致，复位后即正确）。因此
+> `program` 的内部校验与独立 `flash verify` 都会先 `reset_and_halt` 再读；独立
+> `verify` 结束后目标停在 paused。`erase` / `fill`（Flash）结束后也会复位一次，
+> 保证后续 `blank-check` / `read` 读到真实内容。
+>
+> ℹ️ **reset 默认值差异**：`flash reset` 默认复位后**运行**（`--no-run` 才暂停）；
+> `debug reset` 默认复位并**暂停**（`--mode run` 才运行）。
 
 ### `commander` — pyOCD Commander
 
@@ -193,11 +297,16 @@ omni flash reset --no-run
 | `exec <command...>` | 执行单条命令 |
 | `shell` | 交互式 REPL；`--command CMD` 可非交互批量执行（`;` 分隔） |
 
+> 列出 pyOCD 可用命令用 **`omni commander exec help`**（不带参数）。
+> `omni commander exec list` 是 pyOCD 的“探针/目标”列表命令，输出的是探针与目标表，
+> **不是**命令列表。
+
 ```powershell
-omni commander exec list                     # 列出全部可用命令
+omni commander exec help                     # 列出 pyOCD 全部命令
 omni commander exec help read32              # 查看某命令用法
 omni commander exec read32 0x080000C0 4
 omni commander exec reg
+omni commander exec list                     # pyOCD 的探针/目标列表（不是命令列表）
 omni commander shell                         # 进 REPL，连续调试最省事
 omni commander shell --command "status; reg"
 ```
@@ -214,7 +323,7 @@ omni commander shell --command "status; reg"
 | `halt` | 暂停目标 |
 | `run` | 继续运行（continue） |
 | `step` | 单步，`--mode into`（默认）/ `over` / `out` |
-| `reset` | 复位，`--mode halt`（默认）/ `run` / `break-symbol`（复位运行并停在入口符号） |
+| `reset` | 复位，`--mode halt`（默认，复位并暂停）/ `run` / `break-symbol`（复位运行并停在入口符号；与 `flash reset` 默认运行相反） |
 | `run-to-cursor` | 运行到 `--file` + `--line` 后暂停 |
 | `elf load <path>` | 加载 ELF/AXF（后端按 uid 保存；下断点与源码查询的前提） |
 | `elf info` | 查询已加载的 ELF |
@@ -318,15 +427,48 @@ omni device delete MYCHIP -y
 
 | 子命令 | 说明 |
 | --- | --- |
-| `status` | 查询 RTT 会话状态 |
+| `status` | 查询 RTT 会话状态（含上行缓存统计：`buffered_bytes` / `next_seq` / `dropped_bytes`） |
 | `start` | 启动 RTT 会话（`--address` / `--size` 指定控制块搜索范围，`--up-channel` / `--down-channel` 选通道） |
-| `stop` | 停止 RTT 会话 |
+| `stop` | 停止 RTT 会话（已缓存的上行数据仍可读取） |
 | `channels` | 列出 up/down 通道 |
+| `read` | **读取上行数据**：一次性读取当前缓存，或 `--follow` 持续跟踪 |
 | `send` | 发送数据：`--base64 DATA` 或 `--text TEXT`（`--no-newline` 关闭自动换行），`--channel` 指定通道 |
 | `device run\|halt\|status\|reset` | 目标内核控制；`reset` 会重新初始化 RTT 控制块，`--no-run` 复位后停在暂停态 |
 
+`read` 选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `--channel N` | 只看指定 up channel（缺省全部通道） |
+| `--since SEQ` | 从指定 seq 续读（默认 0 = 从当前最旧可用数据）。seq 在同一后端进程内**跨 `rtt start` 单调递增**；后端重启后从 1 开始 |
+| `--max-bytes N` | 单次最多读取的字节数（默认 65536；按整块返回，不拆块） |
+| `--follow` | 持续跟踪新数据（Ctrl+C 结束，退出码 0） |
+| `--interval SEC` | follow 轮询间隔（默认 0.2） |
+| `--duration SEC` | follow 持续秒数（默认 0 = 一直跟踪；适合 CI 定时采样） |
+| `--out FILE` | 把原始字节追加写入文件（与 `--json` 可同时使用） |
+| `--encoding ENC` | 文本解码编码（默认 utf-8；非法字节替换，`--json` 的 base64 无损） |
+
+后端在轮询线程里把每个通道读到的数据同时写入一份 **64 KiB 环形缓存**（WebSocket 推送不受影响），
+REST 与 CLI 都从这份缓存增量读取，因此：
+
+- GUI 没开（或没连 WebSocket）时，CLI 依然能拿到日志；
+- 多个 `rtt read` 客户端互不影响（各自维护 `cursor`，服务端不消费游标）；
+- 缓存被覆盖时响应带 `lost: true`，CLI 会向 stderr 打警告；
+- **seq 在后端进程内单调递增**：`rtt start/stop/start` 只清空缓存，不重置编号，旧会话的
+  `next_seq` 可以继续作为 `--since` 游标；只有**后端重启**后 seq 才从 1 开始，此时旧游标
+  会触发 `session_reset: true`，CLI 打警告并从当前最旧数据重读；
+- `--json` 返回 `{seq, channel, data(base64), text, cursor, truncated, lost, session_reset, oldest_seq, next_seq, dropped_bytes}`，
+  可直接用于 CI 断言；`--follow --json` 输出逐行 JSON（JSONL）。
+- **`--json` 模式下 stdout 始终是纯 JSON/JSONL**：`session_reset` / `lost` 等警告放在响应的
+  `warning` 字段里（不会写 stderr，避免 `2>&1` 把中文警告混进 JSON）；人类可读模式才把警告
+  写到 stderr。`--follow --json` 在“只有警告、暂无数据”时也会输出一行带 `warning` 的对象。
+
 ```powershell
 omni rtt start --uid 852001270
+omni rtt read --uid 852001270                 # 打印当前已缓存日志
+omni rtt read --uid 852001270 --follow        # 持续跟踪（Ctrl+C 退出）
+omni rtt read --uid 852001270 --json          # 可断言的 JSON（含 seq/text）
+omni rtt read --uid 852001270 --channel 0 --out rtt.log --follow --duration 10
 omni rtt channels --uid 852001270
 omni rtt send --uid 852001270 --text "hello"
 omni rtt device halt --uid 852001270
@@ -347,6 +489,30 @@ omni rtt stop --uid 852001270
 ```powershell
 omni backend status --quiet
 if ($LASTEXITCODE -ne 0) { omni backend start }
+```
+
+后端异常时 CLI 会区分三种情况，不再一律说“未找到后端”：
+
+| 情况 | 提示 |
+| --- | --- |
+| 端口无监听 | 无法连接后端，引导 `omni backend start`（或 `--managed`） |
+| 端口在监听但请求超时 | 后端无响应（可能僵死/被硬件操作阻塞），引导 `omni backend stop` 后重启 |
+| 后端返回 4xx/5xx | 透传后端 `detail` |
+
+## 输出编码
+
+CLI 在管道/重定向下会把 stdout/stderr 显式设为 UTF-8（`errors=backslashreplace`），
+避免中文 Windows 的 cp936 编码与消费端（PowerShell 7 / CI / Node）的 UTF-8 解码不一致，
+从而产生 `�`（U+FFFD）。设置了 `PYTHONIOENCODING` 时尊重用户配置。
+
+后端日志（stderr）同样固定为 UTF-8，`.backend.log` 不再出现中文乱码。
+
+构建脚本会在打包前检查所有第一方 `.py` 是否为合法 UTF-8 且不含 U+FFFD，并在打包后
+运行 `omni backend -h` 校验帮助输出：
+
+```powershell
+python build.py --check-sources     # 只检查源码编码
+python build.py --cli-only          # 只重建 CLI（打包后自动校验帮助输出）
 ```
 
 ## 环境变量
@@ -375,22 +541,37 @@ if ($LASTEXITCODE -ne 0) { omni backend start }
 ```powershell
 cd D:\workspace\embedded\omni-link\python
 
+# 离线回归（无需硬件）：RTT 环形缓存、commander 选项前移、错误分类、编码检查、verify 字段
+..\.venv\Scripts\python.exe test_cli_fixes.py
+
+# 源码编码检查（UTF-8 / 无 U+FFFD）
+..\.venv\Scripts\python.exe build.py --check-sources
+
 # 安全子集：自检 + 探针/目标 + 设备库 + Commander（不写 Flash）
 powershell -File scripts\cli-smoke.ps1 -UseInstalled
 
-# 追加破坏性回环：program → verify → blank-check → erase → blank-check
+# 追加破坏性回环：program → verify（含 bytes_verified 断言）→ blank-check → erase → blank-check
 powershell -File scripts\cli-smoke.ps1 -UseInstalled -Firmware .\app.hex
 
 # 追加调试控制段：elf load → src files → bp add/list/del → regs → mem → stack/locals/disasm → periph → session
 powershell -File scripts\cli-smoke.ps1 -UseInstalled -Elf .\app.axf
+
+# 追加 RTT 上行读取：rtt start → status → read --json → read --follow --duration 2 → stop
+powershell -File scripts\cli-smoke.ps1 -UseInstalled -Rtt
 ```
 
 `-UseInstalled` 表示使用 venv 中已安装的 `omni.exe`；省略则用源码 `python -m omnilink_cli`。脚本会自行拉起后端、自动取第一个探针，结束时清理进程，每条命令后打印 `exit=`。
+`cli-smoke.ps1` 还会检查帮助输出无 U+FFFD、缺少 `--target` 的 `probe connect` 立即失败，任一检查不通过时脚本以非 0 退出。
 
 ## 常见问题
 
 **`错误: 未找到正在运行的后端`**
 先 `omni backend start`，或给命令加 `--managed`。
+
+**`后端在端口 xxxxx 上有监听但 HTTP 无响应` / `请求超时`**
+后端进程还活着，但被挂起的 pyOCD 操作（连接/烧录/调试）拖住了。执行 `omni backend stop`
+（会按端口定位进程树强杀）后重新 `omni backend start`。连接超时也会把该探针会话标记为失效，
+不需要重启后端即可重试。
 
 **`错误: 未找到后端 server.py: ...\site-packages\server.py`**
 wheel 安装后未记录后端位置。重跑 `python\scripts\cli-package.ps1`，或临时设置 `OMNI_BACKEND_DIR` 指向 `python\` 目录。

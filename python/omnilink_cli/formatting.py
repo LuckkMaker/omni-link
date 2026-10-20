@@ -4,7 +4,34 @@
 """
 
 import json
+import os
 import sys
+
+
+def configure_stdio() -> None:
+    """把 CLI 的 stdout/stderr 固定为 UTF-8。
+
+    背景：在管道/重定向下（PowerShell 7、CI、Node 子进程、`omni ... > log`），
+    Python 按系统 locale 选择输出编码（中文 Windows 为 cp936/GBK），而消费端
+    通常按 UTF-8 解码，中文就会变成 U+FFFD（实机测试报告 P1-4）。
+
+    注意：
+    - 只在未显式设置 ``PYTHONIOENCODING`` 时接管，尊重用户显式配置；
+    - ``errors="backslashreplace"`` 而不是 ``strict``：任何字符都能输出，
+      不会因 Windows 文件名代理字符等极端输入直接抛异常；同时也不会再产生 U+FFFD
+      （U+FFFD 只会来自“按错误编码解码已有字节”，不会再由本进程引入）。
+    - 交互式控制台本就由 Python 走 UTF-8（_WindowsConsoleIO），此处只影响重定向/管道。
+    """
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            # pythonw / 已关闭的流 / 非 TextIOWrapper：保持原样即可
+            pass
 
 
 class OutputWriter:

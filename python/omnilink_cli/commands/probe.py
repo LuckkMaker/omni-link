@@ -11,13 +11,17 @@ def add_parser(sub):
     ps = p.add_subparsers(dest="probe_sub", metavar="<sub>")
 
     s = ps.add_parser("list", parents=[common_parser()], help="列出所有已连接探针")
+    s.add_argument("--refresh", action="store_true",
+                   help="强制重新枚举（默认读 1~2s 监控快照；刚 connect 后以 probe status 为准）")
     s.set_defaults(func=run_command(_list))
 
-    s = ps.add_parser("connect", parents=[common_parser()], help="连接指定探针")
+    s = ps.add_parser("connect", parents=[common_parser()], help="连接指定探针（--target 必填）")
     s.add_argument("uid", help="探针唯一 ID（用 `omni probe list` 查看）")
-    s.add_argument("--target", help="目标芯片型号（如 stm32f407xg）")
+    s.add_argument("--target", required=True,
+                   help="目标芯片型号（必填，如 stm32f407xg；用 `omni target list` 查询）")
     s.add_argument("--interface", default="swd", choices=["swd", "jtag"], help="调试接口")
-    s.add_argument("--speed", type=int, help="时钟频率 Hz")
+    s.add_argument("--speed", type=int,
+                   help="时钟频率 Hz（5000=5 kHz ~ 50000000=50 MHz，如 4000000=4 MHz）")
     s.add_argument("--connect-mode", choices=["attach", "halt", "pre-reset", "under-reset"],
                    help="连接模式：attach=附加/不复位 / halt=复位并暂停 / pre-reset=连接前复位 / under-reset=复位下连接")
     s.add_argument("--jlink-device", help="J-Link 目标设备名（如 G32F463XC），J-Link 必须设置")
@@ -40,7 +44,9 @@ def add_parser(sub):
 
 
 def _list(c: ApiClient, args):
-    data = c.get("/api/probes")
+    # 默认读监控快照（避免每次请求都做 USB 枚举）；--refresh 强制实时枚举
+    path = "/api/probes?refresh=true" if getattr(args, "refresh", False) else "/api/probes"
+    data = c.get(path)
     probes = data.get("probes", [])
     if args.json_:
         finish(args, data, "")

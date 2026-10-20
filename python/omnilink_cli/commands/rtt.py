@@ -1,9 +1,13 @@
-"""RTT 命令：status / start / stop / channels / send / send-text / device run|halt|reset|state。
+"""RTT 命令：status / start / stop / channels / read / send / send-text /
+device run|halt|reset|state。
 
-对标前端 RTT Viewer 面板，提供 SEGGER RTT 会话控制与目标内核控制。
+对标前端 RTT Viewer 面板，提供 SEGGER RTT 会话控制、上行日志读取与目标内核控制。
 """
 
 import base64
+import codecs
+import json
+import sys
 import time
 
 from ..client import ApiClient
@@ -14,10 +18,10 @@ from ..util import parse_int, resolve_uid
 
 
 def add_parser(sub):
-    p = sub.add_parser("rtt", help="SEGGER RTT（启动/停止会话、收发数据、内核控制）")
+    p = sub.add_parser("rtt", help="SEGGER RTT（启动/停止会话、读取上行日志、收发数据、内核控制）")
     ps = p.add_subparsers(dest="rtt_sub", metavar="<sub>")
 
-    s = ps.add_parser("status", parents=[common_parser()], help="查询 RTT 会话状态")
+    s = ps.add_parser("status", parents=[common_parser()], help="查询 RTT 会话状态（含上行缓存统计）")
     s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
     s.set_defaults(func=run_command(_status))
 
@@ -29,13 +33,36 @@ def add_parser(sub):
     s.add_argument("--down-channel", type=int, default=0, help="发送的 down channel（默认 0）")
     s.set_defaults(func=run_command(_start))
 
-    s = ps.add_parser("stop", parents=[common_parser()], help="停止 RTT 会话")
+    s = ps.add_parser("stop", parents=[common_parser()], help="停止 RTT 会话（已缓存的上行数据仍可读取）")
     s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
     s.set_defaults(func=run_command(_stop))
 
     s = ps.add_parser("channels", parents=[common_parser()], help="列出 RTT 通道")
     s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
     s.set_defaults(func=run_command(_channels))
+
+    s = ps.add_parser(
+        "read", parents=[common_parser()],
+        help="读取 RTT 上行数据（一次性或 --follow 持续跟踪）",
+        epilog="示例: omni rtt read --uid 852001270        # 读取当前已缓存日志\n"
+               "      omni rtt read --follow --out rtt.log  # 持续跟踪并落盘\n"
+               "      omni rtt read --json                  # 输出可断言的 JSON（含 seq/text）",
+    )
+    s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
+    s.add_argument("--channel", type=int, help="只看指定 up channel（缺省全部通道）")
+    s.add_argument("--since", type=int, default=0,
+                   help="从指定 seq 开始读取（0=从当前最旧可用数据；默认 0）")
+    s.add_argument("--max-bytes", type=int, default=65536,
+                   help="单次最多读取的字节数（默认 65536）")
+    s.add_argument("--follow", action="store_true", help="持续跟踪新数据（Ctrl+C 结束）")
+    s.add_argument("--interval", type=float, default=0.2,
+                   help="follow 轮询间隔秒数（默认 0.2）")
+    s.add_argument("--duration", type=float, default=0.0,
+                   help="follow 持续秒数（默认 0=一直跟踪到 Ctrl+C）")
+    s.add_argument("--out", metavar="FILE", help="把原始字节追加写入文件（二进制）")
+    s.add_argument("--encoding", default="utf-8",
+                   help="文本解码编码（默认 utf-8；非法字节用替换符，--json 的 base64 无损）")
+    s.set_defaults(func=run_command(_read))
 
     s = ps.add_parser("send", parents=[common_parser()], help="发送二进制数据到 down channel")
     s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
@@ -65,8 +92,16 @@ def _status(c: ApiClient, args):
         print("错误: 未发现探针。请确认探针已连接或用 --uid 指定。")
         return 1
     data = c.get(f"/api/probes/{uid}/rtt/status")
+    cap = data.get("capture") or {}
+    if cap.get("available"):
+        capture = (f"缓存 {cap.get('buffered_bytes', 0)} 字节 "
+                   f"(seq {cap.get('oldest_seq')}..{cap.get('next_seq')}"
+                   f"，丢弃 {cap.get('dropped_bytes', 0)} 字节)")
+    else:
+        capture = "缓存: 未启动过 RTT"
     finish(args, data,
-           f"RTT running={data.get('running')}   target connected={data.get('connected')}")
+           f"RTT running={data.get('running')}   target connected={data.get('connected')}\n"
+           f"  {capture}")
     return 0
 
 
@@ -111,6 +146,128 @@ def _channels(c: ApiClient, args):
         [[ch.get("index"), ch.get("name"), ch.get("size")] for ch in data.get("down_channels", [])],
     ))
     print("\n".join(lines))
+    return 0
+
+
+def _read(c: ApiClient, args):
+    """读取 RTT 上行缓存：一次性打印/落盘，或 --follow 持续跟踪。
+
+    - 与 GUI 共用后端的同一份环形缓存，不消费服务端游标，多客户端互不影响。
+    - 文本模式用增量解码器，避免多字节字符跨块被切坏；--json 保留 base64 原始块，
+      CI 可无损断言。
+    """
+    uid = _require_uid(c, args)
+    if args.follow and args.json_ and args.quiet:
+        print("错误: --quiet 与 --json --follow 不能同时使用（JSONL 需要输出）。", file=sys.stderr)
+        return 2
+    if args.max_bytes < 1:
+        print("错误: --max-bytes 必须 ≥ 1。", file=sys.stderr)
+        return 2
+    if args.follow and args.interval < 0.05:
+        args.interval = 0.05
+
+    decoder = None
+    if not args.json_:
+        try:
+            decoder = codecs.getincrementaldecoder(args.encoding)(errors="replace")
+        except LookupError:
+            print(f"错误: 不支持的编码: {args.encoding}", file=sys.stderr)
+            return 2
+
+    out = None
+    if args.out:
+        try:
+            out = open(args.out, "ab")
+        except OSError as e:
+            print(f"错误: 无法打开输出文件 {args.out}: {e}", file=sys.stderr)
+            return 1
+
+    since = max(0, int(args.since or 0))
+    deadline = time.time() + args.duration if (args.follow and args.duration > 0) else None
+    printed_any = False
+    tail = ""
+    read_any = False
+    follow = bool(args.follow)
+    session_reset_warned = False
+
+    try:
+        while True:
+            query = f"since={since}&max_bytes={int(args.max_bytes)}"
+            if args.channel is not None:
+                query += f"&channel={int(args.channel)}"
+            data = c.get(f"/api/probes/{uid}/rtt/data?{query}")
+            chunks = data.get("chunks") or []
+            raw = b"".join(base64.b64decode(ch.get("data") or "") for ch in chunks)
+            read_any = read_any or bool(raw)
+
+            if out is not None and raw:
+                out.write(raw)
+                out.flush()
+
+            # 警告的处理必须区分输出模式：
+            # - --json：绝不写 stderr（调用方常把 2>&1 合并捕获，会把警告混进 JSON），
+            #   改为放进 JSON 的 warning 字段，stdout 始终是纯 JSON/JSONL。
+            # - 人类可读模式：警告写 stderr，不污染正文。
+            warnings: list[str] = []
+            if data.get("session_reset") and not session_reset_warned:
+                # --since 超出当前后端进程的序号（通常是后端重启后 seq 从 1 开始）
+                warnings.append("指定的 --since 超出当前后端进程的 RTT 序号"
+                                "（后端重启后 seq 从 1 开始），已从当前缓存最旧数据读取。")
+                session_reset_warned = True
+            if data.get("lost"):
+                warnings.append("RTT 环形缓存已覆盖部分历史数据（lost），如需完整日志请及时 --follow。")
+
+            if warnings and not args.json_ and not args.quiet:
+                for warning in warnings:
+                    print(f"警告: {warning}", file=sys.stderr)
+
+            if args.json_:
+                # follow 模式：有数据/有警告时才输出一行，避免空行刷屏；
+                # 非 follow 模式：即使没有数据也输出一个完整对象。
+                if raw or warnings or not follow:
+                    payload = {k: v for k, v in data.items() if k != "chunks"}
+                    payload["chunks"] = chunks
+                    if warnings:
+                        payload["warning"] = "；".join(warnings)
+                    if not args.quiet:
+                        # follow 模式输出 JSONL（每批一行），便于流式消费
+                        print(json.dumps(payload, ensure_ascii=False, indent=None if follow else 2))
+            elif raw and not args.quiet:
+                text = decoder.decode(raw)
+                if text:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    printed_any = True
+                    tail = text[-1:]
+
+            since = int(data.get("cursor", since))
+            if not follow:
+                break
+            if deadline is not None and time.time() >= deadline:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        # follow 是无限流，Ctrl+C 是正常结束方式
+        pass
+    finally:
+        if out is not None:
+            out.close()
+
+    if not args.json_ and not args.quiet:
+        if not read_any:
+            print("（暂无 RTT 数据：确认固件已初始化 SEGGER RTT 并产生输出，"
+                  "或先执行 `omni rtt start`）", file=sys.stderr)
+        else:
+            # 刷出增量解码器可能残留的半个多字节字符
+            rest = decoder.decode(b"", final=True) if decoder is not None else ""
+            if rest:
+                sys.stdout.write(rest)
+                tail = rest[-1:]
+            if tail not in ("", "\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+    if out is not None and not args.json_ and not args.quiet:
+        print(f"已追加写入: {args.out}", file=sys.stderr)
     return 0
 
 

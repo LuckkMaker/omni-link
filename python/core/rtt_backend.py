@@ -11,6 +11,7 @@ import time
 import base64
 import threading
 import logging
+from collections import deque
 from typing import Optional
 
 from core.pyocd_backend import backend
@@ -51,6 +52,154 @@ RTT_SCAN_MIN_WORDS = 16
 # 固件加载 ELF 时优先用符号地址直接定位，可完全跳过 RAM 全扫描（192KB 全扫
 # 在 CMSIS-DAP 下约 6.5s，是启动超时的主要来源）。
 RTT_CB_SYMBOL = '_SEGGER_RTT'
+
+# RTT 上行缓存上限（每探针）。pyOCD 的 RTTUpChannel.read() 是消费式读取：
+# 读走的数据会同步写回目标 RdOff，之后再也读不到。GUI 只经 WebSocket 消费，
+# 没有任何“回看”能力；CLI / 脚本 / CI 需要可重复读取，因此轮询线程必须把
+# 读到的数据同时落一份有界缓存（对标 J-Link RTT Viewer 的终端滚动缓冲）。
+RTT_CAPTURE_MAX_BYTES = 64 * 1024
+# 单次 REST 读取允许的最大字节数（防止一次请求拷贝过大）
+RTT_CAPTURE_MAX_READ = 1024 * 1024
+
+
+class RttCapture:
+    """RTT 上行数据环形缓存（每个探针一个）。
+
+    - 轮询线程按 ``append(channel, data)`` 追加，每个字节块分配一个单调 ``seq``；
+      读端只需记住上次返回的 ``cursor`` 即可增量读取，无需服务端消费游标。
+    - ``seq`` 在同一后端进程内跨 ``rtt start`` 单调递增（``start_seq`` 由
+      RTTBackend 续用上一次的 ``next_seq``）；只有后端重启才从 1 开始。
+    - 总字节数超过 ``max_bytes`` 时丢弃最旧的整块，并累计 ``dropped_bytes`` /
+      ``dropped_chunks``；读端通过 ``lost`` 得知自己请求的 ``since`` 已被覆盖。
+    - 单块大于总容量时只保留尾部（RTT up buffer 通常 ≤1 KB，这里仅防御异常配置）。
+
+    线程安全：内部锁只保护 chunk 列表与计数；``read()`` 在锁内做浅拷贝后即释放，
+    不会因大量读取阻塞轮询线程。
+    """
+
+    def __init__(self, max_bytes: int = RTT_CAPTURE_MAX_BYTES, start_seq: int = 1):
+        self._max_bytes = max(64, int(max_bytes))
+        self._chunks: deque = deque()
+        self._bytes = 0
+        # seq 在同一次后端进程内跨 RTT 会话单调递增：新 start 只清空缓冲，
+        # 不重置编号，旧会话的 next_seq 仍可安全用作 --since 游标。
+        self._next_seq = max(1, int(start_seq))
+        self._dropped_bytes = 0
+        self._dropped_chunks = 0
+        self._lock = threading.Lock()
+
+    def append(self, channel: int, data: bytes) -> int:
+        """追加一个通道读到的字节块，返回分配到的 seq（空数据返回 0）。"""
+        if not data:
+            return 0
+        data = bytes(data)
+        with self._lock:
+            seq = self._next_seq
+            self._next_seq += 1
+            if len(data) > self._max_bytes:
+                dropped = len(data) - self._max_bytes
+                self._dropped_bytes += dropped
+                data = data[-self._max_bytes:]
+            while self._chunks and self._bytes + len(data) > self._max_bytes:
+                old = self._chunks.popleft()
+                self._bytes -= len(old["data"])
+                self._dropped_bytes += len(old["data"])
+                self._dropped_chunks += 1
+            self._chunks.append({"seq": seq, "channel": int(channel), "data": data})
+            self._bytes += len(data)
+            return seq
+
+    def stats(self) -> dict:
+        """缓存概览（供 /rtt/status 与 CLI 诊断）。"""
+        with self._lock:
+            oldest = self._chunks[0]["seq"] if self._chunks else self._next_seq
+            return {
+                "oldest_seq": oldest,
+                "next_seq": self._next_seq,
+                "buffered_bytes": self._bytes,
+                "dropped_bytes": self._dropped_bytes,
+                "dropped_chunks": self._dropped_chunks,
+            }
+
+    def read(
+        self,
+        since: int = 0,
+        max_bytes: int = RTT_CAPTURE_MAX_BYTES,
+        channel: Optional[int] = None,
+    ) -> dict:
+        """按 seq 增量读取。
+
+        Args:
+            since: 起始 seq（0 = 从当前最旧可用块开始）
+            max_bytes: 单次返回的字节预算。按整块返回（不拆块），因此实际可能略超；
+                只有在“已选到至少一块”之后才会因预算截断，绝不丢块内数据。
+            channel: 仅返回该 up channel 的数据（None = 全部通道）
+
+        Returns:
+            {oldest_seq, next_seq, last_seq, cursor, truncated, lost, session_reset,
+             dropped_bytes, dropped_chunks, chunks:[{seq, channel, size, data(base64)}]}
+
+            session_reset: since 超出当前后端进程的序号（后端重启后 seq 从 1 开始），
+                本次已从当前最旧数据重读。同一后端进程内 seq 跨 rtt start 单调递增。
+        """
+        limit = max(1, min(int(max_bytes), RTT_CAPTURE_MAX_READ))
+        with self._lock:
+            chunks = list(self._chunks)
+            next_seq = self._next_seq
+            dropped_bytes = self._dropped_bytes
+            dropped_chunks = self._dropped_chunks
+
+        oldest_seq = chunks[0]["seq"] if chunks else next_seq
+        # since 大于 next_seq 只可能因为后端重启（seq 从 1 重新开始），或调用方
+        # 使用了明显超前的游标。此时从当前最旧数据重读，并通过 session_reset 告知，
+        # 而不是静默返回 0 字节。
+        session_reset = bool(since and since > 0 and int(since) > next_seq)
+        if session_reset:
+            start = oldest_seq
+            lost = False
+        else:
+            start = int(since) if since and since > 0 else oldest_seq
+            lost = bool(since and since > 0 and start < oldest_seq)
+
+        selected = []
+        used = 0
+        truncated = False
+        for chunk in chunks:
+            if chunk["seq"] < start:
+                continue
+            if channel is not None and chunk["channel"] != int(channel):
+                continue
+            size = len(chunk["data"])
+            if selected and used + size > limit:
+                truncated = True
+                break
+            selected.append(chunk)
+            used += size
+
+        last_seq = selected[-1]["seq"] if selected else max(start - 1, 0)
+        # 预算截断时必须从下一块续读；否则说明已把截至 next_seq 的数据全部看过，
+        # 直接推进到 next_seq（被 channel 过滤掉的块无需回看）。
+        cursor = last_seq + 1 if truncated else next_seq
+        return {
+            "oldest_seq": oldest_seq,
+            "next_seq": next_seq,
+            "last_seq": last_seq,
+            "cursor": cursor,
+            "truncated": truncated,
+            "lost": lost,
+            "session_reset": session_reset,
+            "dropped_bytes": dropped_bytes,
+            "dropped_chunks": dropped_chunks,
+            "chunks": [
+                {
+                    "seq": c["seq"],
+                    "channel": c["channel"],
+                    "size": len(c["data"]),
+                    "data": base64.b64encode(c["data"]).decode("ascii"),
+                }
+                for c in selected
+            ],
+        }
 
 
 def _halted_location(uid: str) -> str:
@@ -125,6 +274,8 @@ class RTTBackend:
         # uid -> 最近一次成功获取操作锁的时间戳（monotonic），用于识别僵尸线程遗留
         # 长期持有操作锁的场景，从而允许 reset_target 强制接管。
         self._ops_lock_stamp: dict[str, float] = {}
+        # uid -> 上行数据环形缓存（供 REST / CLI 增量读取；stop 后保留历史）
+        self._captures: dict[str, RttCapture] = {}
 
     def start(
         self,
@@ -476,6 +627,12 @@ class RTTBackend:
                 running.set()
                 self._running[uid] = running
                 self._locks[uid] = threading.Lock()
+                # 新会话从空缓存开始（固件重新初始化后控制块/缓冲区地址都可能变化），
+                # 但 seq 续用上一次的 next_seq：这样旧会话的 --since 游标仍然有效，
+                # 不会因为两个会话块数相同而误判成“没有新数据”。
+                previous = self._captures.get(uid)
+                start_seq = previous.stats()["next_seq"] if previous is not None else 1
+                self._captures[uid] = RttCapture(start_seq=start_seq)
 
             # 找到控制块后恢复目标运行（对标 CLI：search → resume）
             try:
@@ -562,7 +719,18 @@ class RTTBackend:
                 state_check_counter = 0
                 self._check_and_auto_resume(uid, cb, lock)
 
+            # 与调试/Flash 操作协调：commander 调试命令、寄存器读取、Flash 操作
+            # 都会持有 per-uid op_lock。RTT 轮询用非阻塞方式获取，拿不到就跳过本轮，
+            # 避免两者并发访问同一 target（pyOCD target 不是线程安全的），
+            # 典型症状是偶发的 "Target is not halted" 或寄存器读取失败。
+            op_lock = backend.get_op_lock(uid)
+            if not op_lock.acquire(blocking=False):
+                time.sleep(poll_interval)
+                continue
+
+            sleep_for = poll_interval
             try:
+                capture = self._captures.get(uid)
                 with lock:
                     # 遍历所有 up channels，分别读取并推送
                     for up_idx, up_ch in enumerate(cb.up_channels):
@@ -572,6 +740,13 @@ class RTTBackend:
                             # 单个通道读取失败不影响其他通道
                             data = None
                         if data:
+                            # 先落缓存，再推 WebSocket：GUI 与 CLI/CI 看到的是同一份数据，
+                            # 且 REST 侧不会因为 GUI 未连接而拿不到任何日志。
+                            if capture is not None:
+                                try:
+                                    capture.append(up_idx, data)
+                                except Exception:
+                                    pass
                             event_manager.emit("rtt.data", {
                                 "uid": uid,
                                 "channel": up_idx,
@@ -579,7 +754,6 @@ class RTTBackend:
                                 "size": len(data),
                             })
                 consecutive_errors = 0
-                time.sleep(poll_interval)
             except Exception as e:
                 consecutive_errors += 1
                 if consecutive_errors <= 3:
@@ -587,7 +761,10 @@ class RTTBackend:
                 if consecutive_errors == 1:
                     event_manager.emit("rtt.error", {"uid": uid, "error": str(e)})
                 # 错误时退避，避免刷屏
-                time.sleep(min(0.5, poll_interval * (2 ** consecutive_errors)))
+                sleep_for = min(0.5, poll_interval * (2 ** consecutive_errors))
+            finally:
+                op_lock.release()
+            time.sleep(sleep_for)
 
         # 线程退出时清理
         event_manager.log("info", f"RTT: polling stopped for probe {uid[:16]}")
@@ -602,6 +779,10 @@ class RTTBackend:
         if self._user_halted.get(uid, False):
             return  # 用户主动暂停，不自动恢复
 
+        # 与调试/Flash 操作互斥：拿不到就跳过本轮状态检查，避免并发访问 target。
+        op_lock = backend.get_op_lock(uid)
+        if not op_lock.acquire(blocking=False):
+            return
         try:
             from pyocd.core.target import Target
             target = getattr(cb, 'target', None)
@@ -638,6 +819,19 @@ class RTTBackend:
                 event_manager.log("info", "RTT: 目标内核已自动恢复运行")
         except Exception:
             pass  # 状态检查失败不影响正常轮询
+        finally:
+            op_lock.release()
+
+    def set_user_halted(self, uid: str, halted: bool) -> None:
+        """标记目标是否由用户主动暂停（供 Zone/CLI 的 halt/run/reset 调用）。
+
+        RTT 轮询线程的自动恢复逻辑只认这个标志。若 Zone 的 `debug halt` 不设置它，
+        轮询线程会把用户暂停当成“硬件复位导致的暂停”而自动 resume，表现为
+        halt 之后目标又跑起来、寄存器读取偶发失败。
+        """
+        with self._global_lock:
+            if uid in self._control_blocks:
+                self._user_halted[uid] = bool(halted)
 
     # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
     # 直接操作 session.target，不影响轮询线程。
@@ -910,6 +1104,43 @@ class RTTBackend:
             return {"success": False, "error": "RTT not started"}
         return self._build_start_result(cb, uid, self._up_channel.get(uid, 0), self._down_channel.get(uid, 0))
 
+    def get_capture_stats(self, uid: str) -> dict:
+        """上行缓存统计；该探针从未启动过 RTT 时返回 available=False。"""
+        capture = self._captures.get(uid)
+        if capture is None:
+            return {"available": False, "buffered_bytes": 0, "next_seq": 0, "oldest_seq": 0,
+                    "dropped_bytes": 0, "dropped_chunks": 0}
+        stats = capture.stats()
+        stats["available"] = True
+        return stats
+
+    def read_capture(
+        self,
+        uid: str,
+        since: int = 0,
+        max_bytes: int = RTT_CAPTURE_MAX_BYTES,
+        channel: Optional[int] = None,
+    ) -> dict:
+        """读取上行缓存（供 REST / CLI）。
+
+        RTT 未启动但存在历史缓存（例如 start → stop 后回看）时仍返回数据，
+        由 ``running`` 字段告知会话是否仍在采集。
+        """
+        capture = self._captures.get(uid)
+        if capture is None:
+            return {
+                "success": False,
+                "error": "RTT 会话未启动：请先执行 `omni rtt start`（或 POST /api/probes/{uid}/rtt/start）",
+            }
+        result = capture.read(since=since, max_bytes=max_bytes, channel=channel)
+        result.update({
+            "success": True,
+            "uid": uid,
+            "running": self.is_running(uid),
+            "channel": channel,
+        })
+        return result
+
     def is_running(self, uid: str) -> bool:
         """RTT 是否正在运行"""
         running = self._running.get(uid)
@@ -951,6 +1182,9 @@ class RTTBackend:
         """清理所有 RTT 会话（应用退出时调用）"""
         for uid in list(self._control_blocks.keys()):
             self.stop(uid)
+        # 历史缓存随进程退出一起释放，避免 uid 长期累积
+        with self._global_lock:
+            self._captures.clear()
 
 
 # 全局单例

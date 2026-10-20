@@ -8,6 +8,7 @@
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -18,18 +19,39 @@ from . import config
 
 
 class ApiError(Exception):
-    """后端业务/HTTP 错误。detail 提取后端 FastAPI 的 detail 字段。"""
+    """后端业务/HTTP 错误。detail 提取后端 FastAPI 的 detail 字段。
 
-    def __init__(self, status, detail):
+    kind 用于 CLI 区分“后端没启动 / 后端僵死 / 后端返回业务错误”，避免把
+    “HTTP 无响应”误报成“未找到后端”：
+      - "http"        后端返回了 HTTP 错误（含 detail）
+      - "timeout"     端口可连但请求超时（后端僵死或被硬件操作阻塞）
+      - "unreachable" 连接失败（端口无监听）
+      - "error"       其它本地异常
+    """
+
+    def __init__(self, status, detail, kind: str = "http"):
         self.status = status
         self.detail = detail
+        self.kind = kind
         super().__init__(detail)
 
 
 class ApiClient:
     def __init__(self, port: int, timeout: int = 30):
+        self.port = int(port)
         self.base = f"http://127.0.0.1:{port}"
         self.timeout = timeout
+
+    def _classify_timeout(self) -> ApiError:
+        """超时归因：端口无监听（后端未启动）还是端口可连但 HTTP 不通（僵死）。
+
+        Windows 上连接一个未监听的本机端口也会报 TimeoutError 而不是
+        ConnectionRefused，单看异常类型无法区分；用一次短 TCP 探测补充判断，
+        避免把“后端没启动”误报成“后端无响应”（实机报告 P1-3）。
+        """
+        if not port_open(self.port, timeout=0.5):
+            return ApiError(0, f"无法连接后端（端口 {self.port} 无监听）", kind="unreachable")
+        return ApiError(0, f"请求超时（{self.timeout} 秒）", kind="timeout")
 
     def request(self, method: str, path: str, payload=None) -> dict:
         url = self.base + path
@@ -52,11 +74,18 @@ class ApiClient:
                 detail = j.get("detail", body)
             except Exception:
                 detail = body
-            raise ApiError(e.code, detail) from None
+            raise ApiError(e.code, detail, kind="http") from None
         except urllib.error.URLError as e:
-            raise ApiError(0, f"无法连接后端: {e.reason}") from None
+            reason = getattr(e, "reason", e)
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                raise self._classify_timeout() from None
+            raise ApiError(0, f"无法连接后端: {reason}", kind="unreachable") from None
+        except (socket.timeout, TimeoutError):
+            raise self._classify_timeout() from None
+        except json.JSONDecodeError as e:
+            raise ApiError(0, f"后端返回了非 JSON 响应: {e}", kind="error") from None
         except Exception as e:
-            raise ApiError(0, str(e)) from None
+            raise ApiError(0, str(e), kind="error") from None
 
     def get(self, path: str) -> dict:
         return self.request("GET", path)
@@ -190,6 +219,7 @@ def _backend_command() -> list[str]:
         f"未找到后端 server.py: {config.BACKEND_SERVER_PY}\n"
         "  wheel 安装的 CLI 请设置 OMNI_BACKEND_DIR 指向后端目录，"
         "或先手动启动后端并用 --backend-port 指定端口。",
+        kind="error",
     )
 
 
@@ -270,11 +300,11 @@ def start_managed(timeout: int = 30) -> tuple[subprocess.Popen, int]:
         proc.stdout.close()
     if port is None:
         proc.kill()
-        raise ApiError(0, "后端启动超时或握手失败（未从 stdout 收到端口 JSON）")
+        raise ApiError(0, "后端启动超时或握手失败（未从 stdout 收到端口 JSON）", kind="error")
     # 端口 JSON 在 uvicorn 绑定 socket 之前就已打印，需等到真正可连才返回
     if not _wait_reachable(port, deadline):
         proc.kill()
-        raise ApiError(0, "后端端口未在期限内就绪")
+        raise ApiError(0, "后端端口未在期限内就绪", kind="error")
     return proc, port
 
 
@@ -322,10 +352,10 @@ def start_persistent(timeout: int = 30) -> dict:
 
     if port is None:
         proc.kill()
-        raise ApiError(0, "后端常驻进程启动失败或超时")
+        raise ApiError(0, "后端常驻进程启动失败或超时", kind="error")
     if not _wait_reachable(port, deadline):
         proc.kill()
-        raise ApiError(0, "后端常驻进程端口未在期限内就绪")
+        raise ApiError(0, "后端常驻进程端口未在期限内就绪", kind="error")
     config.write_runtime({"pid": proc.pid, "port": port, "managed": False})
     return {"pid": proc.pid, "port": port}
 
