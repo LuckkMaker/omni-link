@@ -5,8 +5,8 @@
 """
 
 import argparse
-from omnilink_cli import client
-from omnilink_cli.commands import target, commander, flash
+from omni_cli import client
+from omni_cli.commands import target, commander, flash
 
 
 def ns(**kw):

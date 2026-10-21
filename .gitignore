@@ -69,10 +69,10 @@ certs/
 logs/
 
 # ── CLI 运行时状态（omni backend 常驻记录）──
-python/omnilink_cli/.backend_runtime.json
-python/omnilink_cli/.backend.handshake.jsonl
+python/omni_cli/.backend_runtime.json
+python/omni_cli/.backend.handshake.jsonl
 # CLI 持久化配置（wheel 安装后记录后端目录，含本机绝对路径，不提交）
-python/omnilink_cli/cli.config.json
+python/omni_cli/cli.config.json
 
 # ── 临时/备份文件 ────────────────────────
 *.tmp

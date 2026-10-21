@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = []
-hiddenimports += collect_submodules('omnilink_cli')
+hiddenimports = ['kconfiglib']
+hiddenimports += collect_submodules('omni_cli')
 
 
 a = Analysis(

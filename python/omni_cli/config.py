@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Optional
 
-# 包位于 python/omnilink_cli/
+# 包位于 python/omni_cli/
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON_DIR = os.path.dirname(_PKG_DIR)
 PROJECT_ROOT = os.path.dirname(PYTHON_DIR)

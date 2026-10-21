@@ -9,12 +9,12 @@ import argparse
 import sys
 
 from . import __version__, client
-from .commands import backend, commander, debug, device, flash, probe, rtt, target
+from .commands import backend, commander, debug, device, flash, probe, project, rtt, target
 from .formatting import configure_stdio, ctx_error
 
 PROG = "omni"
 
-_COMMAND_MODULES = (backend, commander, debug, device, flash, probe, rtt, target)
+_COMMAND_MODULES = (backend, commander, debug, device, flash, probe, project, rtt, target)
 
 
 def _format_api_error(e: client.ApiError) -> str:
@@ -33,7 +33,7 @@ def _format_api_error(e: client.ApiError) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
-        description="OMNI Link CLI - 通过复用 OMNI Link 后端接口开放探针/烧录/RTT 等能力",
+        description="OMNI CLI - 探针/烧录/RTT/Commander 与工程配置（omni project）",
     )
     parser.add_argument("-v", "--version", action="version", version=f"omni {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="<command>")

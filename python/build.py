@@ -142,12 +142,12 @@ DATA_DIRS = [
 # stdout 编码都无法恢复原文，必须在构建前拦下。
 #
 # 排除项：pyocd/ 是内置的第三方源码；dist/、build/ 是打包产物；
-# omnilink_cli/build/ 是旧 setuptools 的 build/lib 副本。
+# omni_cli/build/ 是旧 setuptools 的 build/lib 副本。
 ENCODING_CHECK_EXCLUDE_PREFIXES = (
     "pyocd/",
     "dist/",
     "build/",
-    "omnilink_cli/build/",
+    "omni_cli/build/",
 )
 ENCODING_CHECK_EXCLUDE_DIR_NAMES = {"__pycache__"}
 REPLACEMENT_CHAR = "\ufffd"
@@ -400,9 +400,10 @@ def build(python_exe: str):
 
 
 def build_cli(python_exe: str):
-    """把零依赖的 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
+    """把 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
 
-    单文件便于随安装包分发并直接放进 PATH；CLI 只依赖标准库，产物很小。
+    单文件便于随安装包分发并直接放进 PATH。调试/烧录命令只依赖标准库；
+    ``omni project`` 额外依赖 kconfiglib，PyInstaller 需要显式收集。
     """
     ensure_pyinstaller(python_exe)
 
@@ -415,7 +416,8 @@ def build_cli(python_exe: str):
         f"--distpath={DIST_DIR}",
         f"--workpath={BUILD_DIR}",
         f"--specpath={BACKEND_DIR}",
-        "--collect-submodules", "omnilink_cli",
+        "--collect-submodules", "omni_cli",
+        "--hidden-import", "kconfiglib",
         "--paths", str(BACKEND_DIR),
         str(CLI_ENTRY_SCRIPT),
     ]

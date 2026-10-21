@@ -6,7 +6,10 @@ from . import debug as debug
 from . import device as device
 from . import flash as flash
 from . import probe as probe
+from . import project as project
 from . import rtt as rtt
 from . import target as target
 
-__all__ = ["backend", "commander", "debug", "device", "flash", "probe", "rtt", "target"]
+__all__ = [
+    "backend", "commander", "debug", "device", "flash", "probe", "project", "rtt", "target"
+]

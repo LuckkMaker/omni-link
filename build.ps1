@@ -16,6 +16,8 @@
     跳过后端打包（如果你已经手动打过包）
 .PARAMETER SkipFrontend
     跳过前端构建 + 安装包生成
+.PARAMETER CliOnly
+    只构建并打包 OMNI CLI（portable zip + wheel），不构建后端、前端和完整安装包
 .PARAMETER PfxPath
     代码签名证书（.pfx / .p12）。不填时读取 WIN_CSC_LINK / CSC_LINK 环境变量
 .PARAMETER PfxPassword
@@ -35,6 +37,8 @@
     .\build.ps1 -Clean
     .\build.ps1 -Python "C:\Python312\python.exe"
     .\build.ps1 -SkipBackend
+    .\build.ps1 -CliOnly
+    .\build.ps1 -CliOnly -PfxPath .\certs\omni.pfx -PfxPassword "******"
     .\build.ps1 -PfxPath .\certs\omni.pfx -PfxPassword "******"
     .\build.ps1 -CertSha1 8F1A2B... -RequireSigned
 #>
@@ -43,6 +47,7 @@ param(
     [string]$Python,
     [switch]$SkipBackend,
     [switch]$SkipFrontend,
+    [switch]$CliOnly,
     [string]$PfxPath,
     [string]$PfxPassword,
     [string]$CertSha1,
@@ -54,6 +59,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# CLI-only：不进入后端/前端/electron-builder 流程，直接交给 cli-release.ps1。
+if ($CliOnly) {
+    $cliArgs = @{}
+    if ($Clean) { $cliArgs["Clean"] = $true }
+    if ($PfxPath) { $cliArgs["PfxPath"] = $PfxPath }
+    if ($PfxPassword) { $cliArgs["PfxPassword"] = $PfxPassword }
+    if ($CertSha1) { $cliArgs["CertSha1"] = $CertSha1 }
+    if ($CertSubject) { $cliArgs["CertSubject"] = $CertSubject }
+    if ($TimestampServer) { $cliArgs["TimestampServer"] = $TimestampServer }
+    if ($RequireSigned) { $cliArgs["RequireSigned"] = $true }
+    & (Join-Path $ProjectRoot "python\scripts\cli-release.ps1") @cliArgs
+    exit $LASTEXITCODE
+}
 
 # package.json 是 UTF-8 且没有 BOM；Windows PowerShell 5.1 默认按系统 ANSI 码页
 # （中文系统为 GBK）读取会乱码，导致 ConvertFrom-Json 解析失败，故显式指定编码。

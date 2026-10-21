@@ -1,4 +1,4 @@
-﻿# OMNI Link CLI 冒烟 / 集成测试
+﻿# OMNI CLI 冒烟 / 集成测试
 # 用法：
 #   .\cli-smoke.ps1                      # 只测只读/离线子集（安全）
 #   .\cli-smoke.ps1 -Firmware .\app.hex  # 追加破坏性 program/erase 回环（需确认板子可擦除）
@@ -12,7 +12,7 @@ param(
     [string]$Uid      = "",
     [int]$Port        = 57123,
     [switch]$Rtt,                    # 追加 RTT 上行读取段
-    [switch]$UseInstalled            # true=用已安装的 omni；false=用源码 python -m omnilink_cli
+    [switch]$UseInstalled            # true=用已安装的 omni；false=用源码 python -m omni_cli
 )
 
 $ErrorActionPreference = "Continue"
@@ -23,14 +23,14 @@ $cwd = "D:\workspace\embedded\omni-link\python"
 $script:encodingFailures = 0
 $script:expectFailures = 0
 
-# CLI 调用方式：安装态直接用 omni.exe，开发态用 python -m omnilink_cli
+# CLI 调用方式：安装态直接用 omni.exe，开发态用 python -m omni_cli
 if ($UseInstalled) {
     $cliExe = "D:\workspace\embedded\omni-link\.venv\Scripts\omni.exe"
     $cliPrefix = @()
     Write-Host "使用已安装的 omni.exe" -ForegroundColor Magenta
 } else {
     $cliExe = $py
-    $cliPrefix = @("-m", "omnilink_cli")
+    $cliPrefix = @("-m", "omni_cli")
 }
 
 function Run([string]$Name, [string[]]$ArgsList) {
@@ -81,6 +81,8 @@ Run "commander exec 缺参引导" @("commander", "exec")
 CheckNoMojibake "backend -h" @("backend", "-h")
 CheckNoMojibake "probe connect -h" @("probe", "connect", "-h")
 CheckNoMojibake "rtt read -h" @("rtt", "read", "-h")
+CheckNoMojibake "project -h" @("project", "-h")
+CheckNoMojibake "project config -h" @("project", "config", "-h")
 RunExpectFail "probe connect 缺 --target" @("probe", "connect", "DUMMY")
 
 # ── B. 拉起常驻后端（脚本进程存活期间保持）─────────────
@@ -88,7 +90,7 @@ Write-Host "`n## B. 启动常驻后端 port=$Port" -ForegroundColor Green
 $p = Start-Process -FilePath $py -ArgumentList @("server.py","--port",$Port) -WorkingDirectory $cwd -PassThru
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
-    if (& $py -c "from omnilink_cli.client import reachable; print(reachable($Port))" -match "True") { $ready = $true; break }
+    if (& $py -c "from omni_cli.client import reachable; print(reachable($Port))" -match "True") { $ready = $true; break }
     Start-Sleep -Milliseconds 500
 }
 if (-not $ready) { Write-Host "后端未就绪，终止" -ForegroundColor Red; exit 1 }

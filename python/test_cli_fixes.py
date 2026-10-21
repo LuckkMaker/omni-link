@@ -100,7 +100,7 @@ def test_rtt_capture() -> None:
 # ── 2. commander 选项前移 ────────────────────────────────────
 def test_commander_normalize() -> None:
     print("== 2. commander exec 全局选项前移 ==")
-    from omnilink_cli.commands.commander import normalize_argv
+    from omni_cli.commands.commander import normalize_argv
 
     got = normalize_argv(["commander", "exec", "read32 0x08000000 4", "--timeout", "15"])
     check("尾部 --timeout 前移",
@@ -126,8 +126,8 @@ def test_commander_normalize() -> None:
 # ── 3. 后端错误分类 ──────────────────────────────────────────
 def test_error_classification() -> None:
     print("== 3. 后端错误分类 ==")
-    from omnilink_cli import client
-    from omnilink_cli.cli import _format_api_error
+    from omni_cli import client
+    from omni_cli.cli import _format_api_error
 
     # 未监听端口 → unreachable
     probe = socket.socket()
@@ -226,7 +226,7 @@ def test_zone_failure_detail() -> None:
 # ── 7. rtt read 输出（stub client）────────────────────────────
 def test_rtt_read_cli() -> None:
     print("== 7. rtt read 输出 ==")
-    from omnilink_cli.commands import rtt
+    from omni_cli.commands import rtt
 
     payload = {
         "success": True,
@@ -272,7 +272,7 @@ def test_rtt_read_cli() -> None:
 
 def test_flash_timeout_defaults() -> None:
     print("== 8. Flash 命令默认超时 ==")
-    from omnilink_cli.cli import build_parser
+    from omni_cli.cli import build_parser
 
     parser = build_parser()
     check("flash erase 默认 180s", parser.parse_args(["flash", "erase"]).timeout == 180)
@@ -291,7 +291,7 @@ def test_flash_timeout_defaults() -> None:
 
 def test_regs_filter_failure() -> None:
     print("== 9. debug regs 过滤失败提示 ==")
-    from omnilink_cli.commands import debug
+    from omni_cli.commands import debug
 
     class Stub:
         def get(self, path):
@@ -411,13 +411,13 @@ def test_fill_value_and_import() -> None:
 
     check("FlashLoader 来自 pyocd.flash.loader", FlashLoader is MemoryLoader)
 
-    from omnilink_cli.cli import build_parser
+    from omni_cli.cli import build_parser
     parser = build_parser()
     args = parser.parse_args(["flash", "fill", "--addr", "0x08000000",
                               "--size", "256", "--value", "0x55"])
     check("--value 接受 0x55", args.value == 0x55, str(args.value))
 
-    from omnilink_cli.commands import flash as flash_cmd
+    from omni_cli.commands import flash as flash_cmd
 
     class Stub:
         def __init__(self):
@@ -467,7 +467,7 @@ def test_rtt_session_reset() -> None:
 
 def test_readme_commander_docs() -> None:
     print("== 12. README commander 文档 ==")
-    readme = Path(PY_DIR, "omnilink_cli", "README.md").read_text(encoding="utf-8")
+    readme = Path(PY_DIR, "omni_cli", "README.md").read_text(encoding="utf-8")
     check("文档使用 `commander exec help` 列命令", "omni commander exec help" in readme)
     check("文档不再声称 `exec list` 列出命令",
           "exec list                     # 列出全部可用命令" not in readme)
@@ -482,7 +482,7 @@ def test_readme_commander_docs() -> None:
 
 def test_rtt_read_json_warnings() -> None:
     print("== 16. rtt read --json 警告不污染 stdout ==")
-    from omnilink_cli.commands import rtt
+    from omni_cli.commands import rtt
 
     payload = {
         "success": True, "uid": "u1", "running": True, "channel": None,
@@ -531,7 +531,7 @@ def test_rtt_read_json_warnings() -> None:
 
 
 def main() -> int:
-    from omnilink_cli.formatting import configure_stdio
+    from omni_cli.formatting import configure_stdio
     configure_stdio()
     try:
         test_rtt_capture()

@@ -20,3 +20,20 @@ def common_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=int, default=30, metavar="SEC",
                    help="后端 HTTP 超时秒数（默认 30；flash 烧录/擦除默认 180，校验/回读/填充默认 120）")
     return p
+
+
+def project_parser() -> argparse.ArgumentParser:
+    """工程配置命令的共用选项（本地执行，不涉及后端）。"""
+
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--project-dir", default=None, metavar="PATH",
+                   help="工程根目录（默认当前目录并向上查找）")
+    p.add_argument("--omni-root", default=None, metavar="PATH",
+                   help="omni 框架根目录（默认从工程目录向上查找）")
+    p.add_argument("--target", default=None, metavar="BOARD",
+                   help="板级目标名（如 stm32f407ig）")
+    p.add_argument("--json", dest="json_", action="store_true", default=False,
+                   help="输出 JSON（供脚本/CI 消费）")
+    p.add_argument("--quiet", action="store_true", default=False,
+                   help="仅设置退出码，不输出任何内容")
+    return p

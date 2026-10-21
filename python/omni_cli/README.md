@@ -1,18 +1,47 @@
-# OMNI Link CLI（`omni`）
+# OMNI CLI（`omni`）
 
-把 OMNI Link 的能力（探针、烧录、RTT、设备库、Commander）以命令行方式开放出来，便于脚本化、CI 与自动化测试。
+把 OMNI Link 的调试能力（探针、烧录、RTT、设备库、Commander）和 OMNI 工程配置能力统一到一个命令行入口，便于脚本化、CI 与自动化测试。
 
 ## 定位
 
-`omnilink_cli` 是**后端能力的瘦客户端**：所有命令都通过 HTTP 复用 OMNI Link Python 后端已有的 REST 接口，**不复制任何业务逻辑**。因此它零第三方依赖（只用标准库 `urllib`），并且行为与前端界面始终一致。
+OMNI CLI 有两类命令：
+
+- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `device` / `rtt`。
+  它们是 OMNI Link 后端的瘦客户端，通过 HTTP 复用 REST 接口，不复制后端业务逻辑。
+- **工程配置类**：`omni project`。本地执行，不经过后端，实现在 `omni_cli.project` 内；
+  只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，不调用 `omni/scripts` 下的旧脚本。
 
 ```
-omni (本包)  ──HTTP──▶  OMNI Link Python 后端 (server.py)  ──▶  调试探针 ──▶  目标芯片
+omni (本包)
+  ├── HTTP ──▶ OMNI Link Python 后端 (server.py) ──▶ 调试探针 ──▶ 目标芯片
+  └── 本地 ──▶ omni_cli.project ──▶ 工程配置/头文件/Keil 工程
 ```
 
-这意味着：**执行任何实际命令前，都需要有一个正在运行的后端**。唯一例外是 `omni backend` 自身（负责拉起/停止后端）。
+因此：**调试/烧录命令需要后端；`omni project` 不需要后端，也不需要探针。**
 
 ## 版本记录
+
+### 0.3.1（2026-10-21）
+
+- 修复 `omni project sync-keil` 的 FatFs 规则：`CONFIG_FATFS` → `CONFIG_FS_FATFS`
+  （当前 omni 框架使用 `FS_FATFS`，旧符号导致 `fatfs_arch.c` 不会同步进 Keil 工程）。
+- 修复 `omni project menuconfig` 在找不到 `menuconfig` 命令时遗留临时
+  `omni-app-*.Kconfig` 的问题。
+- 补充 `FS_FATFS`、`--stop-on-change`、`menuconfig` 清理的离线回归测试。
+
+### 0.3.0（2026-10-21）
+
+- 产品名统一为 **OMNI CLI**；Python 包 `omnilink_cli` → `omni_cli`。
+  发行名 `omni-cli` 和命令 `omni` 不变；开发态调用改为 `python -m omni_cli`。
+- 新增本地命令 `omni project`：
+  - `config`：Kconfig 合并、`omni_config.h`、`bsp_config.h`，可选 MSP / Keil 同步；
+  - `menuconfig`：交互式配置；
+  - `bsp`：独立生成 `bsp_config.h`；
+  - `sync-keil`：按已有 `.config` 同步 Keil 工程，默认全部 `*.uvprojx`。
+- 工程配置逻辑从 `omni-emb/omni/scripts` 重新实现到 CLI；旧脚本保留作参考/备份，
+  不再被 CLI 调用。
+- 新增 `kconfiglib` 依赖（`config` / `menuconfig`）；`bsp` / `sync-keil` 不需要它。
+- 新增 `omni-emb/omni/scripts/omni_project/omni_project.py` 薄启动器，供 Keil/CMSIS 构建钩子调用。
 
 ### 0.2.3（2026-10-20）
 
@@ -89,6 +118,10 @@ omni --version
 omni -h
 ```
 
+> `omni project config` / `menuconfig` 依赖 `kconfiglib`，wheel 安装会自动拉取；
+> `menuconfig` 还需要同一环境中的 `menuconfig` 命令（`kconfiglib` 会安装它）。
+> `bsp` / `sync-keil` 不依赖 `kconfiglib`。
+
 可用参数：
 
 | 参数 | 说明 |
@@ -100,12 +133,52 @@ omni -h
 
 ```powershell
 cd D:\workspace\embedded\omni-link\python
-& "..\.venv\Scripts\python.exe" -m omnilink_cli probe list
+& "..\.venv\Scripts\python.exe" -m omni_cli probe list
 ```
 
 源码态无需安装，改完代码立即生效；缺点是每次要带解释器和 `-m`。
 
 > 两种方式并存：wheel 安装后源码改动需要重跑一次 `cli-package.ps1` 才会生效。
+
+### 方式三：CLI-only 独立发布（不打包整个应用）
+
+只更新 CLI 时，不需要重新构建 Electron 前端和 238 MB 的应用安装包：
+
+```powershell
+cd D:\workspace\embedded\omni-link
+.\build.ps1 -CliOnly
+# 等价于
+powershell -File python\scripts\cli-release.ps1
+```
+
+产物：
+
+```text
+python\dist\cli-release\omni-cli-<version>-win64.zip
+python\dist\cli-release\omni_cli-<version>-py3-none-any.whl
+python\dist\cli-release\SHA256SUMS.txt
+```
+
+zip 内包含 `omni.exe`、`README.md`、`LICENSE`、`install.ps1`、`uninstall.ps1`
+和 `SHA256SUMS.txt`。安装脚本默认装到
+`%LOCALAPPDATA%\Programs\OMNI CLI\bin` 并加入用户 PATH。
+
+可选参数：
+
+```powershell
+# 只重打 zip，不重新构建 exe/wheel
+powershell -File python\scripts\cli-release.ps1 -SkipBuild -SkipWheel
+
+# 不生成 zip，只保留组装目录
+powershell -File python\scripts\cli-release.ps1 -NoZip -KeepStaging
+
+# 代码签名（可选）
+powershell -File python\scripts\cli-release.ps1 `
+  -PfxPath .\certs\omni.pfx -PfxPassword "******" -RequireSigned
+```
+
+> portable zip 不包含调试后端；`omni project` 可独立使用，`probe/flash/debug/rtt`
+> 需要已安装的 OMNI Link 后端或 `OMNI_BACKEND_DIR`/`OMNI_BACKEND_SERVER`。
 
 ## 快速开始
 
@@ -149,6 +222,9 @@ omni backend stop
 | `--quiet` | 不输出内容，仅设置退出码 |
 | `--timeout SEC` | 后端 HTTP 超时秒数（默认 30；`flash program/erase` 默认 180，`verify/blank-check/read/fill` 默认 120） |
 
+> `omni project` 是本地命令，只使用 `--json` / `--quiet`，**不接受** `--backend-port` /
+> `--managed` / `--timeout`；它另有 `--project-dir` / `--omni-root` / `--target` 等上下文选项。
+>
 > ℹ️ `omni commander exec` 的命令参数用 `REMAINDER` 收集。为兼容常见写法，CLI 解析前会把
 > 命令之后出现的**已知全局选项**（`--uid` / `--backend-port` / `--timeout` / `--managed` /
 > `--json` / `--quiet`）自动前移，因此下面两种写法都可用：
@@ -181,6 +257,51 @@ omni backend stop
 `stop` 不依赖运行时记录：即使后端由手动 `python server.py` 或 Electron 主进程拉起，
 也能按端口找到并停止，确保 J-Link 等探针句柄被释放。若优雅关停的清理被探针操作卡住，
 后端自身的关停看门狗（`api/system.py` `SHUTDOWN_GRACE_S=10s`）会兜底强制退出。
+
+### `project` — 工程配置（本地命令）
+
+不经过后端，也不需要探针；直接在本地读取 omni 框架的 `Kconfig` / `soc` / `boards`
+并生成工程配置。实现在 `omni_cli.project`，不调用 omni-emb 的旧脚本。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `config` | Kconfig 合并 + `omni_config.h` + `bsp_config.h`；可选 `--msp` / `--sync-keil` |
+| `menuconfig` | 打开交互式 menuconfig，保存后更新头文件 |
+| `bsp` | 独立生成 `bsp_config.h`（默认自动发现链接 map） |
+| `sync-keil` | 按已有 `.config` 同步 Keil 工程；**默认全部 `*.uvprojx`** |
+
+上下文选项（各子命令通用）：`--project-dir PATH`、`--omni-root PATH`、`--target BOARD`。
+不传时自动从当前目录向上查找工程根和 `omni/` 根；多目标工程必须显式 `--target`。
+
+```powershell
+cd D:\workspace\embedded\omni-emb\examples\basic\template
+
+omni project config --target stm32f407ig
+omni project config --target stm32f407ig --msp
+omni project config --target stm32f407ig --sync-keil
+omni project config --target stm32f407ig --sync-keil --stop-on-change
+omni project bsp --target stm32f407ig
+omni project bsp --target stm32f407ig --map Listings\stm32f407\omni.map
+omni project sync-keil
+omni project menuconfig --target stm32f407ig
+```
+
+> `--sync-keil` / `sync-keil` 默认同步工程目录下**全部** `*.uvprojx`，与旧
+> `omni_config.py --sync-uvprojx` 一致。只有需要收窄时才加 `--uvprojx FILE`（可重复）。
+>
+> `--stop-on-change`：任意 `.uvprojx` 有变化时返回退出码 **2**，提示重新加载/构建；
+> 没有变化返回 0。
+>
+> `menuconfig` 需要交互式终端；Windows 下会打开独立控制台窗口。不要在 CI 管道中使用。
+
+Keil/CMSIS 构建钩子建议通过 omni-emb 的薄启动器调用，而不是直接写 `omni`：
+
+```text
+python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f407ig --sync-keil
+```
+
+启动器只负责定位 CLI、校验最低版本（0.3.1）和转发参数；可用 `OMNI_CLI` 指定
+`omni.exe` 路径。
 
 ### `probe` — 探针管理
 
@@ -482,7 +603,8 @@ omni rtt stop --uid 852001270
 | --- | --- |
 | `0` | 成功 |
 | `1` | 业务失败或运行错误（错误信息输出到 stderr，前缀 `错误:`） |
-| `2` | 用法错误：未指定子命令、`argparse` 参数错误、`omni rtt device` 未带子命令 |
+| `2` | 用法错误：未指定子命令、`argparse` 参数错误、多目标未指定 `--target`；`omni project` 的 `--stop-on-change` 检测到 Keil 工程变化时也返回 2 |
+| `3` | `omni_project.py` 启动器环境错误：找不到 `omni` 或版本过低 |
 
 脚本中判断后端是否存活：
 
@@ -522,12 +644,17 @@ python build.py --cli-only          # 只重建 CLI（打包后自动校验帮�
 | `OMNI_BACKEND_DIR` | 后端根目录（含 `server.py`）。wheel 安装后用于定位后端 |
 | `OMNI_BACKEND_SERVER` | 直接指定 `server.py` 路径，优先级最高 |
 | `OMNI_BACKEND_PORT` | 后端端口覆盖（与 Electron 主进程一致） |
+| `OMNI_PROJECT_DIR` | `omni project` 的工程根目录覆盖 |
+| `OMNI_EMB_ROOT` / `OMNI_ROOT` | `omni project` 的 omni 框架根目录覆盖（接受仓库根或 `omni/`） |
+| `OMNI_TARGET` | `omni project` 的默认板级目标 |
+| `OMNI_CLI` | `omni_project.py` 启动器查找的 `omni` 可执行文件/目录 |
+| `OMNI_PROJECT_SKIP_VERSION_CHECK` | 设为 `1` 时启动器跳过版本检查 |
 
 `server.py` 定位优先级：`OMNI_BACKEND_SERVER` → `OMNI_BACKEND_DIR` → 包内 `cli.config.json`（由 `cli-package.ps1` 安装时写入）→ 源码树布局。
 
 ## 运行时文件
 
-均位于包目录（`.venv\Lib\site-packages\omnilink_cli\` 或源码目录）：
+均位于包目录（`.venv\Lib\site-packages\omni_cli\` 或源码目录）：
 
 | 文件 | 说明 |
 | --- | --- |
@@ -543,6 +670,9 @@ cd D:\workspace\embedded\omni-link\python
 
 # 离线回归（无需硬件）：RTT 环形缓存、commander 选项前移、错误分类、编码检查、verify 字段
 ..\.venv\Scripts\python.exe test_cli_fixes.py
+
+# 工程配置回归（无需硬件/后端）：上下文解析、Kconfig 合并、BSP、Keil 同步
+..\.venv\Scripts\python.exe test_project_cli.py
 
 # 源码编码检查（UTF-8 / 无 U+FFFD）
 ..\.venv\Scripts\python.exe build.py --check-sources
@@ -560,7 +690,7 @@ powershell -File scripts\cli-smoke.ps1 -UseInstalled -Elf .\app.axf
 powershell -File scripts\cli-smoke.ps1 -UseInstalled -Rtt
 ```
 
-`-UseInstalled` 表示使用 venv 中已安装的 `omni.exe`；省略则用源码 `python -m omnilink_cli`。脚本会自行拉起后端、自动取第一个探针，结束时清理进程，每条命令后打印 `exit=`。
+`-UseInstalled` 表示使用 venv 中已安装的 `omni.exe`；省略则用源码 `python -m omni_cli`。脚本会自行拉起后端、自动取第一个探针，结束时清理进程，每条命令后打印 `exit=`。
 `cli-smoke.ps1` 还会检查帮助输出无 U+FFFD、缺少 `--target` 的 `probe connect` 立即失败，任一检查不通过时脚本以非 0 退出。
 
 ## 常见问题
@@ -575,6 +705,22 @@ powershell -File scripts\cli-smoke.ps1 -UseInstalled -Rtt
 
 **`错误: 未找到后端 server.py: ...\site-packages\server.py`**
 wheel 安装后未记录后端位置。重跑 `python\scripts\cli-package.ps1`，或临时设置 `OMNI_BACKEND_DIR` 指向 `python\` 目录。
+
+**`omni project` 报“工程包含多个目标板”**
+该工程有多个 `boards/<target>`；用 `--target` 指定，例如
+`omni project config --target stm32f407ig`。
+
+**`omni project config` 报 `No module named kconfiglib`**
+当前 Python 环境缺少 `kconfiglib`。wheel 安装会自动安装；源码态执行
+`..\.venv\Scripts\python.exe -m pip install kconfiglib`，或 `uv pip install kconfiglib`。
+
+**`omni project menuconfig` 打不开 / 找不到 menuconfig**
+`menuconfig` 是 `kconfiglib` 提供的控制台命令。确认安装它的 `Scripts` 目录在 PATH，
+或在 Python 环境中使用 `python -m menuconfig`。
+
+**`omni_project.py` 报“未找到 omni CLI”或版本过低**
+构建钩子通过启动器调用 CLI。安装 OMNI CLI（0.3.1+），或设置
+`OMNI_CLI=D:\path\to\omni.exe`。启动器返回码 3 表示环境问题，不是配置生成失败。
 
 **J-Link 连不上目标**
 必须用 `--jlink-device` 指定 SEGGER 数据库中的设备名（大小写敏感），例如 `--jlink-device G32F463XC`。该名称与 CMSIS-PACK 型号不一定相同。

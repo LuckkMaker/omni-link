@@ -1,4 +1,4 @@
-"""`python -m omnilink_cli` 入口。"""
+"""`python -m omni_cli` 入口。"""
 
 import sys
 

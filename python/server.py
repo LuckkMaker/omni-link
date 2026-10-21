@@ -37,7 +37,7 @@ logger = logging.getLogger("omni-link")
 #
 # 后端启动后把 {pid, port} 写入一个用户级、跨安装布局都相同的文件，任何调用方
 # （CLI `omni`、其他工具）都能据此发现并复用**同一个**后端进程，而不会各自再拉起
-# 一个后端去抢同一探针。路径计算必须与 CLI 侧 omnilink_cli/config.py 的
+# 一个后端去抢同一探针。路径计算必须与 CLI 侧 omni_cli/config.py 的
 # _state_dir 保持一致。
 # ---------------------------------------------------------------------------
 def _state_dir() -> str:
