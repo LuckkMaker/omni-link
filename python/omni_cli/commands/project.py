@@ -64,9 +64,9 @@ def _run_local(handler):
         except ProjectError as exc:
             return _report_error(args, str(exc), exc.code)
         except KeyboardInterrupt:
-            return _report_error(args, "已中断", 1)
+            return _report_error(args, "interrupted", 1)
         except OSError as exc:
-            return _report_error(args, f"文件/进程操作失败: {exc}", 1)
+            return _report_error(args, f"file/process operation failed: {exc}", 1)
         except Exception as exc:  # 防止工程命令抛出未格式化 traceback
             return _report_error(args, f"{type(exc).__name__}: {exc}", 1)
 
@@ -83,7 +83,7 @@ def _report_error(args, message: str, code: int) -> int:
                 indent=2,
             ))
         else:
-            print(f"错误: {message}", file=sys.stderr)
+            print(f"Error: {message}", file=sys.stderr)
     return code
 
 
@@ -162,9 +162,9 @@ def _config(args) -> int:
         "log": result.log_lines,
         "stderr": err.getvalue() if hasattr(err, "getvalue") else "",
     }
-    human = "工程配置已生成。"
+    human = "Project configuration generated."
     if exit_code == 2:
-        human = "Keil 工程已更新，请重新加载/构建工程。"
+        human = "Keil project updated; reload/rebuild the project."
     _finish(args, payload, human)
     return exit_code
 
@@ -197,7 +197,7 @@ def _menuconfig(args) -> int:
         omni_root=ctx.omni_root,
         target=ctx.target,
     )
-    print("menuconfig 已保存并更新配置头文件。")
+    print("menuconfig saved; configuration headers updated.")
     return 0
 
 
@@ -229,7 +229,7 @@ def _bsp(args) -> int:
         "bsp_config": out,
         "changed": before != after,
     }
-    _finish(args, payload, f"BSP 头文件: {out}")
+    _finish(args, payload, f"BSP header: {out}")
     return 0
 
 
@@ -262,6 +262,6 @@ def _sync_keil(args) -> int:
         "changed": changed,
         "uvprojx": files,
     }
-    human = "Keil 工程已更新。" if changed else "Keil 工程无变化。"
+    human = "Keil project updated." if changed else "Keil project unchanged."
     _finish(args, payload, human)
     return exit_code

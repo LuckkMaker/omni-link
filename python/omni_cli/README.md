@@ -21,6 +21,14 @@ omni (本包)
 
 ## 版本记录
 
+### 0.3.2（2026-10-21）
+
+- `omni project` 的人类可读成功摘要改为 ASCII/英文（`Project configuration generated.`
+  等），避免在 Keil 的 GBK 控制台里显示为乱码；错误前缀也改为 `Error:`。
+- 配套修复 CMSIS `execute`：项目目录改为通过 `$input(1)$` 传递，避免
+  `$ProjectDir$` 在 `run` 中展开为空导致 `--project-dir: expected one argument`。
+- 启动器最低版本提升到 `0.3.2`。
+
 ### 0.3.1（2026-10-21）
 
 - 修复 `omni project sync-keil` 的 FatFs 规则：`CONFIG_FATFS` → `CONFIG_FS_FATFS`
@@ -300,7 +308,7 @@ Keil/CMSIS 构建钩子建议通过 omni-emb 的薄启动器调用，而不是�
 python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f407ig --sync-keil
 ```
 
-启动器只负责定位 CLI、校验最低版本（0.3.1）和转发参数；可用 `OMNI_CLI` 指定
+启动器只负责定位 CLI、校验最低版本（0.3.2）和转发参数；可用 `OMNI_CLI` 指定
 `omni.exe` 路径。
 
 ### `probe` — 探针管理
@@ -719,7 +727,7 @@ wheel 安装后未记录后端位置。重跑 `python\scripts\cli-package.ps1`�
 或在 Python 环境中使用 `python -m menuconfig`。
 
 **`omni_project.py` 报“未找到 omni CLI”或版本过低**
-构建钩子通过启动器调用 CLI。安装 OMNI CLI（0.3.1+），或设置
+构建钩子通过启动器调用 CLI。安装 OMNI CLI（0.3.2+），或设置
 `OMNI_CLI=D:\path\to\omni.exe`。启动器返回码 3 表示环境问题，不是配置生成失败。
 
 **J-Link 连不上目标**

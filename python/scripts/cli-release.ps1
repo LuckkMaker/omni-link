@@ -194,6 +194,21 @@ $wheel = $null
 if (-not $SkipWheel) {
     $uv = (Get-Command uv -ErrorAction SilentlyContinue)
     if (-not $uv) { throw "找不到 uv；请安装 uv 或加 -SkipWheel" }
+
+    # 清理 setuptools 的 build/lib、egg-info 和 __pycache__，
+    # 避免把 .pyc 或旧文件带进 wheel。
+    foreach ($cache in @(
+        (Join-Path $CliProj "build"),
+        (Join-Path $CliProj "omni_cli.egg-info"),
+        (Join-Path $CliProj "__pycache__"),
+        (Join-Path $CliProj "commands\__pycache__"),
+        (Join-Path $CliProj "project\__pycache__")
+    )) {
+        if (Test-Path -LiteralPath $cache) { Remove-Item -LiteralPath $cache -Recurse -Force }
+    }
+    Get-ChildItem -LiteralPath $DistDir -Filter "omni_cli-$version-*.whl" -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+
     Write-Host "[2/4] uv build --wheel" -ForegroundColor Yellow
     & $uv.Source build $CliProj --wheel --out-dir $DistDir
     if ($LASTEXITCODE -ne 0) { throw "wheel 构建失败" }

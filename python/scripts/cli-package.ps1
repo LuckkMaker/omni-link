@@ -21,6 +21,16 @@ $DistDir   = Join-Path $PyDir "dist"
 if (-not (Test-Path $VenvPy)) { throw "找不到 venv 解释器: $VenvPy" }
 
 if (-not $NoBuild) {
+    # 清理 setuptools 的 build/lib、egg-info 和 __pycache__，避免 wheel 带入 .pyc。
+    foreach ($cache in @(
+        (Join-Path $CliProj "build"),
+        (Join-Path $CliProj "omni_cli.egg-info"),
+        (Join-Path $CliProj "__pycache__"),
+        (Join-Path $CliProj "commands\__pycache__"),
+        (Join-Path $CliProj "project\__pycache__")
+    )) {
+        if (Test-Path -LiteralPath $cache) { Remove-Item -LiteralPath $cache -Recurse -Force }
+    }
     Write-Host "[1/3] uv build --wheel" -ForegroundColor Cyan
     uv build $CliProj --wheel --out-dir $DistDir
 }

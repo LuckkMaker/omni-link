@@ -17,6 +17,7 @@ omni = "omni_cli.cli:main"
 [tool.setuptools]
 packages = ["omni_cli", "omni_cli.commands", "omni_cli.project"]
 package-dir = { "omni_cli" = ".", "omni_cli.commands" = "commands", "omni_cli.project" = "project" }
+include-package-data = false
 
 [tool.setuptools.dynamic]
 version = { attr = "omni_cli.__version__" }
