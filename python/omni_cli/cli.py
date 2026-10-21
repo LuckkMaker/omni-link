@@ -9,12 +9,12 @@ import argparse
 import sys
 
 from . import __version__, client
-from .commands import backend, commander, debug, device, flash, probe, project, rtt, target
+from .commands import backend, commander, debug, device, flash, pack, probe, project, rtt, target
 from .formatting import configure_stdio, ctx_error
 
 PROG = "omni"
 
-_COMMAND_MODULES = (backend, commander, debug, device, flash, probe, project, rtt, target)
+_COMMAND_MODULES = (backend, commander, debug, device, flash, pack, probe, project, rtt, target)
 
 
 def _format_api_error(e: client.ApiError) -> str:

@@ -1,4 +1,7 @@
-"""Phase 2 共享小工具：整数解析与探针 uid 解析。"""
+"""Phase 2 共享小工具：整数/频率/Pack 路径解析、确认与探针 uid 解析。"""
+
+import argparse
+import os
 
 
 def parse_int(value) -> int | None:
@@ -16,6 +19,71 @@ def parse_int(value) -> int | None:
         return int(s)
     except ValueError:
         raise ValueError(f"不是合法的整数: {value!r}")
+
+
+def parse_frequency(value) -> int:
+    """解析频率为 Hz，兼容 pyOCD 写法：``1000000`` / ``4m`` / ``2.5khz``。"""
+    if isinstance(value, int):
+        if value <= 0:
+            raise argparse.ArgumentTypeError(f"频率必须大于 0: {value!r}")
+        return value
+
+    text = str(value).strip().lower()
+    if not text:
+        raise argparse.ArgumentTypeError("频率不能为空")
+
+    multiplier = 1
+    if text.endswith("hz"):
+        text = text[:-2]
+    if text.endswith("k"):
+        multiplier = 1_000
+        text = text[:-1]
+    elif text.endswith("m"):
+        multiplier = 1_000_000
+        text = text[:-1]
+
+    try:
+        frequency = int(float(text) * multiplier)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"不是合法的频率: {value!r}（示例：1000000、4m、2.5khz）"
+        ) from None
+    if frequency <= 0:
+        raise argparse.ArgumentTypeError(f"频率必须大于 0: {value!r}")
+    return frequency
+
+
+def resolve_pack_paths(values) -> list[str]:
+    """把 ``--pack`` 的路径规范化/校验为绝对路径列表（客户端预校验）。
+
+    与后端 ``pack_manager.validate_pack_paths`` 同规则；失败抛 ValueError，
+    由命令处理器转成可读错误，避免把坏路径发到后端。
+    """
+    if not values:
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        path = os.path.abspath(os.path.expanduser(str(raw).strip()))
+        if not os.path.isfile(path):
+            raise ValueError(f"Pack 文件不存在: {path}")
+        if not path.lower().endswith(".pack"):
+            raise ValueError(f"不是 .pack 文件: {path}")
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def confirm(prompt: str) -> bool:
+    """交互确认；非交互/EOF 视为取消。"""
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
 
 
 def resolve_uid(c, args) -> str | None:

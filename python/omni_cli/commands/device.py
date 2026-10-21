@@ -10,6 +10,7 @@ from ..client import ApiClient
 from ..formatting import render_table
 from ..options import common_parser
 from ..runtime import finish, run_command
+from ..util import confirm
 
 
 def add_parser(sub):
@@ -124,7 +125,7 @@ def _update(c: ApiClient, args):
 
 
 def _delete(c: ApiClient, args):
-    if not args.yes and not _confirm(f"确认删除设备 '{args.part}'？内置型号将拒绝删除。"):
+    if not args.yes and not confirm(f"确认删除设备 '{args.part}'？内置型号将拒绝删除。"):
         print("已取消")
         return 0
     data = c.delete(f"/api/devices/{args.part}")
@@ -166,13 +167,6 @@ def _read_json(path) -> dict:
     if not isinstance(data, dict):
         raise SystemExit(f"JSON 必须是对象: {path}")
     return data
-
-
-def _confirm(prompt: str) -> bool:
-    try:
-        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
-        return False
 
 
 def _detail_lines(d: dict) -> list:

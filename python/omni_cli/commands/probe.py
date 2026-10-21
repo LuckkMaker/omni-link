@@ -1,9 +1,12 @@
 """探针命令：list / connect / disconnect / status / target。"""
 
+import os
+
 from ..client import ApiClient
 from ..formatting import render_table
 from ..options import common_parser
 from ..runtime import finish, run_command
+from ..util import parse_frequency, resolve_pack_paths
 
 
 def add_parser(sub):
@@ -17,14 +20,17 @@ def add_parser(sub):
 
     s = ps.add_parser("connect", parents=[common_parser()], help="连接指定探针（--target 必填）")
     s.add_argument("uid", help="探针唯一 ID（用 `omni probe list` 查看）")
-    s.add_argument("--target", required=True,
+    s.add_argument("-t", "--target", required=True,
                    help="目标芯片型号（必填，如 stm32f407xg；用 `omni target list` 查询）")
     s.add_argument("--interface", default="swd", choices=["swd", "jtag"], help="调试接口")
-    s.add_argument("--speed", type=int,
-                   help="时钟频率 Hz（5000=5 kHz ~ 50000000=50 MHz，如 4000000=4 MHz）")
-    s.add_argument("--connect-mode", choices=["attach", "halt", "pre-reset", "under-reset"],
+    s.add_argument("-f", "--frequency", "--speed", dest="speed", type=parse_frequency,
+                   help="时钟频率 Hz（5000=5 kHz ~ 50000000=50 MHz；支持 4m、2.5khz 写法）")
+    s.add_argument("-M", "--connect", "--connect-mode", dest="connect_mode",
+                   choices=["attach", "halt", "pre-reset", "under-reset"],
                    help="连接模式：attach=附加/不复位 / halt=复位并暂停 / pre-reset=连接前复位 / under-reset=复位下连接")
     s.add_argument("--jlink-device", help="J-Link 目标设备名（如 G32F463XC），J-Link 必须设置")
+    s.add_argument("--pack", action="append", metavar="PATH",
+                   help="临时挂载 CMSIS-Pack（.pack，可重复；仅当前后端进程内有效，不写入设备库）")
     s.add_argument("--force", action="store_true", help="强制按新参数重连（即使已连接）")
     s.set_defaults(func=run_command(_connect))
 
@@ -40,6 +46,8 @@ def add_parser(sub):
     s = ps.add_parser("target", parents=[common_parser()], help="查询或设置目标芯片型号")
     s.add_argument("uid")
     s.add_argument("--part", metavar="PART_NUMBER", help="设置目标型号")
+    s.add_argument("--pack", action="append", metavar="PATH",
+                   help="设置目标时临时挂载 CMSIS-Pack（可重复；仅当前后端进程内有效）")
     s.set_defaults(func=run_command(_target))
 
 
@@ -63,6 +71,12 @@ def _list(c: ApiClient, args):
 
 
 def _connect(c: ApiClient, args):
+    try:
+        packs = resolve_pack_paths(getattr(args, "pack", None))
+    except ValueError as e:
+        print(f"错误: {e}")
+        return 1
+
     payload = {
         "target": args.target,
         "interface": args.interface,
@@ -70,9 +84,13 @@ def _connect(c: ApiClient, args):
         "connect_mode": args.connect_mode,
         "force": args.force,
         "jlink_device": args.jlink_device,
+        "pack": packs or None,
     }
     data = c.post(f"/api/probes/{args.uid}/connect", payload)
-    finish(args, data, _head_block(f"已连接 uid={args.uid}", data.get("target")))
+    head = f"已连接 uid={args.uid}"
+    if packs:
+        head += "\n  临时 Pack: " + ", ".join(os.path.basename(p) for p in packs) + "（仅当前后端进程有效）"
+    finish(args, data, _head_block(head, data.get("target")))
     return 0
 
 
@@ -92,8 +110,17 @@ def _status(c: ApiClient, args):
 
 def _target(c: ApiClient, args):
     if args.part:
-        data = c.post(f"/api/probes/{args.uid}/target", {"part_number": args.part})
-        finish(args, data, _head_block(f"目标已设置为 {args.part}", data.get("target")))
+        try:
+            packs = resolve_pack_paths(getattr(args, "pack", None))
+        except ValueError as e:
+            print(f"错误: {e}")
+            return 1
+        data = c.post(f"/api/probes/{args.uid}/target",
+                      {"part_number": args.part, "pack": packs or None})
+        head = f"目标已设置为 {args.part}"
+        if packs:
+            head += "\n  临时 Pack: " + ", ".join(os.path.basename(p) for p in packs) + "（仅当前后端进程有效）"
+        finish(args, data, _head_block(head, data.get("target")))
         return 0
     data = c.get(f"/api/probes/{args.uid}/target")
     finish(args, data, _head_block("", data))

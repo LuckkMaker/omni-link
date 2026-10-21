@@ -321,7 +321,8 @@ class PyOCDBackend(BackendInterface):
     def connect(self, probe_uid: str, target: str | None = None,
                 interface: str = "swd", speed: int | None = None,
                 connect_mode: str | None = None, force: bool = False,
-                device: str | None = None) -> bool:
+                device: str | None = None,
+                packs: list[str] | None = None) -> bool:
         """连接指定探针
 
         Args:
@@ -340,8 +341,25 @@ class PyOCDBackend(BackendInterface):
                 对 J-Link 探针，SWD 也必须设置 jlink.device 才会建立目标连接
                 （否则 pyOCD 只调 coresight_configure()，目标 target_connected=False，
                 表现为"连不上"，实际是 J-Link 根本没做设备连接）。
+            packs: 临时挂载的 .pack 路径列表（pyOCD `--pack` 语义）。只注册到
+                当前后端进程的 TARGET，不复制文件、不写设备库；后端重启后失效。
+                当前会话内已注册的型号后续连接无需重复传入。
         """
         from pyocd.core.helpers import ConnectHelper
+
+        # 临时挂包：在任何硬件动作之前完成注册。API 层已做一次预加载/超时，
+        # 这里通常命中缓存；失败时不拆已有会话，直接返回 False。
+        if packs:
+            try:
+                from core.pack_manager import ensure_pack_targets
+                loaded = ensure_pack_targets(packs)
+                if loaded:
+                    event_manager.log("info", "Attached CMSIS-Pack: " + ", ".join(
+                        os.path.basename(p) for p in loaded))
+            except Exception as e:
+                logger.error("Failed to attach CMSIS-Pack %s: %s", packs, e)
+                event_manager.log("error", f"Failed to attach CMSIS-Pack: {e}")
+                return False
 
         # 等上一次断开的旧句柄真正释放后再重建连接。
         # 否则 J-Link 等探针会因旧 session.close() 尚未完成（在后台线程）而并发抢占
@@ -952,8 +970,25 @@ class PyOCDBackend(BackendInterface):
 
         return target_info
 
-    def set_target(self, probe_uid: str, part_number: str) -> bool:
-        """手动设置目标芯片型号（需要重新连接）"""
+    def set_target(self, probe_uid: str, part_number: str,
+                   packs: list[str] | None = None) -> bool:
+        """手动设置目标芯片型号（需要重新连接）
+
+        packs 为可选的临时 .pack 路径列表；先注册成功再断开旧会话，
+        避免坏包拆掉当前正常的连接。
+        """
+        if packs:
+            try:
+                from core.pack_manager import ensure_pack_targets
+                loaded = ensure_pack_targets(packs)
+                if loaded:
+                    event_manager.log("info", "Attached CMSIS-Pack: " + ", ".join(
+                        os.path.basename(p) for p in loaded))
+            except Exception as e:
+                logger.error("Failed to attach CMSIS-Pack %s: %s", packs, e)
+                event_manager.log("error", f"Failed to attach CMSIS-Pack: {e}")
+                return False
+
         self.disconnect(probe_uid)
         self._pending_target = part_number
 
@@ -1756,8 +1791,14 @@ class PyOCDBackend(BackendInterface):
             last_progress_pct = -1
 
             for region in regions_to_check:
-                start = max(region.start, address) if address else region.start
-                end = min(region.start + region.length, address + size) if (address and size) else region.start + region.length
+                # 注意用 is not None：G32F037 等 Pack 的 Flash 起始地址就是 0x0，
+                # 用真值判断会把 --addr 0x0 误当成“未指定范围”，从而扫描整个 region。
+                start = max(region.start, address) if address is not None else region.start
+                end = (
+                    min(region.start + region.length, address + size)
+                    if (address is not None and size is not None)
+                    else region.start + region.length
+                )
                 region_total = end - start
 
                 offset = 0

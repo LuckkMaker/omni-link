@@ -120,8 +120,9 @@ class BackendInterface(ABC):
         """获取当前连接目标的芯片信息"""
 
     @abstractmethod
-    def set_target(self, probe_uid: str, part_number: str) -> bool:
-        """手动设置目标芯片型号"""
+    def set_target(self, probe_uid: str, part_number: str,
+                   packs: list[str] | None = None) -> bool:
+        """手动设置目标芯片型号（packs 为可选的临时 .pack 路径列表）"""
 
     @abstractmethod
     def erase(

@@ -6,7 +6,7 @@
 
 OMNI CLI 有两类命令：
 
-- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `device` / `rtt`。
+- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `device` / `pack` / `rtt`。
   它们是 OMNI Link 后端的瘦客户端，通过 HTTP 复用 REST 接口，不复制后端业务逻辑。
 - **工程配置类**：`omni project`。本地执行，不经过后端，实现在 `omni_cli.project` 内；
   只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，不调用 `omni/scripts` 下的旧脚本。
@@ -20,6 +20,20 @@ omni (本包)
 因此：**调试/烧录命令需要后端；`omni project` 不需要后端，也不需要探针。**
 
 ## 版本记录
+
+### 0.4.0（2026-10-21）
+
+- 新增 **临时挂包**：`omni probe connect <uid> -t <part> --pack <file.pack>`（可重复）。
+  行为对齐 pyOCD `--pack`：只注册到当前后端进程的 `TARGET`，不复制文件、不写设备库，
+  `backend stop/restart` 后失效；同一后端内的后续命令无需重复 `--pack`。
+- 新增 `omni pack` 命令组：`list(show)` / `preview` / `import` / `remove`，复用 GUI
+  「设置 → 芯片管理」的 `/api/packs` 能力。
+- `probe connect` 增加 pyOCD 风格别名：`-t/--target`、`-f/--frequency`（支持 `4m`、
+  `2.5khz`）、`-M/--connect`；`probe target --pack` 可在切换目标时挂包。
+- Pack 生命周期修正：卸载只删除本 Pack 拥有的 `TARGET` 键，内置型号与其它 Pack 的
+  同名型号不被误删；安装清单路径失效时按 filename 从 `packs/` 自愈；`device list`
+  不再把 Pack 芯片误标为“不可烧录”。
+- 新增能力缺口评审：`docs/tech/cli-coverage.md`（pyOCD CLI 与应用端 REST/UI 对照）。
 
 ### 0.3.2（2026-10-21）
 
@@ -197,8 +211,11 @@ omni backend start
 # 2) 查看探针
 omni probe list
 
-# 3) 连接目标芯片
+# 3) 连接目标芯片（内置型号）
 omni probe connect 852001270 --target stm32f407xg
+
+# 3b) 或临时挂载厂商 DFP，连接 Pack 中的型号（不写入设备库）
+omni probe connect 852001270 -t g32f020k8 --pack .\Geehy.G32F020_DFP.0.0.11.pack
 
 # 4) 读内存 / 烧录
 omni commander exec read32 0x080000C0 4
@@ -316,10 +333,10 @@ python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f
 | 子命令 | 说明 |
 | --- | --- |
 | `list` | 枚举探针（UID / 厂商 / 产品 / 串号 / 连接状态；状态来自 1~2s 监控快照） |
-| `connect <uid>` | 连接探针并指定目标芯片 |
+| `connect <uid>` | 连接探针并指定目标芯片（支持 `--pack` 临时挂包） |
 | `disconnect <uid>` | 断开探针（等待底层关闭，释放 J-Link 等探针句柄） |
 | `status <uid>` | 查询连接状态与目标信息（**连接的权威状态以此为准**） |
-| `target <uid> [--part PART]` | 查询或设置目标型号 |
+| `target <uid> [--part PART] [--pack PATH]` | 查询或设置目标型号（切换目标时可挂包） |
 
 > `probe list` 为了性能读取后台监控快照（每 2s 刷新），刚 `connect` 后可能仍显示
 > `disconnected`；需要立即刷新用 `omni probe list --refresh`，或用 `omni probe status <uid>`。
@@ -328,11 +345,12 @@ python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f
 
 | 选项 | 说明 |
 | --- | --- |
-| `--target` | **必填**，目标芯片型号（如 `stm32f407xg`；用 `omni target list` 查询） |
+| `-t, --target` | **必填**，目标芯片型号（如 `stm32f407xg`；用 `omni target list` 查询） |
 | `--interface` | `swd`（默认）/ `jtag` |
-| `--speed` | 时钟频率 Hz，范围 5000（5 kHz）~ 50000000（50 MHz），如 `4000000` = 4 MHz |
-| `--connect-mode` | `attach` 附加不复位 / `halt` 复位并暂停 / `pre-reset` 连接前复位 / `under-reset` 复位下连接 |
+| `-f, --frequency, --speed` | 时钟频率，范围 5000（5 kHz）~ 50000000（50 MHz）；支持 `4000000`、`4m`、`2.5khz` |
+| `-M, --connect, --connect-mode` | `attach` 附加不复位 / `halt` 复位并暂停 / `pre-reset` 连接前复位 / `under-reset` 复位下连接 |
 | `--jlink-device` | **J-Link 必填**，SEGGER 数据库中的设备名（如 `G32F463XC`） |
+| `--pack PATH` | **临时挂载 CMSIS-Pack**（可重复）；仅当前后端进程有效，不写入设备库 |
 | `--force` | 已连接时强制按新参数重连 |
 
 > `--target` 由 CLI 与服务端双重校验：CLI 缺少时直接报用法错误（退出码 2 的同类错误），
@@ -347,10 +365,20 @@ omni probe list
 omni probe list --refresh          # 强制重新枚举（刚 connect 后看即时状态）
 omni probe connect 852001270 --target stm32f407xg
 omni probe connect 852001270 --target G32F463XC --jlink-device G32F463XC
+omni probe connect 852001270 -t g32f020k8 --pack .\Geehy.G32F020_DFP.0.0.11.pack
 omni probe status 852001270
 omni probe target 852001270 --part stm32f407xg
 omni probe disconnect 852001270
 ```
+
+> **临时挂包（`--pack`）与 pyOCD 的 `--pack` 对齐**：
+> - 只把 Pack 中的型号注册到当前后端进程的 pyOCD `TARGET`，不复制文件、不写设备库/安装清单；
+> - `omni backend stop`（或重启）后失效；同一后端内后续 `flash/debug/commander/rtt` 直接可用，
+>   无需重复传 `--pack`；
+> - 与内置型号同名时**内置优先**，与多个 Pack 同名时按 `--pack` 顺序先到先得；
+> - Pack 条目没有 `jlink_device`，J-Link 用户仍需 `--jlink-device`；
+> - `--pack` 与 `--managed` 同时使用时，命令结束后端即关停，临时包也随之消失；多步操作请先
+>   `omni backend start`。
 
 ### `target` — 目标型号
 
@@ -363,6 +391,44 @@ omni probe disconnect 852001270
 omni target list --search stm32f4 --limit 8
 omni target info stm32f407xg
 ```
+
+### `pack` — CMSIS-Pack 管理
+
+与 GUI「设置 → 芯片管理 → DFP 导入」共用同一份设备库与安装清单；与 `--pack`
+临时挂包的区别是：`pack import` 会**复制文件并持久安装**，重启后端后仍生效。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `list`（别名 `show`） | 列出已安装 Pack（名称/版本/设备数/文件是否存在） |
+| `preview <file>` | 预览 `.pack` 中的芯片（`--search` / `--limit`；不导入） |
+| `import <file>` | 导入 `.pack`（`--parts a,b` 只导入指定型号；缺省=全部） |
+| `remove <name> [-y]` | 卸载 Pack（只删除本 Pack 独有的目标；内置型号不受影响） |
+
+```powershell
+omni pack list
+omni pack preview .\Geehy.G32F020_DFP.0.0.11.pack --search g32f020
+omni pack preview .\Keil.STM32F1xx_DFP.2.4.1.pack --limit 20
+
+# 持久导入（写入设备库与安装清单）
+omni pack import .\Geehy.G32F020_DFP.0.0.11.pack
+omni pack import .\Keil.STM32F1xx_DFP.2.4.1.pack --parts stm32f103c8,stm32f103rb
+omni device list --source pack
+omni target list --search g32f020
+
+# 卸载
+omni pack remove Geehy.G32F020_DFP -y
+```
+
+> ℹ️ `--parts` 只影响设备库展示；导入时整包型号都会注册到 pyOCD `TARGET`，
+> 因此未勾选的型号仍可通过 `--target` 连接（与 pyOCD 加载整包一致）。对已安装的
+> Pack 重新执行 `pack import --parts` 会以本次选择**替换**设备库条目（上次导入但本次
+> 未选中的型号从设备库移除），TARGET 注册仍保留整包。
+>
+> ℹ️ 若安装清单里的路径来自另一份源码树 / 拷贝目录，CLI 启动加载会按 filename
+> 从 `packs/` 目录自愈；`omni pack list` 中“文件=缺失”的条目可重新导入修复。
+>
+> ℹ️ 临时挂包请用 `probe connect --pack`；它不会出现在 `pack list` / `device list`，
+> 重启后端后自动消失。
 
 ### `flash` — 烧录 / 擦除 / 校验 / 回读
 

@@ -4,4 +4,4 @@
 `omni project` 是本地工程配置命令，实现在 `omni_cli.project` 内，不经过后端。
 """
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"

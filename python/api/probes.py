@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from core.pyocd_backend import backend, ProbeState
 from core.events import event_manager
-from core import database
+from core import database, pack_manager
 
 router = APIRouter()
 
@@ -18,6 +18,9 @@ router = APIRouter()
 CONNECT_HTTP_TIMEOUT = 20.0
 # set_target 会 disconnect + 重新 open，与 connect 同量级
 SET_TARGET_HTTP_TIMEOUT = 30.0
+# 临时挂包（--pack）的解析可能涉及几十 MB 的 DFP 与 FLM 解析，单独计时；
+# 不计入上面的硬件连接超时，避免大包把正常连接误判为 504。
+PACK_LOAD_HTTP_TIMEOUT = 120.0
 # 时钟频率范围（Hz）。J-Link DLL 的下限是 5 kHz，低于它只会得到
 # “Given speed is too slow. Minimum is 5.” 这种没有单位的报错（P2-2）。
 MIN_SPEED_HZ = 5_000
@@ -26,6 +29,8 @@ MAX_SPEED_HZ = 50_000_000
 
 class SetTargetRequest(BaseModel):
     part_number: str
+    # 临时挂载的 CMSIS-Pack 路径（可选，pyOCD --pack 语义）
+    pack: list[str] | None = None
 
 
 class ConnectRequest(BaseModel):
@@ -38,6 +43,33 @@ class ConnectRequest(BaseModel):
     force: bool = False
     # J-Link 目标设备名（如 G32F463XC）：J-Link 探针必须设置才能建立目标连接（SWD/JTAG 均依赖）
     jlink_device: str | None = None
+    # 临时挂载的 CMSIS-Pack 路径（可选，可重复，pyOCD --pack 语义）
+    pack: list[str] | None = None
+
+
+async def _ensure_packs(pack_paths: list[str] | None) -> None:
+    """在触碰硬件前完成临时 Pack 的注册。
+
+    单独计时（PACK_LOAD_HTTP_TIMEOUT），避免大 DFP 的解析时间挤占
+    connect 的 20s 超时；坏包在此直接返回 400，不产生半开会话。
+    """
+    if not pack_paths:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(pack_manager.ensure_pack_targets, pack_paths),
+            timeout=PACK_LOAD_HTTP_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(f"加载 CMSIS-Pack 超时（{int(PACK_LOAD_HTTP_TIMEOUT)} 秒）。"
+                    "请确认 Pack 文件完整、未被其他程序占用后重试。"),
+        )
+    except (ValueError, FileNotFoundError, OSError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"加载 CMSIS-Pack 失败: {e}")
 
 
 @router.get("")
@@ -83,6 +115,7 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
     connect_mode = req.connect_mode if req else None
     force = req.force if req else False
     jlink_device = req.jlink_device if req else None
+    pack_paths = req.pack if req else None
 
     # 允许复用此前通过 /target 设置过的默认型号
     if not target:
@@ -101,6 +134,9 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
                     "例如 --speed 4000000 表示 4 MHz，--speed 5000 为下限 5 kHz。"),
         )
 
+    # 临时挂包必须先于硬件连接完成：目标型号可能只存在于 Pack 中。
+    await _ensure_packs(pack_paths)
+
     # J-Link 设备名兜底：未显式指定时，若所选目标设备（内置型号等）自带 jlink_device 则自动使用，
     # 让用户选中内置型号即可开箱连接 J-Link，无需手填。
     if not jlink_device and target:
@@ -118,6 +154,7 @@ async def connect_probe(uid: str, req: ConnectRequest | None = None):
                 backend.connect, uid,
                 target=target, interface=interface, speed=speed,
                 connect_mode=connect_mode, force=force, device=jlink_device,
+                packs=pack_paths,
             ),
             timeout=CONNECT_HTTP_TIMEOUT,
         )
@@ -171,9 +208,11 @@ async def set_target(uid: str, req: SetTargetRequest):
     set_target 内部会 disconnect + 重新 open（同步阻塞），必须放线程池并加
     HTTP 超时，否则会堵死事件循环（/api/probes/states 等全部无响应，P1-2）。
     """
+    # 先注册临时 Pack，再断开旧会话；坏包不会拆掉当前正常连接。
+    await _ensure_packs(req.pack)
     try:
         success = await asyncio.wait_for(
-            asyncio.to_thread(backend.set_target, uid, req.part_number),
+            asyncio.to_thread(backend.set_target, uid, req.part_number, packs=req.pack),
             timeout=SET_TARGET_HTTP_TIMEOUT,
         )
     except asyncio.TimeoutError:
