@@ -85,6 +85,7 @@ def find_map(
         os.path.join(project_dir, "Listings", "**", "*.map"),
         os.path.join(project_dir, "Objects", "**", "*.map"),
         os.path.join(project_dir, "out", "**", "*.map"),
+        os.path.join(project_dir, "build", "**", "*.map"),
     ):
         candidates.extend(glob.glob(pattern, recursive=True))
 

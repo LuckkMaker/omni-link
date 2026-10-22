@@ -23,6 +23,14 @@ omni (本包)
 
 ## 版本记录
 
+### 0.11.0（2026-10-22）
+
+- 新增 `omni build`：本地 CMake 配置 + 构建（Ninja），产物路径与尺寸直接返回：
+  - 构建目录固定 `<project>/build/<board>/<COMPILER>/<buildtype>`；
+  - `--clean` / `--configure-only` / `-j` / `--json` / `-v`；
+  - 自动把「当前 CLI」传给 CMake（`-DOMNI_CLI` 或 `-DOMNI_CLI_PYTHON`+`-DOMNI_CLI_MODULE`），
+    不再依赖 `PATH` 上的 omni 版本。
+- `omni config bsp` 的 map 自动发现增加 `build/**/*.map`（CMake 产物目录）。
 ### 0.10.0（2026-10-22）
 
 - 新增 `omni modules`：`list` / `check` / `generate`（本地命令，不依赖后端）：
@@ -395,6 +403,33 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 启动器只负责定位 CLI、校验最低版本（0.7.0）和转发参数；可用 `OMNI_CLI` 指定
 `omni.exe` 路径。
 
+### `build` — 配置并构建（本地命令）
+
+不经过后端；内部就是 `cmake -S … -B … -G Ninja` + `cmake --build`，但会自动补上
+工作区、板、编译器、工具链、CLI 等参数。
+
+| 选项 | 说明 |
+| --- | --- |
+| `-b/--board` | 板级目标（多板工程必填） |
+| `-c/--compiler` | `ac6`（默认）/ `gcc` / `clang` / `ac5`；当前仅 ac6 提供工具链文件 |
+| `-t/--build-type` | `Debug`（默认）/ `Release` |
+| `--clean` | 先删除该上下文的构建目录 |
+| `--configure-only` | 只配置，不编译 |
+| `-j/--jobs N` | 并行任务数 |
+| `-v/--verbose` | 打印 cmake 完整输出 |
+| `--json` / `--quiet` | 供脚本与 CI 消费 |
+
+```powershell
+cd D:\workspace\embedded\omni-emb
+
+omni build -b stm32f407ig --project-dir examples\basic\template
+omni build -b stm32f407ig --project-dir examples\basic\template --clean
+omni build -b stm32f407ig --project-dir examples\basic\template --configure-only
+omni build -b stm32f407ig --project-dir examples\basic\template --json
+```
+
+输出包含构建目录、`Program Size: Code/RO-data/RW-data/ZI-data` 与
+`omni.axf` / `omni.hex` / `omni.bin` / `omni.axf.map` / `omni.size.txt` 的绝对路径。
 ### `boards` — 板定义（本地命令）
 
 不经过后端；读取 `omni/boards/<board>/board.yml`。板目录只保存板事实，
