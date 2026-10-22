@@ -42,6 +42,13 @@ class VerifyRequest(BaseModel):
     base_address: int | None = None
 
 
+class CompareRequest(BaseModel):
+    file_path: str
+    base_address: int | None = None
+    max_diffs: int = 20
+    fail_fast: bool = False
+
+
 class ResetRequest(BaseModel):
     type: str = "hw"  # "hw" | "sw"
     run: bool = True
@@ -161,6 +168,18 @@ async def verify_flash(uid: str, req: VerifyRequest):
     async with _flash_operation(uid) as state:
         result = await asyncio.to_thread(backend.verify, uid, req.file_path, req.data, req.base_address)
     return _flash_payload(result, state, omit_zero_written=True)
+
+
+@router.post("/probes/{uid}/flash/compare")
+async def compare_flash(uid: str, req: CompareRequest):
+    """对比目标 Flash/RAM 与固件文件，返回差异列表（只读，不写目标）"""
+    async with _flash_operation(uid) as state:
+        result = await asyncio.to_thread(
+            backend.compare, uid, req.file_path, req.base_address,
+            req.max_diffs, req.fail_fast,
+        )
+    result["rtt_stopped"] = bool(state.get("rtt_stopped"))
+    return result
 
 
 @router.post("/probes/{uid}/flash/blank-check")

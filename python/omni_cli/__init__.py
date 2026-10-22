@@ -4,4 +4,4 @@
 `omni config` 是本地工程构建配置命令，实现在 `omni_cli.config` 内，不经过后端。
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

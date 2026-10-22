@@ -1,9 +1,10 @@
-"""Flash 命令：program / erase / verify / blank-check / read / fill / cancel / reset。"""
+"""Flash 命令：program / erase / verify / compare / blank-check / read / fill / cancel / reset。"""
 
 import os
 import sys
 
 from ..client import ApiClient
+from ..formatting import render_table
 from ..options import common_parser
 from ..runtime import finish, run_command
 from ..util import parse_int, require_uid
@@ -59,6 +60,16 @@ def add_parser(sub):
     s.add_argument("file", help="固件文件路径")
     s.add_argument("--base-address", help="基地址")
     s.set_defaults(func=run_command(_verify), timeout=120)
+
+    s = ps.add_parser("compare", parents=[common_parser()],
+                      help="对比目标内存/Flash 与文件，返回差异（默认超时 180s）")
+    _uid_arg(s)
+    s.add_argument("file", help="固件文件路径（hex/bin/elf）")
+    s.add_argument("--base-address", help="基地址（bin 文件）")
+    s.add_argument("--max-diffs", type=int, default=20,
+                   help="最多返回的差异条数（默认 20；不影响总数统计）")
+    s.add_argument("--fail-fast", action="store_true", help="首个差异即停止扫描")
+    s.set_defaults(func=run_command(_compare), timeout=180)
 
     s = ps.add_parser("blank-check", parents=[common_parser()],
                       help="检查 Flash 是否空白（默认超时 120s）")
@@ -145,6 +156,48 @@ def _verify(c: ApiClient, args):
     data = c.post(f"/api/probes/{uid}/flash/verify", payload)
     _report_flash_result(args, "校验", data, bytes_key="bytes_verified")
     return 1 if not data.get("success") else 0
+
+
+def _compare(c: ApiClient, args):
+    uid = _require(c, args)
+    if not uid:
+        return 1
+    path = _resolve_file(args.file)
+    if path is None:
+        return 1
+    payload = {
+        "file_path": path,
+        "base_address": parse_int(args.base_address),
+        "max_diffs": args.max_diffs,
+        "fail_fast": args.fail_fast,
+    }
+    data = c.post(f"/api/probes/{uid}/flash/compare", payload)
+    if args.json_:
+        finish(args, data, "")
+        return 0
+    _note_rtt_stopped(data)
+    if not data.get("success"):
+        print(f"对比失败: {data.get('error')}")
+        return 1
+
+    if data.get("equal"):
+        print(f"对比一致: {data.get('compared_bytes')} 字节  耗时 {data.get('duration_ms')}ms")
+        return 0
+
+    first = data.get("first_mismatch")
+    first_txt = f"0x{first:08X}" if isinstance(first, int) else "-"
+    print(f"对比不一致: {data.get('mismatch_count')} 个差异，首个 {first_txt}，"
+          f"已扫描 {data.get('compared_bytes')}/{data.get('total_bytes')} 字节")
+    diffs = data.get("diffs") or []
+    if diffs:
+        print(render_table(
+            ["地址", "文件值", "目标值"],
+            [[f"0x{d.get('address', 0):08X}", f"0x{d.get('expected', 0):02X}",
+              f"0x{d.get('actual', 0):02X}"] for d in diffs],
+        ))
+    if data.get("mismatch_count", 0) > len(diffs):
+        print(f"（仅显示前 {len(diffs)} 条，可用 --max-diffs 调整）")
+    return 1
 
 
 def _blank(c: ApiClient, args):

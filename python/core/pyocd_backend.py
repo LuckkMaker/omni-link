@@ -1518,6 +1518,142 @@ class PyOCDBackend(BackendInterface):
             event_manager.log("error", error_text)
             return FlashResult(success=False, error=error_text, duration_ms=failed_ms)
 
+    def compare(self, probe_uid: str, file_path: str,
+                base_address: int | None = None,
+                max_diffs: int = 20,
+                fail_fast: bool = False) -> dict:
+        """对比目标内存/Flash 与固件文件，返回差异列表（不写目标）。
+
+        读取/复位策略与 ``verify`` 保持一致：Flash 地址先 reset_and_halt 再读，
+        RAM 地址只 halt。``max_diffs`` 只限制返回的差异条数，默认仍扫描完整范围
+        以给出准确总数；``fail_fast=True`` 才在首个差异处停止。
+        """
+        self._begin_operation()
+        session = self._get_session(probe_uid)
+        if not session:
+            return {"success": False, "error": "Not connected"}
+
+        if not file_path or not os.path.isfile(file_path):
+            return {"success": False, "error": f"File not found: {file_path}"}
+
+        max_diffs = max(0, min(int(max_diffs or 0), 1000))
+        start_time = time.time()
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+            segments = self._extract_file_data(session, file_path, ext, base_address)
+            if not segments:
+                return {"success": False, "error": "No data segments found in file"}
+
+            def _is_flash_addr(addr: int) -> bool:
+                region = session.target.memory_map.get_region_for_address(addr)
+                return bool(region is not None and getattr(region, "is_flash", False))
+
+            if segments and all(_is_flash_addr(a) for a, _ in segments):
+                try:
+                    session.target.reset_and_halt()
+                except Exception as e:
+                    event_manager.log("warning",
+                                      f"Compare: reset_and_halt 失败，回退到 halt: {e}")
+                    session.target.halt()
+            else:
+                session.target.halt()
+
+            total_bytes = sum(len(d) for _, d in segments)
+            compared = 0
+            mismatch_count = 0
+            first_mismatch = None
+            diffs: list[dict] = []
+            stopped = False
+            chunk_size = 32768
+
+            def _read_chunk(chunk_addr: int, length: int) -> bytes:
+                if chunk_addr % 4 == 0 and length % 4 == 0:
+                    words = session.target.read_memory_block32(chunk_addr, length // 4)
+                    return array.array('I', words).tobytes()
+                return bytes(session.target.read_memory_block8(chunk_addr, length))
+
+            event_manager.emit("flash.progress", {
+                "phase": "compare", "current": 0, "total": total_bytes, "percent": 0,
+            })
+
+            for seg_addr, seg_data in segments:
+                for offset in range(0, len(seg_data), chunk_size):
+                    if self._check_cancel():
+                        raise FlashOperationCancelled()
+                    read_len = min(chunk_size, len(seg_data) - offset)
+                    addr = seg_addr + offset
+                    actual = _read_chunk(addr, read_len)
+                    expected = seg_data[offset:offset + read_len]
+                    if actual != expected:
+                        # 读 Flash 偶发瞬时旧数据：复读一次再判定
+                        time.sleep(0.05)
+                        retry = _read_chunk(addr, read_len)
+                        if retry == expected:
+                            actual = retry
+                        else:
+                            actual = retry
+                            for i in range(read_len):
+                                if actual[i] == expected[i]:
+                                    continue
+                                mismatch_count += 1
+                                mismatch_addr = addr + i
+                                if first_mismatch is None:
+                                    first_mismatch = mismatch_addr
+                                if len(diffs) < max_diffs:
+                                    diffs.append({
+                                        "address": mismatch_addr,
+                                        "expected": expected[i],
+                                        "actual": actual[i],
+                                    })
+                                if fail_fast:
+                                    stopped = True
+                                    break
+                    compared += read_len
+                    if stopped:
+                        break
+                    event_manager.emit("flash.progress", {
+                        "phase": "compare", "current": compared,
+                        "total": total_bytes,
+                        "percent": round(compared / total_bytes * 100, 2) if total_bytes else 100,
+                    })
+                if stopped:
+                    break
+
+            duration = int((time.time() - start_time) * 1000)
+            event_manager.emit("flash.progress", {
+                "phase": "compare", "current": compared, "total": total_bytes,
+                "percent": 100 if compared >= total_bytes else round(
+                    compared / total_bytes * 100, 2) if total_bytes else 100,
+            })
+            equal = mismatch_count == 0 and compared >= total_bytes
+            if equal:
+                event_manager.log("info", f"Compare OK ({compared} bytes, {duration}ms)")
+            else:
+                event_manager.log(
+                    "warning",
+                    f"Compare found {mismatch_count} mismatch(es), first at "
+                    f"0x{first_mismatch:08X}" if first_mismatch is not None else
+                    "Compare found mismatch(es)")
+            return {
+                "success": True,
+                "equal": equal,
+                "compared_bytes": compared,
+                "total_bytes": total_bytes,
+                "mismatch_count": mismatch_count,
+                "first_mismatch": first_mismatch,
+                "diffs": diffs,
+                "fail_fast": bool(fail_fast),
+                "duration_ms": duration,
+            }
+        except FlashOperationCancelled:
+            return {"success": False, "error": "Operation cancelled by user"}
+        except Exception as e:
+            logger.exception("Compare failed")
+            failed_ms = int((time.time() - start_time) * 1000)
+            error_text = self._flash_error("对比", e, failed_ms, os.path.basename(file_path))
+            event_manager.log("error", error_text)
+            return {"success": False, "error": error_text, "duration_ms": failed_ms}
+
     def _extract_file_data(self, session, file_path: str, ext: str, base_address: int | None = None) -> list[tuple[int, bytes]]:
         """从固件文件中提取数据段，返回 [(address, data_bytes), ...]"""
         if ext == ".bin":

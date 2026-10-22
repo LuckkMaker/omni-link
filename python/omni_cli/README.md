@@ -6,7 +6,7 @@
 
 OMNI CLI 有两类命令：
 
-- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `monitor` / `device` / `pack` / `rtt` / `system`。
+- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `monitor` / `device` / `pack` / `rtt` / `system` / `file` / `tool`。
   它们是 OMNI Link 后端的瘦客户端，通过 HTTP 复用 REST 接口，不复制后端业务逻辑。
 - **工程配置类**：`omni config`。本地执行，不经过后端，实现在 `omni_cli.config` 内；
   只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，不调用 `omni/scripts` 下的旧脚本。
@@ -20,6 +20,19 @@ omni (本包)
 因此：**调试/烧录命令需要后端；`omni config` 不需要后端，也不需要探针。**
 
 ## 版本记录
+
+### 0.8.0（2026-10-22）
+
+- 新增 `omni file`：
+  - `info`：解析 bin/hex/elf 的格式、大小、段信息；
+  - `checksum`：本地计算 modbus-crc16 / crc16-ccitt / crc32 / add8 / xor8 / add16，
+    支持 `--start` / `--end` 字节范围。
+- 新增 `omni flash compare <file>`：对比目标 Flash/RAM 与固件文件，返回首个不一致地址、
+  差异总数与差异列表（`--max-diffs` / `--fail-fast`），不写目标。
+- 新增 `omni tool map <file.map>`：解析 ARM 链接器 map，输出 ROM/RAM 使用、区域、
+  分类与 ROM Top 条目。
+- 后端新增 `POST /api/probes/{uid}/flash/compare`；Flash 地址对比前自动
+  `reset_and_halt`，避免读到陈旧 Flash。
 
 ### 0.7.0（2026-10-21）
 
@@ -478,6 +491,7 @@ omni pack remove Geehy.G32F020_DFP -y
 | `program <file>` | 烧录固件（hex/bin/elf），默认烧后校验并复位运行 | 180s |
 | `erase` | 擦除，`--type chip`（默认）/ `sector` / `sector_range` | 180s |
 | `verify <file>` | 校验 Flash 与固件文件是否一致 | 120s |
+| `compare <file>` | 对比目标与文件，返回首个差异/差异列表（`--max-diffs` / `--fail-fast`） | 180s |
 | `blank-check` | 检查是否空白（默认整个 Flash），返回首个非空地址 | 120s |
 | `read` | 回读，`--type chip`（默认）/ `range`；`--out PATH` 让后端另存文件 | 120s |
 | `fill` | 填充内存区域（Flash/RAM），`--addr` `--size` 必填，`--value` 0-255（默认 `0xFF`，支持 `0x55`） | 120s |
@@ -496,6 +510,8 @@ omni flash erase --type chip --timeout 180
 omni flash program .\app.hex
 omni flash program .\app.bin --base-address 0x08000000 --no-reset
 omni flash verify .\app.hex
+omni flash compare .\app.hex                     # 一致返回 0；不一致返回 1 并列出差异
+omni flash compare .\app.hex --max-diffs 50
 omni flash blank-check --addr 0x08000000 --size 64
 omni flash read --type range --addr 0x08000000 --size 64 --json
 omni flash fill --addr 0x08000000 --size 256 --value 0x55   # 支持 0x 前缀
@@ -521,6 +537,34 @@ omni flash reset --no-run
 >
 > ℹ️ **reset 默认值差异**：`flash reset` 默认复位后**运行**（`--no-run` 才暂停）；
 > `debug reset` 默认复位并**暂停**（`--mode run` 才运行）。
+
+### `file` — 固件文件工具
+
+| 子命令 | 说明 |
+| --- | --- |
+| `info <file>` | 解析 bin/hex/elf 的格式、大小、entry 与段信息（`--base-address` 用于 bin） |
+| `checksum <file>` | 计算原始文件字节校验和：`modbus-crc16` / `crc16-ccitt` / `crc32` / `add8` / `xor8` / `add16`；`--start` / `--end` 指定字节范围 |
+
+```powershell
+omni file info .\app.hex
+omni file info .\app.bin --base-address 0x08000000
+omni file checksum .\app.bin --algorithm crc32
+omni file checksum .\app.bin --algorithm modbus-crc16 --start 0 --end 1024
+```
+
+> ℹ️ `checksum` 计算的是**原始文件字节**，与 GUI 文件校验页一致；不会解析 hex/elf 的地址段。
+> `--end` 为不含端点的字节偏移。
+
+### `tool` — 离线工具
+
+| 子命令 | 说明 |
+| --- | --- |
+| `map <file.map>` | 分析 ARM 链接器 map：ROM/RAM 使用、执行区域、分类、ROM Top 条目（`--top N`） |
+
+```powershell
+omni tool map .\Listings\stm32f407\omni.map
+omni tool map .\omni.map --top 20 --json
+```
 
 ### `commander` — pyOCD Commander
 

@@ -1,7 +1,7 @@
 # OMNI CLI 能力覆盖评审（pyOCD / 应用端）
 
 > 评审日期：2026-10-21  
-> CLI 版本：0.7.0
+> CLI 版本：0.8.0
 > 对照对象：
 > - pyOCD 源码内置版：`python/pyocd/subcommands/`、`python/pyocd/core/options.py`
 > - 应用后端路由：`python/api/*.py`、`python/omni_tools/router.py`
@@ -71,9 +71,10 @@ pyOCD 顶层子命令：`commander`、`erase`、`load`、`gdbserver`、`json`、
 | Zone：可执行行 / ELF 变更检测 | `.../source/executable-lines`、`.../elf/changed` | 无 | ❌ | P2 |
 | Zone 会话配置存取 | `/api/zone/sessions*` | `omni debug session *` | ✅ | — |
 | Monitor：变量/采样/波形/记录/导出 | `/api/probes/{uid}/monitor/*` | `omni monitor *` | ✅ | — |
-| 固件文件 stat/parse/read/save（Hex 查看、对比） | `/api/files/*` | 无（Flash 命令直接吃文件路径） | ❌ | P1 |
+| 固件文件 stat/parse（Hex 查看） | `/api/files/parse` | `omni file info` | ✅ | — |
+| 文件校验和 / 对比 | 本地算法 + flash compare | `omni file checksum` / `omni flash compare` | ✅ | — |
 | 文件校验和 / 数字转换 | 前端本地实现 | 无 | — | 应用侧本地能力，CLI 可按需本地实现 |
-| Map 文件分析 | `/api/tools/map-analyzer` | 无 | ❌ | P2 |
+| Map 文件分析 | `/api/tools/map-analyzer` | `omni tool map` | ✅ | — |
 | 系统/版本信息 | `/api/system/info` | `omni system info` | ✅ | — |
 | OMNI Tool：boot 自升级 / 在线烧录 | `/api/omni-tool/*` | 无 | ❌ | — |
 
@@ -81,7 +82,7 @@ pyOCD 顶层子命令：`commander`、`erase`、`load`、`gdbserver`、`json`、
 
 ## 3. 结论与建议
 
-### 3.1 0.4.0–0.6.0 已关闭的缺口
+### 3.1 0.4.0–0.8.0 已关闭的缺口
 
 - pyOCD `--pack` 临时挂包（连接/切换目标）。
 - Pack 本地管理：list / preview / import / remove。
@@ -94,19 +95,19 @@ pyOCD 顶层子命令：`commander`、`erase`、`load`、`gdbserver`、`json`、
   `SessionRecorder` 读取前 flush，支持采样中 `--follow`。
 - **0.6.0**：`system info`、`commander reset|cancel`、`probe jlink-devices`、
   `device flm-info`、`rtt send --file`。
+- **0.8.0**：`omni file info/checksum`、`omni flash compare`（新增后端 compare 接口）、
+  `omni tool map`。
 
 ### 3.2 建议下一轮（P1）
 
-1. `omni file`：info / checksum / compare / read，服务 Hex 查看与 Flash 对比。
-2. `omni flash compare`：后端新增对比接口，返回首个不一致与差异列表。
-3. `omni tool map`：Map 文件分析。
-4. `debug periph nvic --enable/--pending`、`debug periph scb --stir/--field`。
-5. `debug src executable-lines`、`debug elf changed`；`src save` 需谨慎（默认拒绝）。
+1. `debug periph nvic --enable/--pending`、`debug periph scb --stir/--field`。
+2. `debug src executable-lines`、`debug elf changed`；`src save` 需谨慎（默认拒绝）。
+3. `omni monitor` 的实机体验优化（完整体/降噪、采样率上限提示）。
 
 ### 3.3 可延后（P2）
 
 - `commander shell --file`。
-- `debug src save`、ELF 变更检测的自动重载。
+- `file read`（Hex 查看）与源码保存、ELF 变更检测的自动重载。
 - pyOCD `-O` 任意选项透传、`pyocd load --format/--trust-crc`。
 - Pack 网络索引：`pack find/install/update`。
 
@@ -147,4 +148,10 @@ omni commander cancel
 omni probe jlink-devices --search G32 --flash-kb 256
 omni device flm-info G32F463.FLM
 omni rtt send --file payload.bin
+
+# 0.8.0 文件 / 对比 / Map
+omni file info app.hex
+omni file checksum app.bin --algorithm crc32
+omni flash compare app.hex [--max-diffs 20] [--fail-fast]
+omni tool map Listings/stm32f407/omni.map --top 10
 ```

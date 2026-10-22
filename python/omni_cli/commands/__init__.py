@@ -8,6 +8,7 @@ from . import commander
 from . import config
 from . import debug
 from . import device
+from . import file
 from . import flash
 from . import monitor
 from . import pack
@@ -15,6 +16,7 @@ from . import probe
 from . import rtt
 from . import system
 from . import target
+from . import tool
 
 _MODULES = (
     backend,
@@ -22,6 +24,7 @@ _MODULES = (
     config,
     debug,
     device,
+    file,
     flash,
     monitor,
     pack,
@@ -29,6 +32,7 @@ _MODULES = (
     rtt,
     system,
     target,
+    tool,
 )
 
 
