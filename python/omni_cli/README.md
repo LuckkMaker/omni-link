@@ -397,7 +397,7 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 | --- | --- |
 | `list`（默认） | 列出框架里的板（board / device / cpu / fpu / hal / series） |
 | `show BOARD` | 显示单个板的完整事实与上游文件位置 |
-| `check` | 比对工程 `boards/<board>/startup/*` 与 HAL 模块里的原始文件 |
+| `check` | 比对工程 `boards/<board>/startup/*` 与 HAL 模块里的原始文件；`--all` 汇总全仓 |
 | `sync` | 为工程补齐缺失的板级文件；默认不覆盖已有文件 |
 
 ```powershell
@@ -410,7 +410,9 @@ omni boards sync  --project-dir examples\basic\template -b stm32f407ig --dry-run
 omni boards sync  --project-dir examples\basic\template -b stm32f407ig
 ```
 
-> `check` 报告 `identical / modified / missing / project-only`，**始终返回 0**（先观察漂移）。
+> `check` 报告 `identical / modified / missing / project-only`，**始终返回 0**（先观察漂移）；
+> `check --all` 扫描 `examples/` 与 `applications/`，按板汇总每个文件的漂移次数，
+> 并列出缺文件的工程（例如 `ram_boot` 只提供 RAM 链接脚本，属预期）。
 > `sync` 只补缺失文件；加 `--force` 才会覆盖，`--dry-run` 只打印动作。
 > 新工程脚手架会生成 `board.clayer.yml`、`board.conf`、`bsp.c`，并从 HAL 模块复制
 > 启动文件、链接脚本、system 源文件与 HAL 配置头模板。

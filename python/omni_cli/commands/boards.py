@@ -49,6 +49,8 @@ def add_parser(sub):
 
     s = ps.add_parser("check", parents=[config_parser()],
                       help="检查工程板目录与上游的差异（只读）")
+    s.add_argument("--all", action="store_true", default=False,
+                   help="扫描仓库内所有工程，汇总各板的漂移情况")
     s.set_defaults(func=_run(_check))
 
     s = ps.add_parser("sync", parents=[config_parser()],
@@ -231,6 +233,9 @@ def _show(args) -> int:
 
 
 def _check(args) -> int:
+    if getattr(args, "all", False):
+        return _check_all(args)
+
     ctx, spec = _resolve_board(args)
     result = check_project(spec, ctx.project_dir)
     payload = {"success": True, "exit_code": 0, **result}
@@ -258,6 +263,133 @@ def _check(args) -> int:
         f"modified={len(result['modified'])} "
         f"missing={len(result['missing'])}"
     )
+    _finish(args, payload, "\n".join(lines))
+    return 0
+
+
+def _iter_projects(repo_root: str):
+    """遍历 examples/ 与 applications/ 下的工程目录及其板目录。"""
+
+    skip = {"build", ".git", "CMakeFiles", "RTE", "Objects", "Listings", "DebugConfig", "tmp"}
+    markers = ("prj.conf", "Kconfig", ".cproject.yml")
+    for base in ("examples", "applications"):
+        base_dir = os.path.join(repo_root, base)
+        if not os.path.isdir(base_dir):
+            continue
+        for dirpath, dirnames, _ in os.walk(base_dir):
+            dirnames[:] = [name for name in dirnames if name not in skip]
+            if os.path.basename(dirpath) != "boards":
+                continue
+            dirnames[:] = []  # 不再深入板目录
+            project = os.path.dirname(dirpath)
+            if not any(os.path.isfile(os.path.join(project, marker)) for marker in markers):
+                continue
+            boards = sorted(
+                name
+                for name in os.listdir(dirpath)
+                if os.path.isdir(os.path.join(dirpath, name))
+            )
+            yield project, boards
+
+
+def _check_all(args) -> int:
+    """汇总仓库内所有工程的板级漂移（只读，始终返回 0）。"""
+
+    omni_root = _resolve_omni_root(args)
+    repo_root = os.path.dirname(omni_root)
+    known = {spec.name: spec for spec in iter_boards(omni_root)}
+
+    summary: dict = {}
+    projects = 0
+    for project, boards in _iter_projects(repo_root):
+        projects += 1
+        for name in boards:
+            spec = known.get(name)
+            if spec is None:
+                continue
+            result = check_project(spec, project)
+            entry = summary.setdefault(
+                name,
+                {
+                    "board": name,
+                    "projects": 0,
+                    "identical": 0,
+                    "modified": 0,
+                    "missing": 0,
+                    "project_only": 0,
+                    "modified_files": {},
+                    "missing_files": {},
+                    "missing_projects": {},
+                },
+            )
+            entry["projects"] += 1
+            for item in result["files"]:
+                status = item["status"]
+                key = {
+                    "identical": "identical",
+                    "modified": "modified",
+                    "missing": "missing",
+                    "project-only": "project_only",
+                }.get(status)
+                if not key:
+                    continue
+                entry[key] += 1
+                if key == "modified":
+                    entry["modified_files"][item["name"]] = (
+                        entry["modified_files"].get(item["name"], 0) + 1
+                    )
+                elif key == "missing":
+                    entry["missing_files"][item["name"]] = (
+                        entry["missing_files"].get(item["name"], 0) + 1
+                    )
+                    entry["missing_projects"].setdefault(item["name"], []).append(
+                        os.path.relpath(project, repo_root).replace("\\", "/")
+                    )
+
+    boards_summary = [summary[name] for name in sorted(summary)]
+    payload = {
+        "success": True,
+        "exit_code": 0,
+        "repo_root": repo_root,
+        "projects": projects,
+        "boards": boards_summary,
+    }
+
+    if getattr(args, "json_", False) or getattr(args, "quiet", False):
+        _finish(args, payload)
+        return 0
+
+    lines = [f"仓库: {repo_root}    工程数: {projects}", ""]
+    header = ("BOARD", "PROJECTS", "IDENTICAL", "MODIFIED", "MISSING", "PROJECT-ONLY")
+    rows = [header]
+    for entry in boards_summary:
+        rows.append((
+            entry["board"],
+            str(entry["projects"]),
+            str(entry["identical"]),
+            str(entry["modified"]),
+            str(entry["missing"]),
+            str(entry["project_only"]),
+        ))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(header))]
+    lines.extend(
+        "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
+        for row in rows
+    )
+    for entry in boards_summary:
+        if entry["modified_files"]:
+            detail = ", ".join(
+                f"{name} x{count}"
+                for name, count in sorted(
+                    entry["modified_files"].items(), key=lambda kv: -kv[1]
+                )
+            )
+            lines.append(f"  {entry['board']} modified: {detail}")
+    for entry in boards_summary:
+        for name, project_list in sorted(entry["missing_projects"].items()):
+            lines.append(
+                f"  {entry['board']} missing {name}: " + ", ".join(sorted(project_list))
+            )
     _finish(args, payload, "\n".join(lines))
     return 0
 

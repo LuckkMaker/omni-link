@@ -203,7 +203,7 @@ def test_repo_boards() -> None:
     env = os.environ.get("OMNI_WORKSPACE_DIR")
     if env:
         candidates.append(Path(env))
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     candidates.append(repo_root.parent / "omni-emb")
     for candidate in candidates:
         omni = candidate / "omni"
