@@ -125,7 +125,7 @@ def test_generate_and_check() -> None:
 
         cmake_text = (Path(fixture["omni"]) / "cmake" / "omni_modules.cmake").read_text(encoding="utf-8")
         check("generate.names", "set(OMNI_MODULE_NAMES" in cmake_text and "mod_a" in cmake_text)
-        check("generate.enable", 'set(OMNI_MODULE_mod_a_ENABLE "MOD_A")' in cmake_text)
+        check("generate.enable", 'set(OMNI_MODULE_MOD_A_ENABLE "MOD_A")' in cmake_text)
         check("generate.src", "${OMNI_WORKSPACE_DIR}/modules/mod_b" in cmake_text)
 
         kconfig_text = (Path(fixture["omni"]) / "Kconfig.modules").read_text(encoding="utf-8")

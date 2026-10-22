@@ -36,7 +36,8 @@ def render_cmake(repo_root: str, modules: list[ModuleSpec]) -> str:
     lines.append(")\n\n")
 
     for spec in modules:
-        prefix = f"set(OMNI_MODULE_{spec.name}_"
+        # 变量名全大写：OMNI_MODULE_U8G2_SRC，避免大小写混用。
+        prefix = f"set(OMNI_MODULE_{spec.name.upper()}_"
         lines.append(f"{prefix}SRC {_path_expr(repo_root, spec.module_dir)})\n")
         lines.append(f"{prefix}CMAKE {_path_expr(repo_root, spec.cmake)})\n")
         lines.append(f"{prefix}KCONFIG {_path_expr(repo_root, spec.kconfig)})\n")
