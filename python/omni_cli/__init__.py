@@ -7,4 +7,4 @@
 `omni build` 做 CMake 配置与构建，实现在 `omni_cli.build` 内。
 """
 
-__version__ = "0.18.0"
+__version__ = "0.20.0"

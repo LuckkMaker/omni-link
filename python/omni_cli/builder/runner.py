@@ -340,6 +340,9 @@ def run_build(
             f"未知构建类型 '{build_type}'（支持: {', '.join(BUILD_TYPES)}）", code=2
         )
 
+    # 让用户看到实际使用的 CLI 与框架根（排查环境变量指错 checkout 时很关键）
+    log(f"omni root: {omni_root}")
+    log("omni CLI : " + " ".join(_cli_base()))
     repo_root = os.path.dirname(omni_root)
     toolchain = toolchain_file(omni_root, compiler)
     build_dir = build_directory(project_dir, board, compiler, build_type)
@@ -399,14 +402,19 @@ def run_build(
             *(cmake_args or []),
             *_cli_configure_args(),
         ]
-        rc, output = _run(configure_cmd, log, verbose, stream=verbose)
+        rc, output = _run(configure_cmd, log, verbose, stream=stream_build)
         result.log.append(output)
         if rc != 0:
             result.exit_code = rc
             return result
         result.configured = True
     else:
-        log("(CMake 已配置，跳过 configure；需要强制时加 --cmake)")
+        _cached = read_cache_context(build_dir)
+        log("(CMake 已配置：board={b} compiler={c} type={t} → 跳过 configure；"
+            "需要强制时加 --cmake)".format(
+                b=_cached.get("board", board),
+                c=_cached.get("compiler", compiler),
+                t=_cached.get("build_type", build_type)))
 
     if configure_only:
         result.success = True
