@@ -62,6 +62,26 @@ def _resolve(args):
     return None, None, hung
 
 
+def run_local(handler):
+    """包装本地命令：不解析后端连接，仅统一异常与退出码。
+
+    与 ``run_command`` 的区别只在第一步——不建 ``ApiClient``，因此后端没启动
+    也能执行。用于只读本地文件/配置的命令（如 ``file checksum``、``config *``）。
+    """
+
+    def _run(args):
+        try:
+            return handler(args) or 0
+        except KeyboardInterrupt:
+            return ctx_error("已中断")
+        except OSError as e:
+            return ctx_error(f"文件/进程操作失败: {e}")
+        except Exception as e:  # 本地命令不把 traceback 抛给终端用户
+            return ctx_error(f"{type(e).__name__}: {e}")
+
+    return _run
+
+
 def finish(args, raw, human):
     """统一输出：json 模式打印 raw 对象，否则打印 human 文本。"""
     if args.quiet:

@@ -72,7 +72,7 @@ pyOCD 顶层子命令：`commander`、`erase`、`load`、`gdbserver`、`json`、
 | Zone 会话配置存取 | `/api/zone/sessions*` | `omni debug session *` | ✅ | — |
 | Monitor：变量/采样/波形/记录/导出 | `/api/probes/{uid}/monitor/*` | `omni monitor *` | ✅ | — |
 | 固件文件 stat/parse（Hex 查看） | `/api/files/parse` | `omni file info` | ✅ | — |
-| 文件校验和 / 对比 | 本地算法 + flash compare | `omni file checksum` / `omni flash compare` | ✅ | — |
+| 文件校验和 / 对比 | 本地算法 + flash compare | `omni file checksum` / `omni flash compare` | ✅ | `checksum` 在 CLI 内计算，不需要后端；`compare` 需要探针 |
 | 文件校验和 / 数字转换 | 前端本地实现 | 无 | — | 应用侧本地能力，CLI 可按需本地实现 |
 | Map 文件分析 | `/api/tools/map-analyzer` | `omni tool map` | ✅ | — |
 | 系统/版本信息 | `/api/system/info` | `omni system info` | ✅ | — |

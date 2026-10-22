@@ -1,7 +1,8 @@
 """固件文件命令：info / checksum。
 
 - ``info`` 复用后端 ``/api/files/parse``（bin/hex/elf 段信息）。
-- ``checksum`` 在本地计算原始文件字节的校验和，算法与 GUI 文件校验页一致。
+- ``checksum`` 在本地计算原始文件字节的校验和，算法与 GUI 文件校验页一致；
+  不建后端客户端，后端未启动也可用。
 """
 
 import os
@@ -9,8 +10,8 @@ import zlib
 
 from ..client import ApiClient
 from ..formatting import render_table
-from ..options import common_parser
-from ..runtime import finish, run_command
+from ..options import common_parser, local_parser
+from ..runtime import finish, run_command, run_local
 from ..util import parse_int
 
 _ALGORITHMS = ["modbus-crc16", "crc16-ccitt", "crc32", "add8", "xor8", "add16"]
@@ -25,13 +26,14 @@ def add_parser(sub):
     s.add_argument("--base-address", help="bin 文件的基地址（hex/dec）")
     s.set_defaults(func=run_command(_info))
 
-    s = ps.add_parser("checksum", parents=[common_parser()], help="计算文件字节的校验和")
+    s = ps.add_parser("checksum", parents=[local_parser()],
+                      help="计算文件字节的校验和（本地执行，不需要后端）")
     s.add_argument("file", help="文件路径")
     s.add_argument("--algorithm", default="crc32", choices=_ALGORITHMS,
                    help="校验算法（默认 crc32）")
     s.add_argument("--start", help="起始字节偏移（含，默认 0）")
     s.add_argument("--end", help="结束字节偏移（不含，默认文件末尾）")
-    s.set_defaults(func=run_command(_checksum))
+    s.set_defaults(func=run_local(_checksum))
 
 
 def _abs_file(path: str) -> str | None:
@@ -72,7 +74,7 @@ def _info(c: ApiClient, args):
     return 0
 
 
-def _checksum(c: ApiClient, args):
+def _checksum(args):
     path = _abs_file(args.file)
     if path is None:
         return 1
@@ -112,7 +114,9 @@ def _checksum(c: ApiClient, args):
         }, "")
         return 0
 
-    print(f"{args.algorithm}: {hex_bytes}  (范围 {start}..{end}，{len(data)} 字节)")
+    # --quiet 只设置退出码：帮助里承诺“不输出任何内容”，人类可读路径也要守住
+    if not args.quiet:
+        print(f"{args.algorithm}: {hex_bytes}  (范围 {start}..{end}，{len(data)} 字节)")
     return 0
 
 

@@ -72,20 +72,54 @@ def test_checksum_cli() -> None:
                      json_=True)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = file_cmd._checksum(StubClient(), args)
+            rc = file_cmd._checksum(args)
         out = json.loads(buf.getvalue())
         check("file checksum JSON", rc == 0 and out["checksum_hex"] == "CB F4 39 26", str(out))
         check("长度正确", out["length"] == 9, str(out))
 
         args = _args(file=str(path), algorithm="add8", start="1", end="4", json_=True)
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = file_cmd._checksum(StubClient(), args)
+            rc = file_cmd._checksum(args)
         check("范围截取 1..4", rc == 0)
 
         args = _args(file=str(path), algorithm="add8", start="10", end="20", json_=True)
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = file_cmd._checksum(StubClient(), args)
+            rc = file_cmd._checksum(args)
         check("越界范围被拒绝", rc == 2)
+
+
+def test_checksum_offline() -> None:
+    """checksum 属于本地命令：不建后端客户端，后端未启动也必须成功。"""
+    print("== 2b. file checksum 不依赖后端 ==")
+    from omni_cli.cli import build_parser
+
+    parser = build_parser()
+    with tempfile.TemporaryDirectory(prefix="omni_file_") as tmp:
+        path = Path(tmp) / "data.bin"
+        path.write_bytes(b"123456789")
+
+        args = parser.parse_args(["file", "checksum", str(path), "--json"])
+        check("不暴露后端选项",
+              not hasattr(args, "managed") and not hasattr(args, "backend_port"))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = args.func(args)  # 无 client：后端未启动也应成功
+        out = json.loads(buf.getvalue())
+        check("无后端也能算校验和",
+              rc == 0 and out["checksum_hex"] == "CB F4 39 26", str(out))
+
+        args = parser.parse_args(["file", "checksum", str(path), "--quiet"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = args.func(args)
+        check("--quiet 无输出且退出码 0", rc == 0 and buf.getvalue() == "")
+
+        args = parser.parse_args(["file", "checksum", str(path), "--algorithm", "add8",
+                                  "--start", "1", "--end", "4", "--json"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = args.func(args)
+        check("离线范围截取", rc == 0)
 
 
 # ── 3. file info ───────────────────────────────────────────
@@ -268,6 +302,7 @@ def main() -> int:
     configure_stdio()
     test_checksums()
     test_checksum_cli()
+    test_checksum_offline()
     test_file_info()
     test_tool_map()
     test_flash_compare_cli()
