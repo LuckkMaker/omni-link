@@ -30,8 +30,10 @@ from omni_cli.builder.runner import (
     ARTIFACTS,
     _cli_configure_args,
     build_directory,
+    cache_conflicts,
     collect_artifacts,
     parse_size,
+    read_cache_context,
     run_build,
     toolchain_file,
 )
@@ -69,10 +71,31 @@ def test_parser() -> None:
     check("parser.board", args.board == "stm32f407ig")
     check("parser.compiler", args.compiler == "ac6")
     check("parser.build_type", args.build_type == "Debug")
-    args = parser.parse_args(["build", "-b", "x", "-c", "gcc", "-t", "Release",
-                              "--clean", "--configure-only", "-j", "8", "--json"])
+    args = parser.parse_args(["build", "-b", "x", "-c", "gcc", "--build-type", "Release",
+                              "--clean", "--configure-only", "--cmake", "-t", "omni-size-template",
+                              "--cmake-arg=-DFOO=1", "-j", "8", "--json"])
     check("parser.options", args.compiler == "gcc" and args.build_type == "Release"
-          and args.clean and args.configure_only and args.jobs == 8 and args.json_)
+          and args.clean and args.configure_only and args.cmake and args.jobs == 8
+          and args.json_ and args.target == "omni-size-template"
+          and args.cmake_args == ["-DFOO=1"], str(args))
+
+
+def test_cache_context() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_path = os.path.join(tmp, "CMakeCache.txt")
+        with open(cache_path, "w", encoding="utf-8") as handle:
+            handle.write("// comment\n")
+            handle.write("OMNI_BOARD:STRING=stm32f407ig\n")
+            handle.write("OMNI_COMPILER:STRING=ac6\n")
+            handle.write("CMAKE_BUILD_TYPE:STRING=Debug\n")
+            handle.write("OTHER:STRING=x\n")
+        cache = read_cache_context(tmp)
+        check("cache.read", cache == {"board": "stm32f407ig", "compiler": "ac6",
+                                      "build_type": "Debug"}, str(cache))
+        check("cache.same", cache_conflicts(cache, "stm32f407ig", "ac6", "Debug") == [])
+        conflicts = cache_conflicts(cache, "stm32h743ii", "ac6", "Debug")
+        check("cache.conflict", len(conflicts) == 1 and "board" in conflicts[0], str(conflicts))
+        check("cache.empty", read_cache_context(os.path.join(tmp, "nope")) == {})
 
 
 def test_build_directory() -> None:
@@ -147,9 +170,29 @@ def test_e2e() -> None:
     check("e2e.size", result.size is not None and result.size["code"] > 0, str(result.size))
     check("e2e.artifacts", "omni.axf" in result.artifacts, str(sorted(result.artifacts)))
 
+    # 第二次构建应跳过 configure（构建目录已配置），强制时才重新配置。
+    again = run_build(
+        project_dir=str(project),
+        omni_root=str(root / "omni"),
+        board="stm32f407ig",
+        compiler="ac6",
+        build_type="Debug",
+    )
+    check("e2e.skip_configure", again.success and not again.configured, str(again.configured))
+    forced = run_build(
+        project_dir=str(project),
+        omni_root=str(root / "omni"),
+        board="stm32f407ig",
+        compiler="ac6",
+        build_type="Debug",
+        force_configure=True,
+    )
+    check("e2e.force_configure", forced.success and forced.configured, str(forced.configured))
+
 
 def main() -> int:
     test_parser()
+    test_cache_context()
     test_build_directory()
     test_toolchain()
     test_parse_size_and_artifacts()

@@ -23,6 +23,14 @@ omni (本包)
 
 ## 版本记录
 
+### 0.12.0（2026-10-22）
+
+- `omni build` 对齐 west 的行为：
+  - **默认跳过 CMake 配置**（构建目录已有 `CMakeCache.txt` 时），`--cmake` 强制重新配置；
+  - 构建目录与上下文绑定：cache 里的 board/compiler/build-type 不一致时报错并提示 `--clean`；
+  - 新增 `-t/--target`（只构建指定目标，如 `omni-size-template`）；
+  - 新增 `-o/--cmake-arg`（透传 cmake 参数，注意写成 `--cmake-arg=-DFOO=1`）；
+  - `-t` 让给 `--target`，构建类型改用 `--build-type`。
 ### 0.11.0（2026-10-22）
 
 - 新增 `omni build`：本地 CMake 配置 + 构建（Ninja），产物路径与尺寸直接返回：
@@ -412,9 +420,12 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 | --- | --- |
 | `-b/--board` | 板级目标（多板工程必填） |
 | `-c/--compiler` | `ac6`（默认）/ `gcc` / `clang` / `ac5`；当前仅 ac6 提供工具链文件 |
-| `-t/--build-type` | `Debug`（默认）/ `Release` |
+| `--build-type` | `Debug`（默认）/ `Release` |
+| `--cmake` | 强制重新执行 CMake 配置（默认已有构建目录时跳过） |
 | `--clean` | 先删除该上下文的构建目录 |
 | `--configure-only` | 只配置，不编译 |
+| `-t/--target T` | 只构建指定目标（如 `omni-size-template`） |
+| `-o/--cmake-arg ARG` | 额外 cmake 参数（写成 `--cmake-arg=-DFOO=1`，可重复） |
 | `-j/--jobs N` | 并行任务数 |
 | `-v/--verbose` | 打印 cmake 完整输出 |
 | `--json` / `--quiet` | 供脚本与 CI 消费 |

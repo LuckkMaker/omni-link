@@ -34,12 +34,18 @@ def add_parser(sub):
     )
     p.add_argument("-c", "--compiler", default=DEFAULT_COMPILER, choices=COMPILERS,
                    help=f"编译器（默认 {DEFAULT_COMPILER}；当前仅 ac6 提供工具链文件）")
-    p.add_argument("-t", "--build-type", dest="build_type", default=DEFAULT_BUILD_TYPE,
+    p.add_argument("--build-type", dest="build_type", default=DEFAULT_BUILD_TYPE,
                    choices=BUILD_TYPES, help=f"构建类型（默认 {DEFAULT_BUILD_TYPE}）")
+    p.add_argument("--cmake", action="store_true", default=False,
+                   help="强制重新执行 CMake 配置（默认构建目录已存在时跳过）")
     p.add_argument("--clean", action="store_true", default=False,
                    help="先删除该上下文的构建目录")
     p.add_argument("--configure-only", action="store_true", default=False,
                    help="只做 CMake 配置，不编译")
+    p.add_argument("-t", "--target", default=None, metavar="TARGET",
+                   help="只构建指定目标（如 omni-size-template）")
+    p.add_argument("-o", "--cmake-arg", dest="cmake_args", action="append", default=None,
+                   metavar="ARG", help="额外传给 cmake 配置的参数（可重复）")
     p.add_argument("-j", "--jobs", type=int, default=None, metavar="N",
                    help="并行编译任务数（默认交给 Ninja）")
     p.add_argument("-v", "--verbose", action="store_true", default=False,
@@ -92,8 +98,11 @@ def _build(args) -> int:
         compiler=args.compiler,
         build_type=args.build_type,
         clean=args.clean,
+        force_configure=args.cmake,
         configure_only=args.configure_only,
+        target=args.target,
         jobs=args.jobs,
+        cmake_args=args.cmake_args,
         verbose=args.verbose,
         log=log,
     )

@@ -47,6 +47,7 @@ class BuildResult:
     build_type: str
     build_dir: str
     toolchain: str
+    target: Optional[str] = None
     configured: bool = False
     built: bool = False
     success: bool = False
@@ -65,6 +66,7 @@ class BuildResult:
             "build_type": self.build_type,
             "build_dir": self.build_dir,
             "toolchain": self.toolchain,
+            "target": self.target,
             "configured": self.configured,
             "built": self.built,
             "artifacts": self.artifacts,
@@ -76,6 +78,51 @@ class BuildResult:
 def _version_tuple(text: str) -> tuple:
     match = VERSION_RE.search(text or "")
     return tuple(int(part) for part in match.groups()) if match else (0, 0, 0)
+
+
+#: CMakeCache 里需要核对的上下文变量（构建目录只能服务一个上下文）。
+CACHE_CONTEXT = {
+    "OMNI_BOARD": "board",
+    "OMNI_COMPILER": "compiler",
+    "CMAKE_BUILD_TYPE": "build_type",
+}
+
+
+def read_cache_context(build_dir: str) -> dict:
+    """读取已有构建目录的上下文（board / compiler / build_type）。"""
+
+    path = os.path.join(build_dir, "CMakeCache.txt")
+    if not os.path.isfile(path):
+        return {}
+    values: dict = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("//") or line.startswith("#"):
+                    continue
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key = key.split(":", 1)[0]
+                field_name = CACHE_CONTEXT.get(key)
+                if field_name:
+                    values[field_name] = value
+    except OSError:
+        return {}
+    return values
+
+
+def cache_conflicts(cache: dict, board: str, compiler: str, build_type: str) -> list:
+    """构建目录与当前请求的上下文是否冲突。"""
+
+    wanted = {"board": board, "compiler": compiler, "build_type": build_type}
+    conflicts = []
+    for key, expected in wanted.items():
+        actual = cache.get(key)
+        if actual and actual != expected:
+            conflicts.append(f"{key}: 构建目录里是 '{actual}'，当前是 '{expected}'")
+    return conflicts
 
 
 def toolchain_file(omni_root: str, compiler: str) -> str:
@@ -175,8 +222,11 @@ def run_build(
     compiler: str = DEFAULT_COMPILER,
     build_type: str = DEFAULT_BUILD_TYPE,
     clean: bool = False,
+    force_configure: bool = False,
     configure_only: bool = False,
+    target: Optional[str] = None,
     jobs: Optional[int] = None,
+    cmake_args: Optional[list] = None,
     verbose: bool = False,
     log: Optional[Callable[[str], None]] = None,
 ) -> BuildResult:
@@ -200,6 +250,7 @@ def run_build(
         build_type=build_type,
         build_dir=build_dir,
         toolchain=toolchain,
+        target=target,
     )
 
     if clean and os.path.isdir(build_dir):
@@ -210,33 +261,55 @@ def run_build(
         log(f"clean {build_dir}")
         shutil.rmtree(build_dir)
 
+    # 一个构建目录只服务一个上下文（与 west 的行为一致）。
+    cache = read_cache_context(build_dir)
+    conflicts = cache_conflicts(cache, board, compiler, build_type)
+    if conflicts:
+        raise ProjectError(
+            "构建目录已配置为其它上下文，请用 --clean 重建:\n  " + "\n  ".join(conflicts),
+            code=1,
+        )
+
     cmake = _require_tool("cmake", "安装 CMake 或用 vcpkg/Keil 自带的 cmake")
     _require_tool("ninja", "安装 Ninja（CMake 生成器固定为 Ninja）")
 
-    configure_cmd = [
-        cmake,
-        "-S", project_dir,
-        "-B", build_dir,
-        "-G", "Ninja",
-        f"-DOMNI_WORKSPACE_DIR={repo_root}",
-        f"-DOMNI_BOARD={board}",
-        f"-DOMNI_COMPILER={compiler}",
-        f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
-        f"-DCMAKE_BUILD_TYPE={build_type}",
-        *_cli_configure_args(),
-    ]
-    rc, output = _run(configure_cmd, log, verbose)
-    result.log.append(output)
-    if rc != 0:
-        result.exit_code = rc
-        return result
-    result.configured = True
+    cache_file = os.path.join(build_dir, "CMakeCache.txt")
+    need_configure = (
+        force_configure
+        or configure_only
+        or clean
+        or not os.path.isfile(cache_file)
+    )
+    if need_configure:
+        configure_cmd = [
+            cmake,
+            "-S", project_dir,
+            "-B", build_dir,
+            "-G", "Ninja",
+            f"-DOMNI_WORKSPACE_DIR={repo_root}",
+            f"-DOMNI_BOARD={board}",
+            f"-DOMNI_COMPILER={compiler}",
+            f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
+            f"-DCMAKE_BUILD_TYPE={build_type}",
+            *(cmake_args or []),
+            *_cli_configure_args(),
+        ]
+        rc, output = _run(configure_cmd, log, verbose)
+        result.log.append(output)
+        if rc != 0:
+            result.exit_code = rc
+            return result
+        result.configured = True
+    else:
+        log("(CMake 已配置，跳过 configure；需要强制时加 --cmake)")
 
     if configure_only:
         result.success = True
         return result
 
     build_cmd = [cmake, "--build", build_dir]
+    if target:
+        build_cmd += ["--target", target]
     if jobs:
         build_cmd += ["--parallel", str(jobs)]
     rc, output = _run(build_cmd, log, verbose)
