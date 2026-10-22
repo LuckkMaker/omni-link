@@ -1,6 +1,6 @@
-# OMNI Link CLI 实机测试报告
+# OMNI CLI 实机测试报告
 
-> 测试目的：确认 OMNI Link CLI 能否用于真实硬件上的驱动/文件系统验证。
+> 测试目的：确认 OMNI CLI 能否用于真实硬件上的驱动/文件系统验证。
 > 被测固件：`omni-emb/examples/fatfs/fatfs_ram_disk`（STM32F407IG，RAM 盘 + FatFs）。
 > 结论：**可用，但缺少 RTT 上行读取能力，日志断言无法做。**
 
@@ -256,7 +256,7 @@ EF BF BD EF BF BD EF BF BD EF BF BD EF BF BD EF BF BD D7 A4 EF BF BD EF BF BD EF
 **排查结果**
 
 - `python/omni_cli_main.py`、`python/api/rtt.py`、`python/api/probes.py` 均为 UTF-8 无 BOM，源码中不含 U+FFFD。
-- `python/omnilink_cli/cli.py` 没有 `sys.stdout.reconfigure(...)` 之类的编码设置。
+- `python/omni_cli/cli.py` 没有 `sys.stdout.reconfigure(...)` 之类的编码设置。
 - 安装目录 `resources/python/` 只有 `omni.exe` / `omni-backend.exe` / `_internal`，无法核对运行期字符串。
 
 **推断**
