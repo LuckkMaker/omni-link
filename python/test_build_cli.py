@@ -134,12 +134,14 @@ def test_toolchain() -> None:
     omni_root = str(root / "omni")
     ac6 = toolchain_file(omni_root, "ac6")
     check("toolchain.ac6", ac6.endswith("armclang6.cmake") and os.path.isfile(ac6), ac6)
+    gcc = toolchain_file(omni_root, "gcc")
+    check("toolchain.gcc", gcc.endswith("gcc.cmake") and os.path.isfile(gcc), gcc)
     try:
-        toolchain_file(omni_root, "gcc")
+        toolchain_file(omni_root, "ac5")
     except ProjectError as exc:
-        check("toolchain.gcc", "尚未提供" in str(exc))
+        check("toolchain.ac5", "尚未提供" in str(exc))
     else:
-        check("toolchain.gcc", False, "gcc 未报错")
+        check("toolchain.ac5", False, "ac5 未报错")
 
 
 def test_parse_size_and_artifacts() -> None:
@@ -156,7 +158,7 @@ def test_parse_size_and_artifacts() -> None:
                 handle.write("x")
         found = collect_artifacts(tmp)
         check("artifacts.subset", {"omni.axf", "omni.hex"} <= set(found), str(sorted(found)))
-        check("artifacts.list", "omni.axf.map" in ARTIFACTS and len(ARTIFACTS) == 5)
+        check("artifacts.list", "omni.axf.map" in ARTIFACTS and "omni.elf" in ARTIFACTS)
 
 
 def test_cli_args() -> None:
