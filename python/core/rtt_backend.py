@@ -933,8 +933,11 @@ class RTTBackend:
                 pass
 
             event_manager.log("info", "RTT: reset[2/3] core reset...")
-            # 2) 复位目标芯片
-            session.target.reset(reset_type=None)
+            # 2) 复位目标芯片；--no-run 用 reset_and_halt，避免 reset 后自动运行
+            if run:
+                session.target.reset(reset_type=None)
+            else:
+                session.target.reset_and_halt()
             event_manager.log("info", f"RTT: 目标已复位 (run={run})")
 
             event_manager.log("info", "RTT: reset[3/3] resume...")

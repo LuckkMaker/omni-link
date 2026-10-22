@@ -5,7 +5,7 @@
 
 import json
 
-from . import client, config
+from . import client, settings
 from .formatting import ctx_error
 
 
@@ -50,7 +50,7 @@ def _resolve(args):
     ports = []
     if args.backend_port:
         ports.append(args.backend_port)
-    ports += config.candidate_ports()
+    ports += settings.candidate_ports()
 
     hung: list[int] = []
     for p in ports:

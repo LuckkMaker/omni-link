@@ -11,7 +11,7 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Callable, Iterable, Optional
 
-from .context import ProjectError
+from ..context import ProjectError
 from .uvproj_rules import SOURCE_RULE_SETS
 
 

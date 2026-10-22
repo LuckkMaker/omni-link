@@ -7,6 +7,7 @@ device run|halt|reset|state。
 import base64
 import codecs
 import json
+import os
 import sys
 import time
 
@@ -69,6 +70,7 @@ def add_parser(sub):
     s.add_argument("--channel", type=int, help="down channel 索引（缺省用启动时选中的）")
     s.add_argument("--base64", metavar="DATA", help="发送 base64 编码的原始字节")
     s.add_argument("--text", metavar="TEXT", help="或直接发送文本（追加换行用 --no-newline 关闭）")
+    s.add_argument("--file", metavar="PATH", help="或发送文件的原始字节（二进制）")
     s.add_argument("--no-newline", action="store_true", help="文本发送时不追加换行符")
     s.set_defaults(func=run_command(_send))
 
@@ -273,7 +275,21 @@ def _read(c: ApiClient, args):
 
 def _send(c: ApiClient, args):
     uid = _require_uid(c, args)
-    if args.base64:
+    if args.file:
+        path = os.path.abspath(os.path.expanduser(args.file))
+        if not os.path.isfile(path):
+            print(f"错误: 文件不存在: {path}")
+            return 1
+        try:
+            raw = open(path, "rb").read()
+        except OSError as e:
+            print(f"错误: 读取失败: {e}")
+            return 1
+        data = c.post(f"/api/probes/{uid}/rtt/send",
+                      {"data": base64.b64encode(raw).decode("ascii"),
+                       "channel": args.channel})
+        verb = f"已发送 {len(raw)} 字节（{os.path.basename(path)}）"
+    elif args.base64:
         data = c.post(f"/api/probes/{uid}/rtt/send",
                       {"data": args.base64.replace(" ", ""), "channel": args.channel})
         verb = f"已发送 {len(base64.b64decode(args.base64.replace(' ', '')))} 字节"
@@ -283,7 +299,7 @@ def _send(c: ApiClient, args):
                        "append_newline": not args.no_newline})
         verb = f"已发送文本: {args.text!r}"
     else:
-        print("错误: 请提供 --base64 DATA 或 --text TEXT。")
+        print("错误: 请提供 --file PATH、--base64 DATA 或 --text TEXT。")
         return 1
     if args.json_:
         finish(args, data, "")

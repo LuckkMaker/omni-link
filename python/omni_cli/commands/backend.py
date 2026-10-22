@@ -3,7 +3,7 @@
 import time
 
 from .. import client as bclient
-from .. import config
+from .. import settings
 from ..formatting import ctx_error
 from ..options import common_parser
 from ..runtime import finish
@@ -29,7 +29,7 @@ def _start(args):
     ports: list[int] = []
     if args.backend_port:
         ports.append(args.backend_port)
-    ports += config.candidate_ports()
+    ports += settings.candidate_ports()
     for p in ports:
         if p and bclient.reachable(p):
             finish(args, {"running": True, "reused": True, "port": p},
@@ -43,14 +43,14 @@ def _start(args):
 
 
 def _stop(args):
-    rt = config.read_runtime()
+    rt = settings.read_runtime()
     pid = rt.get("pid") if rt else None
 
     # 候选端口：显式指定 > 运行时记录/配置/环境变量
     ports: list[int] = []
     if args.backend_port:
         ports.append(args.backend_port)
-    ports += config.candidate_ports()
+    ports += settings.candidate_ports()
 
     # 关停前快照监听进程。必须按 PID 判活而不是看端口：uvicorn 优雅退出会先关闭
     # 监听套接字、再跑 lifespan 清理，清理若被探针卡住则进程仍活着占着 J-Link——
@@ -69,7 +69,7 @@ def _stop(args):
             # 等后端自身退出：其关停看门狗宽限期 10s（api/system.py SHUTDOWN_GRACE_S），
             # 这里多等几秒即可拿到干净结果，不必抢在它前面强杀。
             if _wait_pids_gone(listeners, timeout=14.0):
-                config.clear_runtime()
+                settings.clear_runtime()
                 pid_txt = f"  pid={pid}" if pid else ""
                 finish(args, {"stopped": True, "port": p, "pid": pid},
                        f"后端已停止: 端口={p}{pid_txt}")
@@ -91,11 +91,11 @@ def _stop(args):
 
     # 3) 校验进程真的消失（僵死进程占着监听套接字，不确认就可能漏杀）
     if not _wait_pids_gone(victims, timeout=6.0):
-        config.clear_runtime()
+        settings.clear_runtime()
         return ctx_error(
             f"后端进程 {victims} 未能停止（可能需管理员权限）"
         )
-    config.clear_runtime()
+    settings.clear_runtime()
     finish(args, {"stopped": True, "pids": victims},
            f"后端已停止: pid={','.join(str(v) for v in victims)}")
     return 0
@@ -125,13 +125,13 @@ def _wait_pids_gone(pids, timeout: float = 8.0) -> bool:
 
 def _status(args):
     # 以端口监听为准：进程存在但 HTTP 不通=僵死（Windows 上 os.kill 不可靠）
-    rt = config.read_runtime()
+    rt = settings.read_runtime()
     pid = rt.get("pid") if rt else None
 
     ports: list[int] = []
     if args.backend_port:
         ports.append(args.backend_port)
-    ports += config.candidate_ports()
+    ports += settings.candidate_ports()
 
     port = None
     hung = False

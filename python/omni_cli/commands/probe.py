@@ -1,6 +1,7 @@
 """探针命令：list / connect / disconnect / status / target。"""
 
 import os
+import urllib.parse
 
 from ..client import ApiClient
 from ..formatting import render_table
@@ -49,6 +50,13 @@ def add_parser(sub):
     s.add_argument("--pack", action="append", metavar="PATH",
                    help="设置目标时临时挂载 CMSIS-Pack（可重复；仅当前后端进程内有效）")
     s.set_defaults(func=run_command(_target))
+
+    s = ps.add_parser("jlink-devices", parents=[common_parser()],
+                      help="从 J-Link 设备库检索设备名（配合 --jlink-device）")
+    s.add_argument("--search", default="", help="按设备名前缀过滤（不区分大小写）")
+    s.add_argument("--flash-kb", type=int, help="按 Flash 容量精确过滤（KB）")
+    s.add_argument("--limit", type=int, default=20, help="最多显示条数（默认 20）")
+    s.set_defaults(func=run_command(_jlink_devices))
 
 
 def _list(c: ApiClient, args):
@@ -125,6 +133,34 @@ def _target(c: ApiClient, args):
     data = c.get(f"/api/probes/{args.uid}/target")
     finish(args, data, _head_block("", data))
     return 0
+
+
+def _jlink_devices(c: ApiClient, args):
+    params = {"search": args.search or "", "limit": args.limit}
+    if args.flash_kb is not None:
+        params["flash_kb"] = args.flash_kb
+    data = c.get("/api/probes/jlink/devices?" + urllib.parse.urlencode(params))
+    if args.json_:
+        finish(args, data, "")
+        return 0
+    devices = data.get("devices") or []
+    if not devices:
+        print("未找到匹配的 J-Link 设备")
+        return 0
+    print(render_table(
+        ["设备名", "Flash", "RAM", "厂商"],
+        [[d.get("name", ""), _size(d.get("flash_size")), _size(d.get("ram_size")),
+          d.get("manufacturer", "")] for d in devices],
+    ))
+    return 0
+
+
+def _size(value):
+    if not isinstance(value, int) or value <= 0:
+        return "-"
+    if value >= 1024 * 1024:
+        return f"{value / 1024 / 1024:g} MB"
+    return f"{value / 1024:g} KB"
 
 
 def _head_block(head: str, target) -> str:

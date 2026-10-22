@@ -403,7 +403,7 @@ def build_cli(python_exe: str):
     """把 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
 
     单文件便于随安装包分发并直接放进 PATH。调试/烧录命令只依赖标准库；
-    ``omni project`` 额外依赖 kconfiglib，PyInstaller 需要显式收集。
+    ``omni config`` 额外依赖 kconfiglib，PyInstaller 需要显式收集。
     """
     ensure_pyinstaller(python_exe)
 

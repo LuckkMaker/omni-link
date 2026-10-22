@@ -27,7 +27,7 @@ if (-not $NoBuild) {
         (Join-Path $CliProj "omni_cli.egg-info"),
         (Join-Path $CliProj "__pycache__"),
         (Join-Path $CliProj "commands\__pycache__"),
-        (Join-Path $CliProj "project\__pycache__")
+        (Join-Path $CliProj "config\__pycache__")
     )) {
         if (Test-Path -LiteralPath $cache) { Remove-Item -LiteralPath $cache -Recurse -Force }
     }
@@ -49,7 +49,7 @@ Write-Host "[3/3] 验证并记录后端位置" -ForegroundColor Cyan
 # wheel 安装后包不在源码树内，把后端目录写进包内 cli.config.json，
 # 这样后续任意目录直接跑 omni（--managed / backend start）都能找到 server.py，
 # 无需每次设置环境变量。仍可用 OMNI_BACKEND_DIR / OMNI_BACKEND_SERVER 覆盖。
-$saved = & $VenvPy -c "from omni_cli import config; print(config.save_backend_dir(r'$PyDir'))"
+$saved = & $VenvPy -c "from omni_cli import settings; print(settings.save_backend_dir(r'$PyDir'))"
 Write-Host "已记录后端目录: $saved"
 
 if ($StartBackend) {
@@ -62,7 +62,7 @@ Write-Host "完成。常用方式（无需再设环境变量）：" -ForegroundC
 Write-Host "  omni backend start          # 启动常驻后端"
 Write-Host "  omni probe list             # 自动附加常驻后端"
 Write-Host "  omni device summary         # 设备应用库"
-Write-Host "  omni project config --target stm32f407ig   # 本地工程配置（无需后端）"
+Write-Host "  omni config generate --board stm32f407ig   # 本地工程配置（无需后端）"
 Write-Host "  omni backend stop"
 Write-Host ""
 Write-Host "  # 单条命令即用即走（临时拉起后端）"

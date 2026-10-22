@@ -446,9 +446,13 @@ class MonitorBackend:
         if not session:
             return {"success": False, "error": "探针未连接"}
         try:
-            session.target.reset(reset_type=None)
             if run:
+                session.target.reset(reset_type=None)
                 session.target.resume()
+            else:
+                # reset() 在部分目标上会复位后自动运行；--no-run 必须显式 halt，
+                # 否则状态与返回值（halted）不一致。
+                session.target.reset_and_halt()
             event_manager.log("info",
                               f"Monitor: 目标已复位 (reset, run={run})")
             state = "running" if run else "halted"
@@ -1787,7 +1791,26 @@ class MonitorBackend:
             "variable_count": len(self._variables.get(uid, [])),
             "elf_loaded": uid in self._elf_decoders,
             "buffer_size": len(self._ring_buffers.get(uid, RingBuffer(1))),
+            # 最新样本时间戳：CLI `monitor read --follow` 用它作为默认游标，
+            # 避免把本次启动前的历史样本全部回放一遍。
+            "latest_t_ms": self._latest_t_ms(uid),
         }
+
+    def _latest_t_ms(self, uid: str):
+        rec = self._recorders.get(uid)
+        if rec is not None:
+            try:
+                return rec.latest_t_ms()
+            except Exception:
+                pass
+        rb = self._ring_buffers.get(uid)
+        if rb is not None:
+            try:
+                samples = rb.get_all()
+                return samples[-1].t_ms if samples else None
+            except Exception:
+                pass
+        return None
 
     def on_probe_disconnected(self, uid: str):
         """探针断开时调用，清理 Monitor 会话"""

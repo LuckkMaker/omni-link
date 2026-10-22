@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import config
+from . import settings
 
 
 class ApiError(Exception):
@@ -207,8 +207,8 @@ def _backend_command() -> list[str]:
     else:
         # 源码态优先 server.py，避免误用 dist/ 里的旧 exe
         exes = _candidate_backend_exes()
-        if os.path.exists(config.BACKEND_SERVER_PY):
-            return [sys.executable, config.BACKEND_SERVER_PY, "--port", "0"]
+        if os.path.exists(settings.BACKEND_SERVER_PY):
+            return [sys.executable, settings.BACKEND_SERVER_PY, "--port", "0"]
 
     for exe in exes:
         if os.path.exists(exe):
@@ -216,7 +216,7 @@ def _backend_command() -> list[str]:
 
     raise ApiError(
         0,
-        f"未找到后端 server.py: {config.BACKEND_SERVER_PY}\n"
+        f"未找到后端 server.py: {settings.BACKEND_SERVER_PY}\n"
         "  wheel 安装的 CLI 请设置 OMNI_BACKEND_DIR 指向后端目录，"
         "或先手动启动后端并用 --backend-port 指定端口。",
         kind="error",
@@ -233,13 +233,13 @@ def _candidate_backend_exes() -> list[str]:
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     return [
         os.path.join(exe_dir, "omni-backend.exe"),
-        os.path.join(config.BACKEND_DIR, "dist", "omni-backend", "omni-backend.exe"),
+        os.path.join(settings.BACKEND_DIR, "dist", "omni-backend", "omni-backend.exe"),
     ]
 
 
 def _open_log() -> object:
-    os.makedirs(config.LOG_FILE and os.path.dirname(config.LOG_FILE) or ".", exist_ok=True)
-    return open(config.LOG_FILE, "a", encoding="utf-8")
+    os.makedirs(settings.LOG_FILE and os.path.dirname(settings.LOG_FILE) or ".", exist_ok=True)
+    return open(settings.LOG_FILE, "a", encoding="utf-8")
 
 
 def _read_handshake_line(stream, deadline: float) -> int:
@@ -315,7 +315,7 @@ def start_persistent(timeout: int = 30) -> dict:
     轮询握手文件解析端口，写 pid/port 到运行时文件。返回 {pid, port}。
     """
     logf = _open_log()
-    handshake = open(config.HANDSHAKE_FILE, "w", encoding="utf-8")
+    handshake = open(settings.HANDSHAKE_FILE, "w", encoding="utf-8")
     flags = 0
     flags |= getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     proc = subprocess.Popen(
@@ -331,7 +331,7 @@ def start_persistent(timeout: int = 30) -> dict:
     port = None
     while time.time() < deadline:
         try:
-            with open(config.HANDSHAKE_FILE, "r", encoding="utf-8") as f:
+            with open(settings.HANDSHAKE_FILE, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("{"):
@@ -356,7 +356,7 @@ def start_persistent(timeout: int = 30) -> dict:
     if not _wait_reachable(port, deadline):
         proc.kill()
         raise ApiError(0, "后端常驻进程端口未在期限内就绪", kind="error")
-    config.write_runtime({"pid": proc.pid, "port": port, "managed": False})
+    settings.write_runtime({"pid": proc.pid, "port": port, "managed": False})
     return {"pid": proc.pid, "port": port}
 
 

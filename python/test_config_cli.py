@@ -1,9 +1,9 @@
-"""`omni project` 离线回归测试（不需要硬件/后端）。
+"""`omni config` 离线回归测试（不需要硬件/后端）。
 
 用法::
 
     cd python
-    ..\\.venv\\Scripts\\python.exe test_project_cli.py
+    ..\\.venv\\Scripts\\python.exe test_config_cli.py
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ for stream in (sys.stdout, sys.stderr):
         pass
 
 from omni_cli.cli import build_parser
-from omni_cli.project import context
-from omni_cli.project.bspgen import run_bspgen
-from omni_cli.project.context import ProjectError
-from omni_cli.project.generate import generate_project_config
-from omni_cli.project.uvproj_sync import sync_uvprojx_project
+from omni_cli import context
+from omni_cli.config.bspgen import run_bspgen
+from omni_cli.context import ProjectError
+from omni_cli.config.generate import generate_project_config
+from omni_cli.config.uvproj_sync import sync_uvprojx_project
 
 failures: list[str] = []
 
@@ -199,9 +199,9 @@ def test_uvproj(root: Path) -> None:
     # config --sync-keil --stop-on-change：配置把规则关掉后，工程文件应变化并返回 2
     code, out, _ = run_cli(
         [
-            "project", "config",
+            "config", "generate",
             "--project-dir", str(app),
-            "--target", "board1",
+            "-b", "board1",
             "--sync-keil",
             "--stop-on-change",
             "--json",
@@ -224,9 +224,26 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+def test_removed_names() -> None:
+    print("== 4b. 旧命令/旧参数已移除 ==")
+    import contextlib as _ctx
+    import io as _io
+
+    def parse_or_exit(argv):
+        parser = build_parser()
+        with _ctx.redirect_stderr(_io.StringIO()), _ctx.redirect_stdout(_io.StringIO()):
+            try:
+                parser.parse_args(argv)
+            except SystemExit as exc:
+                return exc.code
+        return 0
+
+    check("omni project 已移除（exit 2）", parse_or_exit(["project"]) == 2)
+    check("config 不再接受 --target（exit 2）", parse_or_exit(["config", "--target", "board1"]) == 2)
+
 def test_menuconfig_cleanup(root: Path) -> None:
     print("== 4. menuconfig 临时文件清理 ==")
-    from omni_cli.project import menuconfig as menuconfig_mod
+    from omni_cli.config import menuconfig as menuconfig_mod
 
     app = root / "app"
     original = menuconfig_mod._find_menuconfig
@@ -257,27 +274,27 @@ def test_cli(root: Path) -> None:
     app = root / "app"
     code, out, err = run_cli(
         [
-            "project", "config",
+            "config", "generate",
             "--project-dir", str(app),
-            "--target", "board1",
+            "-b", "board1",
             "--no-bsp",
             "--json",
         ]
     )
     data = json.loads(out)
     check("config --json 成功", code == 0 and data["success"] is True, out[:300])
-    check("JSON 含 target", data.get("target") == "board1", str(data))
+    check("JSON 含 board", data.get("board") == "board1", str(data))
     check("--json stdout 无日志污染", out.lstrip().startswith("{"), out[:100])
 
     code, out, _ = run_cli(
-        ["project", "bsp", "--project-dir", str(app), "--target", "board1", "--json"]
+        ["config", "bsp", "--project-dir", str(app), "-b", "board1", "--json"]
     )
     data = json.loads(out)
     check("bsp --json 成功", code == 0 and data["success"] is True, out[:300])
     check("bsp 生成路径存在", os.path.exists(data["bsp_config"]), data.get("bsp_config", ""))
 
     code, out, _ = run_cli(
-        ["project", "config", "--project-dir", str(app), "--json"]
+        ["config", "generate", "--project-dir", str(app), "--json"]
     )
     data = json.loads(out)
     check("多目标 JSON 错误码 2", code == 2 and data["exit_code"] == 2, out[:300])
@@ -298,6 +315,7 @@ def main() -> int:
         test_context(root)
         test_generate(root)
         test_uvproj(root)
+        test_removed_names()
         test_menuconfig_cleanup(root)
         test_cli(root)
         test_bsp_no_omni(root)

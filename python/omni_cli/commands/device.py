@@ -60,6 +60,11 @@ def add_parser(sub):
     s = ps.add_parser("reimport", parents=[common_parser()], help="从 device_info.json 重新导入初始数据")
     s.set_defaults(func=run_command(_reimport))
 
+    s = ps.add_parser("flm-info", parents=[common_parser()],
+                      help="从 .FLM 提取 Flash 参数（供 device custom 使用）")
+    s.add_argument("file", help=".FLM Flash 算法文件路径")
+    s.set_defaults(func=run_command(_flm_info))
+
 
 def _list(c: ApiClient, args):
     data = c.get("/api/devices")
@@ -153,6 +158,32 @@ def _custom(c: ApiClient, args):
 def _reimport(c: ApiClient, args):
     data = c.post("/api/devices/reimport")
     finish(args, data, f"已从 device_info.json 重新导入 {data.get('imported', 0)} 个设备")
+    return 0
+
+
+def _flm_info(c: ApiClient, args):
+    path = os.path.abspath(os.path.expanduser(args.file))
+    if not os.path.isfile(path):
+        print(f"错误: 文件不存在: {path}")
+        return 1
+    if not path.upper().endswith(".FLM"):
+        print(f"错误: 不是 .FLM 文件: {path}")
+        return 1
+
+    data = c.post("/api/devices/custom/extract-flm-info", {"path": path})
+    if args.json_:
+        finish(args, data, "")
+        return 0
+
+    info = data.get("info") or {}
+    if not info:
+        print("未解析到 FLM 参数")
+        return 0
+    print(f"FLM: {path}")
+    for key, value in info.items():
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        print(f"  {key}: {value}")
     return 0
 
 

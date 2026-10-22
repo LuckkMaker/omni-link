@@ -8,13 +8,11 @@
 import argparse
 import sys
 
-from . import __version__, client
-from .commands import backend, commander, debug, device, flash, pack, probe, project, rtt, target
+from . import __version__, client, commands
+from .commands import commander
 from .formatting import configure_stdio, ctx_error
 
 PROG = "omni"
-
-_COMMAND_MODULES = (backend, commander, debug, device, flash, pack, probe, project, rtt, target)
 
 
 def _format_api_error(e: client.ApiError) -> str:
@@ -33,12 +31,11 @@ def _format_api_error(e: client.ApiError) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
-        description="OMNI CLI - 探针/烧录/RTT/Commander 与工程配置（omni project）",
+        description="OMNI CLI - The OMNI meta-toolchain",
     )
     parser.add_argument("-v", "--version", action="version", version=f"omni {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
-    for mod in _COMMAND_MODULES:
-        mod.add_parser(sub)
+    commands.add_all_parsers(sub)
     return parser
 
 

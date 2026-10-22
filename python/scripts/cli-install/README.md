@@ -32,7 +32,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 ```powershell
 omni --version
-omni project config --target stm32f407ig
+omni config generate --board stm32f407ig
 ```
 
 ### 自定义目录 / 不修改 PATH
@@ -53,13 +53,13 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 **完全独立（不需要 OMNI Link 应用/后端）**：
 
 ```powershell
-omni project config   --target stm32f407ig
-omni project config   --target stm32f407ig --sync-keil
-omni project bsp      --target stm32f407ig
-omni project sync-keil
+omni config generate --board stm32f407ig
+omni config generate --board stm32f407ig --sync-keil
+omni config bsp      --board stm32f407ig
+omni config sync-keil
 ```
 
-`omni project` 只读取 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，直接生成
+`omni config` 只读取 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，直接生成
 `.config`、`omni_config.h`、`bsp_config.h`，并同步 Keil 工程。
 
 **需要 OMNI Link 后端**：
@@ -76,10 +76,10 @@ portable 包不带后端。可以连接正在运行的 OMNI Link 应用后端；
 
 ## `menuconfig` 说明
 
-`omni project menuconfig` 的交互界面由 `kconfiglib` 的 `menuconfig` 命令提供。
+`omni config menuconfig` 的交互界面由 `kconfiglib` 的 `menuconfig` 命令提供。
 portable 包不包含 `menuconfig.exe`；因此：
 
-- 只做 `config` / `bsp` / `sync-keil`：不需要额外依赖；
+- 只做 `generate` / `bsp` / `sync-keil`：不需要额外依赖；
 - 需要交互式 `menuconfig`：请安装同版本 wheel（发布页提供），
   或使用已安装的 OMNI Link 应用/带 `kconfiglib` 的 Python 环境。
 
@@ -94,7 +94,7 @@ uv tool install --from .\omni_cli-{{VERSION}}-py3-none-any.whl omni-cli
 
 ## 用于 Keil / CMSIS 构建钩子
 
-启动器 `omni_project.py` 会按以下顺序查找 CLI：
+启动器 `omni_config.py` 会按以下顺序查找 CLI：
 
 1. `--cli PATH`
 2. `OMNI_CLI`
@@ -103,7 +103,7 @@ uv tool install --from .\omni_cli-{{VERSION}}-py3-none-any.whl omni-cli
 安装后 `omni` 已在用户 PATH 中，构建钩子可以直接使用：
 
 ```text
-python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f407ig --sync-keil
+python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407ig --sync-keil
 ```
 
 如果机器上同时装了旧版 OMNI Link，请确认 `OMNI_CLI` 没有指向旧版 `omni.exe`。

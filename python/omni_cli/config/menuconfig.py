@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from .context import ProjectError
+from ..context import ProjectError
 from .generate import create_combined_kconfig
 
 MENUCONFIG_STYLE = (

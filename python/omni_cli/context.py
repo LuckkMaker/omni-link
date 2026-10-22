@@ -145,9 +145,9 @@ def _board_candidates(project_dir: str) -> list[str]:
 
 
 def resolve_target(project_dir: str, explicit: Optional[str] = None) -> str:
-    """按 --target / OMNI_TARGET / boards 下唯一目标解析板级名。"""
+    """按 -b/--board / OMNI_BOARD / boards 下唯一目标解析板级名。"""
 
-    raw = explicit or _env("OMNI_TARGET")
+    raw = explicit or _env("OMNI_BOARD")
     boards = Path(project_dir) / "boards"
     candidates = _board_candidates(project_dir)
 
@@ -165,12 +165,12 @@ def resolve_target(project_dir: str, explicit: Optional[str] = None) -> str:
         return candidates[0]
     if not candidates:
         raise ProjectError(
-            f"{boards} 下没有可用目标；请用 --target 指定。",
+            f"{boards} 下没有可用目标；请用 -b/--board 指定。",
             code=2,
         )
     available = ", ".join(candidates)
     raise ProjectError(
-        f"工程包含多个目标板，请用 --target 指定。\n  可用目标: {available}",
+        f"工程包含多个目标板，请用 -b/--board 指定。\n  可用目标: {available}",
         code=2,
     )
 

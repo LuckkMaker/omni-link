@@ -65,11 +65,12 @@ function RunExpectFail([string]$Name, [string[]]$ArgsList) {
 # 中文输出不应出现 U+FFFD（P1-4）。PowerShell 7 默认按 UTF-8 解码子进程输出。
 function CheckNoMojibake([string]$Name, [string[]]$ArgsList) {
     $out = & $cliExe @cliPrefix @ArgsList 2>&1 | Out-String
+    $code = $LASTEXITCODE
     $bad = ([regex]::Matches($out, [char]0xFFFD)).Count
-    if ($bad -eq 0) {
-        Write-Host ("  [编码] " + $Name + " OK（无 U+FFFD）") -ForegroundColor Green
+    if ($bad -eq 0 -and $code -eq 0) {
+        Write-Host ("  [编码] " + $Name + " OK（无 U+FFFD，exit=0）") -ForegroundColor Green
     } else {
-        Write-Host ("  [编码] " + $Name + " FAIL：U+FFFD=" + $bad) -ForegroundColor Red
+        Write-Host ("  [编码] " + $Name + " FAIL：U+FFFD=" + $bad + " exit=" + $code) -ForegroundColor Red
         $script:encodingFailures++
     }
 }
@@ -81,8 +82,10 @@ Run "commander exec 缺参引导" @("commander", "exec")
 CheckNoMojibake "backend -h" @("backend", "-h")
 CheckNoMojibake "probe connect -h" @("probe", "connect", "-h")
 CheckNoMojibake "rtt read -h" @("rtt", "read", "-h")
-CheckNoMojibake "project -h" @("project", "-h")
-CheckNoMojibake "project config -h" @("project", "config", "-h")
+CheckNoMojibake "config -h" @("config", "-h")
+CheckNoMojibake "config generate -h" @("config", "generate", "-h")
+CheckNoMojibake "monitor -h" @("monitor", "-h")
+CheckNoMojibake "system -h" @("system", "-h")
 RunExpectFail "probe connect 缺 --target" @("probe", "connect", "DUMMY")
 
 # ── B. 拉起常驻后端（脚本进程存活期间保持）─────────────

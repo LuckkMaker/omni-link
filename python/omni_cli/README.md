@@ -6,20 +6,46 @@
 
 OMNI CLI 有两类命令：
 
-- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `device` / `pack` / `rtt`。
+- **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `monitor` / `device` / `pack` / `rtt` / `system`。
   它们是 OMNI Link 后端的瘦客户端，通过 HTTP 复用 REST 接口，不复制后端业务逻辑。
-- **工程配置类**：`omni project`。本地执行，不经过后端，实现在 `omni_cli.project` 内；
+- **工程配置类**：`omni config`。本地执行，不经过后端，实现在 `omni_cli.config` 内；
   只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，不调用 `omni/scripts` 下的旧脚本。
 
 ```
 omni (本包)
   ├── HTTP ──▶ OMNI Link Python 后端 (server.py) ──▶ 调试探针 ──▶ 目标芯片
-  └── 本地 ──▶ omni_cli.project ──▶ 工程配置/头文件/Keil 工程
+  └── 本地 ──▶ omni_cli.config ──▶ 工程配置/头文件/Keil 工程
 ```
 
-因此：**调试/烧录命令需要后端；`omni project` 不需要后端，也不需要探针。**
+因此：**调试/烧录命令需要后端；`omni config` 不需要后端，也不需要探针。**
 
 ## 版本记录
+
+### 0.7.0（2026-10-21）
+
+- **破坏性变更**：`omni project` 重命名为 `omni config`，子命令 `generate`（默认）/ `menuconfig` / `bsp` / `sync-keil`；不保留旧命令。
+- **破坏性变更**：板级选项 `--target` 改为 `-b/--board`；`probe connect --target` 仍表示芯片型号，未变。
+- **破坏性变更**：环境变量 `OMNI_TARGET` 改为 `OMNI_BOARD`。
+- 包结构：`omni_cli.project` → `omni_cli.config`；`context` 上提为 `omni_cli.context`。
+- 命令注册改为单一来源（`commands.add_all_parsers`），新增命令不必再改 `cli.py`。
+- 启动器路径（omni-emb 侧）：`omni/scripts/omni_project/omni_project.py` → `omni/scripts/omni_config/omni_config.py`。
+
+### 0.6.0（2026-10-21）
+
+- 新增运维与设备信息命令：
+  - `omni system info`（后端/数据库/Python/pyOCD 版本与设备库统计）；
+  - `omni commander reset|cancel`；
+  - `omni probe jlink-devices`（J-Link 设备库检索，配合 `--jlink-device`）；
+  - `omni device flm-info <file.FLM>`（自动提取 Flash 参数供 `device custom`）；
+  - `omni rtt send --file <path>`（发送文件原始字节）。
+
+### 0.5.0（2026-10-21）
+
+- 新增 `omni monitor`：ELF/符号、监视变量增删改、采样 start/stop/pause/resume、
+  目标内核 run/halt/reset/state、历史读取（`read`，支持 `--follow`）与 CSV 导出。
+- `monitor var add --symbol` 自动解析符号地址/类型；数组必须 `--index`，越界/歧义会拒绝。
+- `SessionRecorder.read_range` 读取前 flush 当前文件，采样进行中即可读到最新样本，
+  支撑 `monitor read --follow`。
 
 ### 0.4.0（2026-10-21）
 
@@ -140,7 +166,7 @@ omni --version
 omni -h
 ```
 
-> `omni project config` / `menuconfig` 依赖 `kconfiglib`，wheel 安装会自动拉取；
+> `omni config generate` / `menuconfig` 依赖 `kconfiglib`，wheel 安装会自动拉取；
 > `menuconfig` 还需要同一环境中的 `menuconfig` 命令（`kconfiglib` 会安装它）。
 > `bsp` / `sync-keil` 不依赖 `kconfiglib`。
 
@@ -199,7 +225,7 @@ powershell -File python\scripts\cli-release.ps1 `
   -PfxPath .\certs\omni.pfx -PfxPassword "******" -RequireSigned
 ```
 
-> portable zip 不包含调试后端；`omni project` 可独立使用，`probe/flash/debug/rtt`
+> portable zip 不包含调试后端；`omni config` 可独立使用，`probe/flash/debug/rtt`
 > 需要已安装的 OMNI Link 后端或 `OMNI_BACKEND_DIR`/`OMNI_BACKEND_SERVER`。
 
 ## 快速开始
@@ -247,8 +273,8 @@ omni backend stop
 | `--quiet` | 不输出内容，仅设置退出码 |
 | `--timeout SEC` | 后端 HTTP 超时秒数（默认 30；`flash program/erase` 默认 180，`verify/blank-check/read/fill` 默认 120） |
 
-> `omni project` 是本地命令，只使用 `--json` / `--quiet`，**不接受** `--backend-port` /
-> `--managed` / `--timeout`；它另有 `--project-dir` / `--omni-root` / `--target` 等上下文选项。
+> `omni config` 是本地命令，只使用 `--json` / `--quiet`，**不接受** `--backend-port` /
+> `--managed` / `--timeout`；它另有 `--project-dir` / `--omni-root` / `-b/--board` 等上下文选项。
 >
 > ℹ️ `omni commander exec` 的命令参数用 `REMAINDER` 收集。为兼容常见写法，CLI 解析前会把
 > 命令之后出现的**已知全局选项**（`--uid` / `--backend-port` / `--timeout` / `--managed` /
@@ -283,32 +309,43 @@ omni backend stop
 也能按端口找到并停止，确保 J-Link 等探针句柄被释放。若优雅关停的清理被探针操作卡住，
 后端自身的关停看门狗（`api/system.py` `SHUTDOWN_GRACE_S=10s`）会兜底强制退出。
 
-### `project` — 工程配置（本地命令）
-
-不经过后端，也不需要探针；直接在本地读取 omni 框架的 `Kconfig` / `soc` / `boards`
-并生成工程配置。实现在 `omni_cli.project`，不调用 omni-emb 的旧脚本。
+### `system` — 系统信息
 
 | 子命令 | 说明 |
 | --- | --- |
-| `config` | Kconfig 合并 + `omni_config.h` + `bsp_config.h`；可选 `--msp` / `--sync-keil` |
+| `info` | 后端/数据库/Python/pyOCD 版本、数据库路径、设备库来源统计 |
+
+```powershell
+omni system info
+omni system info --json
+```
+
+### `project` — 工程配置（本地命令）
+
+不经过后端，也不需要探针；直接在本地读取 omni 框架的 `Kconfig` / `soc` / `boards`
+并生成工程配置。实现在 `omni_cli.config`，不调用 omni-emb 的旧脚本。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `generate`（默认） | Kconfig 合并 + `omni_config.h` + `bsp_config.h`；可选 `--msp` / `--sync-keil` |
 | `menuconfig` | 打开交互式 menuconfig，保存后更新头文件 |
 | `bsp` | 独立生成 `bsp_config.h`（默认自动发现链接 map） |
 | `sync-keil` | 按已有 `.config` 同步 Keil 工程；**默认全部 `*.uvprojx`** |
 
-上下文选项（各子命令通用）：`--project-dir PATH`、`--omni-root PATH`、`--target BOARD`。
-不传时自动从当前目录向上查找工程根和 `omni/` 根；多目标工程必须显式 `--target`。
+上下文选项（各子命令通用）：`--project-dir PATH`、`--omni-root PATH`、`-b/--board BOARD`。
+不传时自动从当前目录向上查找工程根和 `omni/` 根；多目标工程必须显式 `-b/--board`。
 
 ```powershell
 cd D:\workspace\embedded\omni-emb\examples\basic\template
 
-omni project config --target stm32f407ig
-omni project config --target stm32f407ig --msp
-omni project config --target stm32f407ig --sync-keil
-omni project config --target stm32f407ig --sync-keil --stop-on-change
-omni project bsp --target stm32f407ig
-omni project bsp --target stm32f407ig --map Listings\stm32f407\omni.map
-omni project sync-keil
-omni project menuconfig --target stm32f407ig
+omni config generate --board stm32f407ig
+omni config generate --board stm32f407ig --msp
+omni config generate --board stm32f407ig --sync-keil
+omni config generate --board stm32f407ig --sync-keil --stop-on-change
+omni config bsp --board stm32f407ig
+omni config bsp --board stm32f407ig --map Listings\stm32f407\omni.map
+omni config sync-keil
+omni config menuconfig --board stm32f407ig
 ```
 
 > `--sync-keil` / `sync-keil` 默认同步工程目录下**全部** `*.uvprojx`，与旧
@@ -322,10 +359,10 @@ omni project menuconfig --target stm32f407ig
 Keil/CMSIS 构建钩子建议通过 omni-emb 的薄启动器调用，而不是直接写 `omni`：
 
 ```text
-python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f407ig --sync-keil
+python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407ig --sync-keil
 ```
 
-启动器只负责定位 CLI、校验最低版本（0.3.2）和转发参数；可用 `OMNI_CLI` 指定
+启动器只负责定位 CLI、校验最低版本（0.7.0）和转发参数；可用 `OMNI_CLI` 指定
 `omni.exe` 路径。
 
 ### `probe` — 探针管理
@@ -337,6 +374,7 @@ python ../../../omni/scripts/omni_project/omni_project.py config --target stm32f
 | `disconnect <uid>` | 断开探针（等待底层关闭，释放 J-Link 等探针句柄） |
 | `status <uid>` | 查询连接状态与目标信息（**连接的权威状态以此为准**） |
 | `target <uid> [--part PART] [--pack PATH]` | 查询或设置目标型号（切换目标时可挂包） |
+| `jlink-devices` | 从 J-Link 设备库检索设备名（`--search` / `--flash-kb` / `--limit`） |
 
 > `probe list` 为了性能读取后台监控快照（每 2s 刷新），刚 `connect` 后可能仍显示
 > `disconnected`；需要立即刷新用 `omni probe list --refresh`，或用 `omni probe status <uid>`。
@@ -368,6 +406,7 @@ omni probe connect 852001270 --target G32F463XC --jlink-device G32F463XC
 omni probe connect 852001270 -t g32f020k8 --pack .\Geehy.G32F020_DFP.0.0.11.pack
 omni probe status 852001270
 omni probe target 852001270 --part stm32f407xg
+omni probe jlink-devices --search G32 --flash-kb 256   # 查 J-Link 设备名
 omni probe disconnect 852001270
 ```
 
@@ -491,6 +530,8 @@ omni flash reset --no-run
 | --- | --- |
 | `exec <command...>` | 执行单条命令 |
 | `shell` | 交互式 REPL；`--command CMD` 可非交互批量执行（`;` 分隔） |
+| `reset` | 重置探针的 Commander 上下文（目标切换/重连后） |
+| `cancel` | 取消该探针上正在执行的命令（长命令/僵死命令的出口） |
 
 > 列出 pyOCD 可用命令用 **`omni commander exec help`**（不带参数）。
 > `omni commander exec list` 是 pyOCD 的“探针/目标”列表命令，输出的是探针与目标表，
@@ -504,6 +545,8 @@ omni commander exec reg
 omni commander exec list                     # pyOCD 的探针/目标列表（不是命令列表）
 omni commander shell                         # 进 REPL，连续调试最省事
 omni commander shell --command "status; reg"
+omni commander cancel                         # 取消正在执行的命令
+omni commander reset                          # 目标切换/重连后重置上下文
 ```
 
 ### `debug` — 调试控制
@@ -592,6 +635,45 @@ omni debug session save my-session --file cfg.json  # 保存会话配置
 > ℹ️ `bp clear` 会清空目标上**全部**硬件断点，包括通过 `commander exec break` 直接设置的
 > 断点（二者共用 pyOCD 的断点管理器）。
 
+### `monitor` — 变量采样与导出
+
+复用后端 `/api/probes/{uid}/monitor/*`：加载 ELF → 选符号 → 加监视变量 → 采样 → 读取/导出。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `status` | 采样状态（运行/暂停/实际速率/变量数/缓冲点数） |
+| `elf load <file>` / `elf changed` | 加载 ELF/AXF（Monitor 符号） / 检测文件是否变化 |
+| `symbols` | 查询符号（`--filter` / `--type object\|func\|all` / `--page` / `--page-size`） |
+| `var list` | 列出监视变量（ID/名称/地址/类型/刷新/备注） |
+| `var add --symbol <name> [--index N]` | 按符号添加；数组必须给 `--index` |
+| `var add --name N --address A --type T` | 手工地址添加（`--index` 可用于数组元素） |
+| `var rm <id>` / `var set <id> --value V` | 删除变量 / 写回目标内存 |
+| `start` / `stop` / `pause` / `resume` | 采样控制（`--rate` / `--max-points` / `--transport swd\|rtt`） |
+| `device run\|halt\|reset\|state` | 目标内核控制（`reset --no-run` 复位后暂停） |
+| `read` | 读取落盘样本（`--start-ms` / `--end-ms` / `--limit` / `--max-points`） |
+| `read --follow` | 持续跟踪新样本（`--interval` / `--duration`，Ctrl+C 结束） |
+| `export <out.csv>` | 导出落盘 CSV（`--mode all\|recent\|custom`，`--force` 覆盖） |
+
+```powershell
+omni monitor elf load .\app.axf
+omni monitor symbols --filter counter
+omni monitor var add --symbol g_counter
+omni monitor var add --symbol g_buf --index 3
+omni monitor var list
+omni monitor start --rate 1000
+omni monitor read --limit 20
+omni monitor read --follow --duration 5
+omni monitor export .\monitor.csv --mode recent --recent 10 --force
+omni monitor stop
+```
+
+> ℹ️ `var add --symbol` 会先按名字精确匹配；数组符号必须 `--index`，越界/歧义会直接拒绝。
+> `read` 默认只显示 200 个样本（`--limit 0` 表示全部）；`--follow` 不受该限制，
+> 默认从当前最新样本之后开始跟踪，不重复输出；需要回放历史时显式传 `--start-ms 0`。
+>
+> ℹ️ 采样数据落盘后 `read/export` 可跨会话读取；后端在读取前会 flush 当前文件，
+> 因此采样进行中也能看到最新样本。
+
 ### `device` — 设备应用库
 
 设备目录有三种来源：`builtin`（内置，只读）、`pack`、`flm`（自定义）。增删改只作用于用户库。
@@ -605,6 +687,7 @@ omni debug session save my-session --file cfg.json  # 保存会话配置
 | `update <part> <json_file>` | 按 JSON 更新设备（内置型号只读） |
 | `delete <part> [-y]` | 删除设备（内置型号只读） |
 | `custom <flm>` | 用 `.FLM` 算法文件创建自定义芯片 |
+| `flm-info <flm>` | 从 `.FLM` 自动提取 Flash 参数（供 `custom` 填参） |
 | `reimport` | 从 `device_info.json` 重新导入初始数据 |
 
 `custom` 必填参数：`--part-number` `--flash-base` `--flash-size`(KB) `--ram-base` `--ram-size`(KB)；可选 `--core`（默认 `Cortex-M4`）`--vendor` `--display-name`。
@@ -613,6 +696,7 @@ omni debug session save my-session --file cfg.json  # 保存会话配置
 omni device summary
 omni device list --search G32
 omni device info g32f463xc
+omni device flm-info .\G32F463.FLM          # 查看 FLM 的 base/size/page/sector
 omni device custom .\G32F463.FLM --part-number MYCHIP --flash-base 0x08000000 `
     --flash-size 1024 --ram-base 0x20000000 --ram-size 128
 omni device delete MYCHIP -y
@@ -627,7 +711,7 @@ omni device delete MYCHIP -y
 | `stop` | 停止 RTT 会话（已缓存的上行数据仍可读取） |
 | `channels` | 列出 up/down 通道 |
 | `read` | **读取上行数据**：一次性读取当前缓存，或 `--follow` 持续跟踪 |
-| `send` | 发送数据：`--base64 DATA` 或 `--text TEXT`（`--no-newline` 关闭自动换行），`--channel` 指定通道 |
+| `send` | 发送数据：`--file PATH` / `--base64 DATA` / `--text TEXT`（三选一），`--channel` 指定通道 |
 | `device run\|halt\|status\|reset` | 目标内核控制；`reset` 会重新初始化 RTT 控制块，`--no-run` 复位后停在暂停态 |
 
 `read` 选项：
@@ -666,6 +750,7 @@ omni rtt read --uid 852001270 --json          # 可断言的 JSON（含 seq/text
 omni rtt read --uid 852001270 --channel 0 --out rtt.log --follow --duration 10
 omni rtt channels --uid 852001270
 omni rtt send --uid 852001270 --text "hello"
+omni rtt send --uid 852001270 --file .\payload.bin
 omni rtt device halt --uid 852001270
 omni rtt device reset --uid 852001270
 omni rtt stop --uid 852001270
@@ -677,8 +762,8 @@ omni rtt stop --uid 852001270
 | --- | --- |
 | `0` | 成功 |
 | `1` | 业务失败或运行错误（错误信息输出到 stderr，前缀 `错误:`） |
-| `2` | 用法错误：未指定子命令、`argparse` 参数错误、多目标未指定 `--target`；`omni project` 的 `--stop-on-change` 检测到 Keil 工程变化时也返回 2 |
-| `3` | `omni_project.py` 启动器环境错误：找不到 `omni` 或版本过低 |
+| `2` | 用法错误：未指定子命令、`argparse` 参数错误、多目标未指定 `-b/--board`；`omni config` 的 `--stop-on-change` 检测到 Keil 工程变化时也返回 2 |
+| `3` | `omni_config.py` 启动器环境错误：找不到 `omni` 或版本过低 |
 
 脚本中判断后端是否存活：
 
@@ -718,10 +803,10 @@ python build.py --cli-only          # 只重建 CLI（打包后自动校验帮�
 | `OMNI_BACKEND_DIR` | 后端根目录（含 `server.py`）。wheel 安装后用于定位后端 |
 | `OMNI_BACKEND_SERVER` | 直接指定 `server.py` 路径，优先级最高 |
 | `OMNI_BACKEND_PORT` | 后端端口覆盖（与 Electron 主进程一致） |
-| `OMNI_PROJECT_DIR` | `omni project` 的工程根目录覆盖 |
-| `OMNI_EMB_ROOT` / `OMNI_ROOT` | `omni project` 的 omni 框架根目录覆盖（接受仓库根或 `omni/`） |
-| `OMNI_TARGET` | `omni project` 的默认板级目标 |
-| `OMNI_CLI` | `omni_project.py` 启动器查找的 `omni` 可执行文件/目录 |
+| `OMNI_PROJECT_DIR` | `omni config` 的工程根目录覆盖 |
+| `OMNI_EMB_ROOT` / `OMNI_ROOT` | `omni config` 的 omni 框架根目录覆盖（接受仓库根或 `omni/`） |
+| `OMNI_BOARD` | `omni config` 的默认板级目标 |
+| `OMNI_CLI` | `omni_config.py` 启动器查找的 `omni` 可执行文件/目录 |
 | `OMNI_PROJECT_SKIP_VERSION_CHECK` | 设为 `1` 时启动器跳过版本检查 |
 
 `server.py` 定位优先级：`OMNI_BACKEND_SERVER` → `OMNI_BACKEND_DIR` → 包内 `cli.config.json`（由 `cli-package.ps1` 安装时写入）→ 源码树布局。
@@ -780,19 +865,19 @@ powershell -File scripts\cli-smoke.ps1 -UseInstalled -Rtt
 **`错误: 未找到后端 server.py: ...\site-packages\server.py`**
 wheel 安装后未记录后端位置。重跑 `python\scripts\cli-package.ps1`，或临时设置 `OMNI_BACKEND_DIR` 指向 `python\` 目录。
 
-**`omni project` 报“工程包含多个目标板”**
-该工程有多个 `boards/<target>`；用 `--target` 指定，例如
-`omni project config --target stm32f407ig`。
+**`omni config` 报“工程包含多个目标板”**
+该工程有多个 `boards/<target>`；用 `-b/--board` 指定，例如
+`omni config generate --board stm32f407ig`。
 
-**`omni project config` 报 `No module named kconfiglib`**
+**`omni config generate` 报 `No module named kconfiglib`**
 当前 Python 环境缺少 `kconfiglib`。wheel 安装会自动安装；源码态执行
 `..\.venv\Scripts\python.exe -m pip install kconfiglib`，或 `uv pip install kconfiglib`。
 
-**`omni project menuconfig` 打不开 / 找不到 menuconfig**
+**`omni config menuconfig` 打不开 / 找不到 menuconfig**
 `menuconfig` 是 `kconfiglib` 提供的控制台命令。确认安装它的 `Scripts` 目录在 PATH，
 或在 Python 环境中使用 `python -m menuconfig`。
 
-**`omni_project.py` 报“未找到 omni CLI”或版本过低**
+**`omni_config.py` 报“未找到 omni CLI”或版本过低**
 构建钩子通过启动器调用 CLI。安装 OMNI CLI（0.3.2+），或设置
 `OMNI_CLI=D:\path\to\omni.exe`。启动器返回码 3 表示环境问题，不是配置生成失败。
 

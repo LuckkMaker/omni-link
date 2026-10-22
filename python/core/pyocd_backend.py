@@ -2045,6 +2045,9 @@ class PyOCDBackend(BackendInterface):
 
             if run:
                 session.target.resume()
+            else:
+                # reset() / probe.reset() 后目标可能自动运行；--no-run 需保持 halt
+                session.target.halt()
 
             event_manager.log("info", f"Reset done")
             return True

@@ -194,7 +194,9 @@ def _read(c: ApiClient, args):
     if not ok:
         print(f"错误: {data.get('error')}")
         return 1
-    print(f"读取成功: {data.get('bytes_read')} 字节 (@0x{data.get('base_address'):x if isinstance(data.get('base_address'), int) else data.get('base_address')})"
+    base = data.get("base_address")
+    base_txt = f"0x{base:08X}" if isinstance(base, int) else str(base)
+    print(f"读取成功: {data.get('bytes_read')} 字节 (@{base_txt})"
           + (f"  已保存: {data.get('output_path')}" if data.get("output_path") else "")
           + f"  耗时 {data.get('duration_ms')}ms")
     return 0

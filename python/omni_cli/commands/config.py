@@ -1,6 +1,6 @@
-"""工程配置命令：project config / menuconfig / bsp / sync-keil。
+"""工程构建配置命令：config [generate|menuconfig|bsp|sync-keil]。
 
-本地执行，不经过 OMNI Link 后端；实现位于 ``omni_cli.project``。
+本地执行，不经过 OMNI Link 后端；实现位于 ``omni_cli.config``。
 """
 
 from __future__ import annotations
@@ -10,21 +10,22 @@ import json
 import os
 import sys
 
-from ..options import project_parser
-from ..project import context
-from ..project.bspgen import run_bspgen
-from ..project.context import ProjectError
-from ..project.uvproj_sync import sync_uvprojx_project
+from ..options import config_parser
+from .. import context
+from ..config.bspgen import run_bspgen
+from ..context import ProjectError
+from ..config.uvproj_sync import sync_uvprojx_project
 
 
 def add_parser(sub):
     p = sub.add_parser(
-        "project",
-        help="工程配置（Kconfig/BSP/Keil 同步；本地执行，不依赖后端）",
+        "config",
+        parents=[config_parser()],
+        help="工程构建配置（Kconfig/BSP/Keil 同步；本地执行，不依赖后端）",
     )
-    ps = p.add_subparsers(dest="project_sub", metavar="<sub>")
+    ps = p.add_subparsers(dest="config_sub", metavar="<sub>")
 
-    s = ps.add_parser("config", parents=[project_parser()],
+    s = ps.add_parser("generate", parents=[config_parser()],
                       help="生成/更新工程配置（Kconfig + BSP，可选 MSP/Keil 同步）")
     s.add_argument("--msp", action="store_true", default=False,
                    help="同时生成 driver_msp_config.h")
@@ -36,25 +37,32 @@ def add_parser(sub):
                    help="只同步指定 Keil 工程（可重复；默认全部）")
     s.add_argument("--stop-on-change", action="store_true", default=False,
                    help="Keil 工程有变化时返回退出码 2")
-    s.set_defaults(func=_run_local(_config))
+    s.set_defaults(func=_run_local(_generate))
 
-    s = ps.add_parser("menuconfig", parents=[project_parser()],
+    s = ps.add_parser("menuconfig", parents=[config_parser()],
                       help="打开交互式 menuconfig 并回写配置")
     s.set_defaults(func=_run_local(_menuconfig))
 
-    s = ps.add_parser("bsp", parents=[project_parser()],
+    s = ps.add_parser("bsp", parents=[config_parser()],
                       help="从链接 map/源码生成 bsp_config.h")
     s.add_argument("--map", default=None, metavar="PATH",
                    help="显式指定链接 map（默认自动发现）")
     s.set_defaults(func=_run_local(_bsp))
 
-    s = ps.add_parser("sync-keil", parents=[project_parser()],
+    s = ps.add_parser("sync-keil", parents=[config_parser()],
                       help="按已有 .config 同步 Keil 工程（默认全部 *.uvprojx）")
     s.add_argument("--uvprojx", action="append", default=None, metavar="FILE",
                    help="只同步指定 Keil 工程（可重复；默认全部）")
     s.add_argument("--stop-on-change", action="store_true", default=False,
                    help="Keil 工程有变化时返回退出码 2")
     s.set_defaults(func=_run_local(_sync_keil))
+
+    # `omni config`（不带子命令）= `omni config generate`
+    p.set_defaults(func=_run_local(_generate), config_sub="generate")
+
+
+def _opt(args, name, default=None):
+    return getattr(args, name, default)
 
 
 def _run_local(handler):
@@ -123,30 +131,30 @@ def _finish(args, payload: dict, human: str = "") -> None:
         print(human)
 
 
-def _config(args) -> int:
-    from ..project.generate import generate_project_config
+def _generate(args) -> int:
+    from ..config.generate import generate_project_config
 
     ctx = context.resolve_context(
         project_dir=args.project_dir,
         omni_root=args.omni_root,
-        target=args.target,
+        target=args.board,
     )
     err = _err_for(args)
     result = generate_project_config(
         project_dir=ctx.project_dir,
         omni_root=ctx.omni_root,
         target=ctx.target,
-        msp=args.msp,
-        no_bsp=args.no_bsp,
-        sync_keil=args.sync_keil,
-        uvprojx_paths=_uvprojx_args(ctx.project_dir, args.uvprojx),
+        msp=bool(_opt(args, "msp", False)),
+        no_bsp=bool(_opt(args, "no_bsp", False)),
+        sync_keil=bool(_opt(args, "sync_keil", False)),
+        uvprojx_paths=_uvprojx_args(ctx.project_dir, _opt(args, "uvprojx")),
         clean_config=True,
         log=_log_for(args),
         err=err,
     )
 
     exit_code = 0
-    if args.stop_on_change and result.uvprojx_changed:
+    if _opt(args, "stop_on_change", False) and result.uvprojx_changed:
         exit_code = 2
 
     payload = {
@@ -154,7 +162,7 @@ def _config(args) -> int:
         "exit_code": exit_code,
         "project_dir": ctx.project_dir,
         "omni_root": ctx.omni_root,
-        "target": ctx.target,
+        "board": ctx.target,
         "generated": result.generated,
         "uvprojx_changed": result.uvprojx_changed,
         "uvprojx_files": result.uvprojx_files,
@@ -162,7 +170,7 @@ def _config(args) -> int:
         "log": result.log_lines,
         "stderr": err.getvalue() if hasattr(err, "getvalue") else "",
     }
-    human = "Project configuration generated."
+    human = "Configuration generated."
     if exit_code == 2:
         human = "Keil project updated; reload/rebuild the project."
     _finish(args, payload, human)
@@ -170,8 +178,8 @@ def _config(args) -> int:
 
 
 def _menuconfig(args) -> int:
-    from ..project.generate import generate_after_menuconfig
-    from ..project.menuconfig import run_menuconfig
+    from ..config.generate import generate_after_menuconfig
+    from ..config.menuconfig import run_menuconfig
 
     if _json_mode(args) or getattr(args, "quiet", False):
         raise ProjectError("menuconfig 是交互式命令，不支持 --json / --quiet", code=2)
@@ -183,7 +191,7 @@ def _menuconfig(args) -> int:
     ctx = context.resolve_context(
         project_dir=args.project_dir,
         omni_root=args.omni_root,
-        target=args.target,
+        target=args.board,
     )
     rc = run_menuconfig(
         project_dir=ctx.project_dir,
@@ -204,7 +212,7 @@ def _menuconfig(args) -> int:
 def _bsp(args) -> int:
     ctx = context.resolve_context(
         project_dir=args.project_dir,
-        target=args.target,
+        target=args.board,
         require_omni=False,
     )
     map_path = _project_path(ctx.project_dir, args.map) if args.map else None
@@ -225,7 +233,7 @@ def _bsp(args) -> int:
         "success": True,
         "exit_code": 0,
         "project_dir": ctx.project_dir,
-        "target": ctx.target,
+        "board": ctx.target,
         "bsp_config": out,
         "changed": before != after,
     }
@@ -242,7 +250,7 @@ def _sync_keil(args) -> int:
     dot_config = os.path.join(ctx.project_dir, ".config")
     if not os.path.exists(dot_config):
         raise ProjectError(
-            f"未找到 {dot_config}；请先运行 omni project config 生成配置。",
+            f"未找到 {dot_config}；请先运行 omni config 生成配置。",
             code=1,
         )
 

@@ -202,7 +202,7 @@ if (-not $SkipWheel) {
         (Join-Path $CliProj "omni_cli.egg-info"),
         (Join-Path $CliProj "__pycache__"),
         (Join-Path $CliProj "commands\__pycache__"),
-        (Join-Path $CliProj "project\__pycache__")
+        (Join-Path $CliProj "config\__pycache__")
     )) {
         if (Test-Path -LiteralPath $cache) { Remove-Item -LiteralPath $cache -Recurse -Force }
     }

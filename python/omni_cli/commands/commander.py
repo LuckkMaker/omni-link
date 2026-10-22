@@ -96,6 +96,16 @@ def add_parser(sub):
                    help="非交互执行给定命令后退出（可配合 ; 分隔多条）")
     s.set_defaults(func=run_command(_shell))
 
+    s = ps.add_parser("reset", parents=[common_parser()],
+                      help="重置探针的 Commander 上下文（目标切换/重连后）")
+    s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
+    s.set_defaults(func=run_command(_reset))
+
+    s = ps.add_parser("cancel", parents=[common_parser()],
+                      help="取消该探针上正在执行的 Commander 命令")
+    s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")
+    s.set_defaults(func=run_command(_cancel))
+
 
 def _exec(c: ApiClient, args):
     if not args.command:
@@ -132,6 +142,29 @@ def _shell(c: ApiClient, args):
             break
         _exec_cmd(c, args, line)
     return 0
+
+
+def _reset(c: ApiClient, args):
+    uid = resolve_uid(c, args)
+    if not uid:
+        print("错误: 未找到已连接的探针")
+        return 1
+    data = c.post(f"/api/probes/{uid}/commander/reset")
+    finish(args, data, f"已重置 Commander 上下文 (uid={uid})")
+    return 0
+
+
+def _cancel(c: ApiClient, args):
+    uid = resolve_uid(c, args)
+    if not uid:
+        print("错误: 未找到已连接的探针")
+        return 1
+    data = c.post(f"/api/probes/{uid}/commander/cancel")
+    if args.json_:
+        finish(args, data, "")
+        return 0
+    print("已发送取消请求" if data.get("success") else "取消失败（可能没有正在执行的命令）")
+    return 0 if data.get("success") else 1
 
 
 def _should_exit(line: str) -> bool:

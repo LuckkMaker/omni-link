@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional, TextIO
 
-from .context import ProjectError
+from ..context import ProjectError
 
 
 @dataclass

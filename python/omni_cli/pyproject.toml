@@ -15,8 +15,8 @@ dependencies = ["kconfiglib>=14.1.0"]
 omni = "omni_cli.cli:main"
 
 [tool.setuptools]
-packages = ["omni_cli", "omni_cli.commands", "omni_cli.project"]
-package-dir = { "omni_cli" = ".", "omni_cli.commands" = "commands", "omni_cli.project" = "project" }
+packages = ["omni_cli", "omni_cli.commands", "omni_cli.config"]
+package-dir = { "omni_cli" = ".", "omni_cli.commands" = "commands", "omni_cli.config" = "config" }
 include-package-data = false
 
 [tool.setuptools.dynamic]
