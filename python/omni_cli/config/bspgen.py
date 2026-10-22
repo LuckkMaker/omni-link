@@ -156,11 +156,10 @@ def extract_device_names_from_sources(project_dir: str, target: str) -> list[str
     return sorted(names)
 
 
-def generate_header(device_names, guard: str, note: Optional[str] = None) -> str:
-    if note:
-        comment = f"/* Device instances ({note}). */"
-    else:
-        comment = "/* Device instances from the linker `omni_device` section. */"
+def generate_header(device_names, guard: str) -> str:
+    # 注释保持稳定：不写入「来自 linker map / 源码扫描」这类会随构建状态变化的信息，
+    # 否则同一工程在不同构建阶段会生成不同字节（configure 期 map 还不存在）。
+    comment = "/* Device instances (auto-generated from the omni_device section). */"
 
     lines = [
         "/**",
@@ -248,7 +247,7 @@ def run_bspgen(
 
     guard = target.upper() + "_BSP_CONFIG_H"
     out_file = os.path.join(config_dir, "bsp_config.h")
-    new_header = generate_header(device_names, guard, note)
+    new_header = generate_header(device_names, guard)
 
     header_changed = True
     if os.path.exists(out_file):
@@ -259,7 +258,7 @@ def run_bspgen(
         handle.write(new_header)
 
     if header_changed:
-        if not note:
+        if not device_names:
             log(
                 "Warning: omni_bspgen: no linker map or source devices found; "
                 f"{out_file} written empty."
