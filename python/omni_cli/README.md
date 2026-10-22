@@ -23,6 +23,13 @@ omni (本包)
 
 ## 版本记录
 
+### 0.10.0（2026-10-22）
+
+- 新增 `omni modules`：`list` / `check` / `generate`（本地命令，不依赖后端）：
+  - 扫描 `modules/<dir>/omni/module.yml` 与 `omni/modules/<name>/module.yml`
+    （后者对应 Zephyr 的 `cmake-ext`，用于上游镜像仓库）；
+  - `generate` 写出 `omni/cmake/omni_modules.cmake` 与 `omni/Kconfig.modules`，
+    `--check` 校验生成物是否漂移（不一致返回 2）。
 ### 0.9.0（2026-10-22）
 
 - 新增 `omni boards`：`list` / `show` / `check` / `sync`（本地命令，不依赖后端）：
@@ -419,6 +426,28 @@ omni boards sync  --project-dir examples\basic\template -b stm32f407ig
 
 `boards` 与 `target` 的分工：`boards` 是**构建目标**（`OMNI_BOARD` / `$TargetType$`），
 `target` 是**调试/烧录的芯片型号**；`boards show` 会给出对应的 `omni target info <device>`。
+### `modules` — 模块注册表（本地命令）
+
+不经过后端；模块声明来自 `module.yml`，`generate` 产出 CMake 注册表与 Kconfig 入口。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `list`（默认） | 列出模块及其 glue 位置、CMake 目录、Kconfig、enable 符号 |
+| `check` | 检查声明是否自洽（目录/文件是否存在、是否声明 enable） |
+| `generate` | 生成 `omni/cmake/omni_modules.cmake` 与 `omni/Kconfig.modules`；`--check` 只校验 |
+
+```powershell
+cd D:\workspace\embedded\omni-emb
+
+omni modules list
+omni modules check
+omni modules generate
+omni modules generate --check   # CI：注册表与 module.yml 不一致时返回 2
+```
+
+> 模块的构建胶水有两个合法位置：`modules/<dir>/omni/`（仓库是自己的，如 hal_stm32）
+> 与 `omni/modules/<name>/`（上游镜像，用 `module: ../../../modules/<dir>` 指回源码）。
+> `enable` 是 Kconfig 符号，为 y 时模块参与 CMake 构建，目标名 `omni_module_<name>`。
 ### `probe` — 探针管理
 
 | 子命令 | 说明 |

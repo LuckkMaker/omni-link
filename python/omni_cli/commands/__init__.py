@@ -12,6 +12,7 @@ from . import device
 from . import file
 from . import flash
 from . import monitor
+from . import modules
 from . import pack
 from . import probe
 from . import rtt
@@ -29,6 +30,7 @@ _MODULES = (
     file,
     flash,
     monitor,
+    modules,
     pack,
     probe,
     rtt,
