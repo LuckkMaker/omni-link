@@ -8,19 +8,29 @@ OMNI CLI 有两类命令：
 
 - **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `monitor` / `device` / `pack` / `rtt` / `system` / `file` / `tool`。
   它们是 OMNI Link 后端的瘦客户端，通过 HTTP 复用 REST 接口，不复制后端业务逻辑。
+  （例外：`file checksum` 纯本地计算，不需要后端。）
 - **工程配置类**：`omni config`。本地执行，不经过后端，实现在 `omni_cli.config` 内；
   只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，不调用 `omni/scripts` 下的旧脚本。
 
 ```
 omni (本包)
   ├── HTTP ──▶ OMNI Link Python 后端 (server.py) ──▶ 调试探针 ──▶ 目标芯片
-  └── 本地 ──▶ omni_cli.config ──▶ 工程配置/头文件/Keil 工程
+  ├── 本地 ──▶ omni_cli.config ──▶ 工程配置/头文件/Keil 工程
+  └── 本地 ──▶ file checksum ──▶ 原始文件字节校验和
 ```
 
-因此：**调试/烧录命令需要后端；`omni config` 不需要后端，也不需要探针。**
+因此：**调试/烧录命令需要后端；`omni config` 与 `omni file checksum` 不需要后端，也不需要探针。**
 
 ## 版本记录
 
+### 0.9.0（2026-10-22）
+
+- 新增 `omni boards`：`list` / `show` / `check` / `sync`（本地命令，不依赖后端）：
+  - 板事实来自 `omni/boards/<board>/board.yml`；
+  - `check` 比对工程 `boards/<board>/startup/*` 与 HAL 模块里的原始文件；
+  - `sync` 只补缺失文件，默认不覆盖已有文件，可生成 HAL 配置头模板。
+- 新增依赖 `PyYAML>=6.0`。
+- README：修正 `project` 段标题为 `config`。
 ### 0.8.0（2026-10-22）
 
 - 新增 `omni file`：
@@ -333,7 +343,7 @@ omni system info
 omni system info --json
 ```
 
-### `project` — 工程配置（本地命令）
+### `config` — 工程配置（本地命令）
 
 不经过后端，也不需要探针；直接在本地读取 omni 框架的 `Kconfig` / `soc` / `boards`
 并生成工程配置。实现在 `omni_cli.config`，不调用 omni-emb 的旧脚本。
@@ -378,6 +388,35 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 启动器只负责定位 CLI、校验最低版本（0.7.0）和转发参数；可用 `OMNI_CLI` 指定
 `omni.exe` 路径。
 
+### `boards` — 板定义（本地命令）
+
+不经过后端；读取 `omni/boards/<board>/board.yml`。板目录只保存板事实，
+工程 `boards/<board>/` 仍是独立的受管副本（tracked、可修改）。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `list`（默认） | 列出框架里的板（board / device / cpu / fpu / hal / series） |
+| `show BOARD` | 显示单个板的完整事实与上游文件位置 |
+| `check` | 比对工程 `boards/<board>/startup/*` 与 HAL 模块里的原始文件 |
+| `sync` | 为工程补齐缺失的板级文件；默认不覆盖已有文件 |
+
+```powershell
+cd D:\workspace\embedded\omni-emb
+
+omni boards list
+omni boards show stm32f407ig
+omni boards check --project-dir examples\basic\template -b stm32f407ig
+omni boards sync  --project-dir examples\basic\template -b stm32f407ig --dry-run
+omni boards sync  --project-dir examples\basic\template -b stm32f407ig
+```
+
+> `check` 报告 `identical / modified / missing / project-only`，**始终返回 0**（先观察漂移）。
+> `sync` 只补缺失文件；加 `--force` 才会覆盖，`--dry-run` 只打印动作。
+> 新工程脚手架会生成 `board.clayer.yml`、`board.conf`、`bsp.c`，并从 HAL 模块复制
+> 启动文件、链接脚本、system 源文件与 HAL 配置头模板。
+
+`boards` 与 `target` 的分工：`boards` 是**构建目标**（`OMNI_BOARD` / `$TargetType$`），
+`target` 是**调试/烧录的芯片型号**；`boards show` 会给出对应的 `omni target info <device>`。
 ### `probe` — 探针管理
 
 | 子命令 | 说明 |
@@ -543,7 +582,7 @@ omni flash reset --no-run
 | 子命令 | 说明 |
 | --- | --- |
 | `info <file>` | 解析 bin/hex/elf 的格式、大小、entry 与段信息（`--base-address` 用于 bin） |
-| `checksum <file>` | 计算原始文件字节校验和：`modbus-crc16` / `crc16-ccitt` / `crc32` / `add8` / `xor8` / `add16`；`--start` / `--end` 指定字节范围 |
+| `checksum <file>` | **本地执行**（不需要后端）：计算原始文件字节校验和：`modbus-crc16` / `crc16-ccitt` / `crc32` / `add8` / `xor8` / `add16`；`--start` / `--end` 指定字节范围 |
 
 ```powershell
 omni file info .\app.hex
@@ -554,6 +593,8 @@ omni file checksum .\app.bin --algorithm modbus-crc16 --start 0 --end 1024
 
 > ℹ️ `checksum` 计算的是**原始文件字节**，与 GUI 文件校验页一致；不会解析 hex/elf 的地址段。
 > `--end` 为不含端点的字节偏移。
+> `checksum` 不建后端客户端，也没有 `--managed` / `--backend-port` / `--timeout` 这些后端连接选项；
+> `info` 仍需后端（hex/elf 解析在后端完成）。
 
 ### `tool` — 离线工具
 

@@ -4,6 +4,7 @@
 """
 
 from . import backend
+from . import boards
 from . import commander
 from . import config
 from . import debug
@@ -20,6 +21,7 @@ from . import tool
 
 _MODULES = (
     backend,
+    boards,
     commander,
     config,
     debug,

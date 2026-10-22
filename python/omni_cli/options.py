@@ -22,6 +22,21 @@ def common_parser() -> argparse.ArgumentParser:
     return p
 
 
+def local_parser() -> argparse.ArgumentParser:
+    """离线命令的共用选项：只有输出控制，不提供后端连接参数。
+
+    离线命令不建客户端，暴露 ``--managed`` / ``--backend-port`` / ``--timeout``
+    只会让人误以为它们有效，故单独一套。
+    """
+
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--json", dest="json_", action="store_true", default=False,
+                   help="输出 JSON（供脚本/CI 消费）")
+    p.add_argument("--quiet", action="store_true", default=False,
+                   help="仅设置退出码，不输出任何内容")
+    return p
+
+
 def config_parser() -> argparse.ArgumentParser:
     """工程构建配置命令的共用选项（本地执行，不涉及后端）。"""
 
