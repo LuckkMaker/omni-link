@@ -107,6 +107,7 @@ def _build(args) -> int:
         jobs=args.jobs,
         cmake_args=args.cmake_args,
         verbose=args.verbose,
+        stream_build=not (quiet or getattr(args, "json_", False)),
         log=log,
     )
     payload = {"board": ctx.target, **result.as_dict()}

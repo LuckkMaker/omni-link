@@ -277,19 +277,41 @@ def _require_tool(name: str, hint: str) -> str:
     return path
 
 
-def _run(cmd: list, log: Callable[[str], None], verbose: bool) -> tuple:
+def _run(cmd: list, log: Callable[[str], None], verbose: bool,
+         stream: bool = False) -> tuple:
+    """执行命令。
+
+    stream=True 时逐行实时转发输出（编译进度可见），同时仍完整捕获，
+    便于失败时报错与 --json 场景使用。
+    """
+
     log("$ " + " ".join(cmd))
+    chunks = []
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        # 合并 stderr 到 stdout，保证输出顺序与进度条可用
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
     except OSError as exc:
         raise ProjectError(f"执行失败: {cmd[0]}: {exc}", code=1) from exc
 
-    output = (proc.stdout or "") + (proc.stderr or "")
-    if verbose and output:
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        chunks.append(line)
+        if stream:
+            log(line.rstrip("\r\n"))
+
+    returncode = proc.wait()
+    output = "".join(chunks)
+    if verbose and not stream and output:
         log(output.rstrip())
-    return proc.returncode, output
+    return returncode, output
 
 
 def run_build(
@@ -306,6 +328,7 @@ def run_build(
     jobs: Optional[int] = None,
     cmake_args: Optional[list] = None,
     verbose: bool = False,
+    stream_build: bool = True,
     log: Optional[Callable[[str], None]] = None,
 ) -> BuildResult:
     log = log or (lambda message: None)
@@ -376,7 +399,7 @@ def run_build(
             *(cmake_args or []),
             *_cli_configure_args(),
         ]
-        rc, output = _run(configure_cmd, log, verbose)
+        rc, output = _run(configure_cmd, log, verbose, stream=verbose)
         result.log.append(output)
         if rc != 0:
             result.exit_code = rc
@@ -394,7 +417,7 @@ def run_build(
         build_cmd += ["--target", cmake_target]
     if jobs:
         build_cmd += ["--parallel", str(jobs)]
-    rc, output = _run(build_cmd, log, verbose)
+    rc, output = _run(build_cmd, log, verbose, stream=stream_build)
     result.log.append(output)
     result.exit_code = rc
     if rc != 0:
