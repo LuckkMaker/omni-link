@@ -23,6 +23,11 @@ omni (本包)
 
 ## 版本记录
 
+### 0.15.0（2026-10-22）
+
+- `omni build` 支持 GCC 产物：`omni.elf`（GCC/CLANG）与 `omni.axf`（AC5/AC6）并存识别；
+  GCC 侧没有 armlink 的 `Program Size`，改从 `omni.size.txt`（`arm-none-eabi-size`）
+  解析 `gnu_size`（text/data/bss）并在输出与 `--json` 里给出。
 ### 0.14.0（2026-10-22）
 
 - `omni config bsp` 生成的 `bsp_config.h` 内容稳定化：注释不再写入「来自 linker map /

@@ -32,9 +32,20 @@ TOOLCHAIN_FILES = {
     "ac5": "armcc5.cmake",
 }
 
-ARTIFACTS = ("omni.axf", "omni.hex", "omni.bin", "omni.axf.map", "omni.size.txt")
+ARTIFACTS = (
+    "omni.axf",
+    "omni.elf",
+    "omni.hex",
+    "omni.bin",
+    "omni.axf.map",
+    "omni.size.txt",
+)
 SIZE_RE = re.compile(
     r"Program Size:\s*Code=(\d+)\s+RO-data=(\d+)\s+RW-data=(\d+)\s+ZI-data=(\d+)"
+)
+#: GNU size 默认输出：text data bss dec hex filename
+GNU_SIZE_RE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+[0-9a-fA-F]+\s+\S+", re.MULTILINE
 )
 VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
@@ -55,6 +66,7 @@ class BuildResult:
     exit_code: int = 0
     artifacts: dict = field(default_factory=dict)
     size: Optional[dict] = None
+    gnu_size: Optional[dict] = None
     log: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -73,6 +85,7 @@ class BuildResult:
             "built": self.built,
             "artifacts": self.artifacts,
             "size": self.size,
+            "gnu_size": self.gnu_size,
             "log": self.log,
         }
 
@@ -169,6 +182,23 @@ def collect_artifacts(build_dir: str) -> dict:
         if os.path.isfile(path):
             found[name] = path
     return found
+
+
+def parse_gnu_size(size_path: str) -> Optional[dict]:
+    """解析 ``arm-none-eabi-size`` 的输出（GCC 侧没有 armlink 的 Program Size）。"""
+
+    if not os.path.isfile(size_path):
+        return None
+    try:
+        with open(size_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = GNU_SIZE_RE.search(text)
+    if not match:
+        return None
+    text_size, data, bss, dec = (int(value) for value in match.groups())
+    return {"text": text_size, "data": data, "bss": bss, "dec": dec}
 
 
 #: ``omni build -t`` 的语义分类（与 west build -t 对应）。
@@ -373,5 +403,6 @@ def run_build(
     result.built = True
     result.artifacts = collect_artifacts(build_dir)
     result.size = parse_size(os.path.join(build_dir, "omni.axf.map"))
+    result.gnu_size = parse_gnu_size(os.path.join(build_dir, "omni.size.txt"))
     result.success = True
     return result

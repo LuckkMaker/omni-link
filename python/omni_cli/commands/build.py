@@ -136,6 +136,11 @@ def _build(args) -> int:
                 "Program Size: Code={code} RO-data={ro_data} RW-data={rw_data} "
                 "ZI-data={zi_data}".format(**size)
             )
+        elif result.gnu_size:
+            gnu = result.gnu_size
+            print(
+                "Program Size: text={text} data={data} bss={bss}".format(**gnu)
+            )
         for name, path in result.artifacts.items():
             print(f"  {name:14s} {path}")
         if args.configure_only:
