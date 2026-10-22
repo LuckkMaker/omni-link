@@ -82,6 +82,8 @@ def find_map(
 
     candidates = []
     for pattern in (
+        # 板级构建目录优先：避免抓到别的板/历史工程的陈旧 map，把不属于本板的设备写进头文件。
+        os.path.join(project_dir, "build", target or "", "**", "*.map"),
         os.path.join(project_dir, "Listings", "**", "*.map"),
         os.path.join(project_dir, "Objects", "**", "*.map"),
         os.path.join(project_dir, "out", "**", "*.map"),

@@ -23,6 +23,10 @@ omni (本包)
 
 ## 版本记录
 
+### 0.16.0（2026-10-22）
+
+- `omni config bsp` 的 map 自动发现优先看 `build/<board>/**/*.map`：此前会抓到 `Listings/`、`Objects/`、`out/` 下的陈旧/其它板的 map，把不属于本板的设备实例写进 `bsp_config.h`（例如 f103cb 里多出 `_dev_gpioe`）。
+  设备来源的正则本身没问题，`GPIO_DEVICE_DEFINE(gpiob, GPIOB)` 能正确解析成 `_dev_gpiob`。
 ### 0.15.0（2026-10-22）
 
 - `omni build` 支持 GCC 产物：`omni.elf`（GCC/CLANG）与 `omni.axf`（AC5/AC6）并存识别；
