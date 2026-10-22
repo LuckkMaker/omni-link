@@ -23,6 +23,14 @@ omni (本包)
 
 ## 版本记录
 
+### 0.13.0（2026-10-22）
+
+- `omni build -t` 目标体系（对齐 `west build -t`）：
+  - `-t size` → 构建 `omni-size-<project>` 目标；
+  - `-t clean` → 等价 `--clean`；
+  - `-t flash` / `-t run` → 构建完成后调用 `omni flash program <omni.axf>`（`--runner-arg` 透传参数）；
+  - 其它值 → 原样透传给 `cmake --build --target`。
+- runner 与 CMake 配置统一使用「当前 CLI」（PATH 上版本更低时自动退回 `python -m omni_cli`）。
 ### 0.12.0（2026-10-22）
 
 - `omni build` 对齐 west 的行为：
@@ -424,8 +432,9 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 | `--cmake` | 强制重新执行 CMake 配置（默认已有构建目录时跳过） |
 | `--clean` | 先删除该上下文的构建目录 |
 | `--configure-only` | 只配置，不编译 |
-| `-t/--target T` | 只构建指定目标（如 `omni-size-template`） |
+| `-t/--target T` | `size` / `clean` / `flash` / `run` / 或任意 cmake 目标 |
 | `-o/--cmake-arg ARG` | 额外 cmake 参数（写成 `--cmake-arg=-DFOO=1`，可重复） |
+| `--runner-arg ARG` | 传给 runner（`omni flash program`）的参数，可重复 |
 | `-j/--jobs N` | 并行任务数 |
 | `-v/--verbose` | 打印 cmake 完整输出 |
 | `--json` / `--quiet` | 供脚本与 CI 消费 |

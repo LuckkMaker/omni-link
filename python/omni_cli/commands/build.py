@@ -21,6 +21,7 @@ from ..builder.runner import (
     DEFAULT_BUILD_TYPE,
     DEFAULT_COMPILER,
     run_build,
+    runner_argv,
 )
 from ..context import ProjectError
 from ..options import config_parser
@@ -43,7 +44,9 @@ def add_parser(sub):
     p.add_argument("--configure-only", action="store_true", default=False,
                    help="只做 CMake 配置，不编译")
     p.add_argument("-t", "--target", default=None, metavar="TARGET",
-                   help="只构建指定目标（如 omni-size-template）")
+                   help="size | clean | flash | run | <cmake target>；flash/run 构建后调用 runner")
+    p.add_argument("--runner-arg", dest="runner_args", action="append", default=None,
+                   metavar="ARG", help="额外传给 runner（omni flash program）的参数（可重复）")
     p.add_argument("-o", "--cmake-arg", dest="cmake_args", action="append", default=None,
                    metavar="ARG", help="额外传给 cmake 配置的参数（可重复）")
     p.add_argument("-j", "--jobs", type=int, default=None, metavar="N",
@@ -108,13 +111,12 @@ def _build(args) -> int:
     )
     payload = {"board": ctx.target, **result.as_dict()}
 
-    if getattr(args, "quiet", False):
-        return result.exit_code
-    if getattr(args, "json_", False):
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return result.exit_code
-
     if not result.success:
+        if getattr(args, "quiet", False):
+            return result.exit_code
+        if getattr(args, "json_", False):
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return result.exit_code
         # 失败时把 cmake 输出打到 stderr，方便定位。
         tail = "\n".join(part for part in result.log if part)
         if tail:
@@ -126,15 +128,58 @@ def _build(args) -> int:
         )
         return result.exit_code
 
-    print(f"构建目录: {result.build_dir}")
-    if result.size:
-        size = result.size
-        print(
-            "Program Size: Code={code} RO-data={ro_data} RW-data={rw_data} "
-            "ZI-data={zi_data}".format(**size)
-        )
-    for name, path in result.artifacts.items():
-        print(f"  {name:14s} {path}")
-    if args.configure_only:
-        print("（仅配置，未编译）")
+    if not getattr(args, "quiet", False) and not getattr(args, "json_", False):
+        print(f"构建目录: {result.build_dir}")
+        if result.size:
+            size = result.size
+            print(
+                "Program Size: Code={code} RO-data={ro_data} RW-data={rw_data} "
+                "ZI-data={zi_data}".format(**size)
+            )
+        for name, path in result.artifacts.items():
+            print(f"  {name:14s} {path}")
+        if args.configure_only:
+            print("（仅配置，未编译）")
+
+    # runner 目标（flash / run）：构建完成后调用 omni flash program。
+    if result.runner:
+        elf = result.artifacts.get("omni.axf")
+        if not elf:
+            raise ProjectError(
+                f"目标 '{result.runner}' 需要 omni.axf，但构建产物里没有", code=1
+            )
+        argv = runner_argv(result.runner, elf, args.runner_args)
+        payload["runner_command"] = argv
+        if not getattr(args, "quiet", False) and not getattr(args, "json_", False):
+            print(f"runner: {' '.join(argv)}")
+        rc = _run_runner(argv, quiet=getattr(args, "quiet", False) or getattr(args, "json_", False),
+                         verbose=args.verbose, log=log)
+        payload["runner_exit_code"] = rc
+        payload["success"] = rc == 0
+        payload["exit_code"] = rc
+        if getattr(args, "json_", False):
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return rc
+
+    if getattr(args, "json_", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+def _run_runner(argv: list, *, quiet: bool, verbose: bool, log) -> int:
+    """执行 runner 命令（omni flash program ...），输出透传或按需捕获。"""
+
+    import subprocess
+
+    if not quiet:
+        log(f"$ {' '.join(argv)}")
+    try:
+        if quiet:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+        else:
+            proc = subprocess.run(argv)
+    except OSError as exc:
+        raise ProjectError(f"runner 执行失败: {argv[0]}: {exc}", code=1) from exc
+    return proc.returncode

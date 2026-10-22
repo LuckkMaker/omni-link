@@ -48,6 +48,7 @@ class BuildResult:
     build_dir: str
     toolchain: str
     target: Optional[str] = None
+    runner: Optional[str] = None
     configured: bool = False
     built: bool = False
     success: bool = False
@@ -67,6 +68,7 @@ class BuildResult:
             "build_dir": self.build_dir,
             "toolchain": self.toolchain,
             "target": self.target,
+            "runner": self.runner,
             "configured": self.configured,
             "built": self.built,
             "artifacts": self.artifacts,
@@ -169,25 +171,71 @@ def collect_artifacts(build_dir: str) -> dict:
     return found
 
 
+#: ``omni build -t`` 的语义分类（与 west build -t 对应）。
+RUNNER_ACTIONS = ("flash", "run")
+TARGET_CLEAN = "clean"
+TARGET_SIZE = "size"
+
+
+def target_kind(target: Optional[str], project_dir: str) -> tuple:
+    """把 ``-t`` 的值解析成 (kind, cmake_target)。
+
+    kind：
+      ``none``   没有指定目标
+      ``clean``  等价 --clean
+      ``cmake``  直接透传给 ``cmake --build --target``（含 ``size`` 的展开）
+      ``runner`` 先构建，再调用 runner（flash / run）
+    """
+
+    if not target:
+        return "none", ""
+    if target == TARGET_CLEAN:
+        return "clean", ""
+    if target == TARGET_SIZE:
+        name = os.path.basename(os.path.abspath(project_dir))
+        return "cmake", f"omni-size-{name}"
+    if target in RUNNER_ACTIONS:
+        return "runner", ""
+    return "cmake", target
+
+
+def runner_argv(action: str, elf_path: str, extra_args: Optional[list] = None) -> list:
+    """构造 runner 命令：flash / run 都走 ``omni flash program <elf>``。"""
+
+    return _cli_base() + ["flash", "program", elf_path, *(extra_args or [])]
+
+
+def _usable_omni(exe: str) -> bool:
+    """PATH 上的 omni 版本是否不低于当前 CLI。"""
+
+    try:
+        out = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _version_tuple(out.stdout) >= _version_tuple(__version__)
+
+
+def _cli_base() -> list:
+    """用「当前这个 CLI」执行子命令：可执行文件优先，否则 python -m omni_cli。"""
+
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    exe = shutil.which("omni")
+    if exe and _usable_omni(exe):
+        return [exe]
+    return [sys.executable, "-m", "omni_cli"]
+
+
 def _cli_configure_args() -> list:
     """让 CMake 用「当前这个 CLI」生成配置，避免 PATH 上的旧版本。"""
 
-    if getattr(sys, "frozen", False):
-        return [f"-DOMNI_CLI={sys.executable}"]
-
-    exe = shutil.which("omni")
-    if exe:
-        try:
-            out = subprocess.run(
-                [exe, "--version"], capture_output=True, text=True, timeout=20
-            )
-            if _version_tuple(out.stdout) >= _version_tuple(__version__):
-                return [f"-DOMNI_CLI={exe}"]
-        except (OSError, subprocess.SubprocessError):
-            pass
-
+    base = _cli_base()
+    if len(base) == 1:
+        return [f"-DOMNI_CLI={base[0]}"]
     return [
-        f"-DOMNI_CLI_PYTHON={sys.executable}",
+        f"-DOMNI_CLI_PYTHON={base[0]}",
         "-DOMNI_CLI_MODULE=omni_cli",
     ]
 
@@ -242,6 +290,9 @@ def run_build(
     repo_root = os.path.dirname(omni_root)
     toolchain = toolchain_file(omni_root, compiler)
     build_dir = build_directory(project_dir, board, compiler, build_type)
+    kind, cmake_target = target_kind(target, project_dir)
+    if kind == TARGET_CLEAN:
+        clean = True
 
     result = BuildResult(
         project_dir=project_dir,
@@ -251,6 +302,7 @@ def run_build(
         build_dir=build_dir,
         toolchain=toolchain,
         target=target,
+        runner=target if kind == "runner" else None,
     )
 
     if clean and os.path.isdir(build_dir):
@@ -308,8 +360,8 @@ def run_build(
         return result
 
     build_cmd = [cmake, "--build", build_dir]
-    if target:
-        build_cmd += ["--target", target]
+    if cmake_target:
+        build_cmd += ["--target", cmake_target]
     if jobs:
         build_cmd += ["--parallel", str(jobs)]
     rc, output = _run(build_cmd, log, verbose)

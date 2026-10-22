@@ -35,6 +35,8 @@ from omni_cli.builder.runner import (
     parse_size,
     read_cache_context,
     run_build,
+    runner_argv,
+    target_kind,
     toolchain_file,
 )
 
@@ -63,6 +65,25 @@ def workspace() -> Path | None:
         if (candidate / "omni" / "cmake").is_dir():
             return candidate
     return None
+
+
+def test_target_kind() -> None:
+    project = os.path.join("D:\\", "proj", "template")
+    check("target.none", target_kind(None, project) == ("none", ""))
+    check("target.clean", target_kind("clean", project) == ("clean", ""))
+    check("target.size", target_kind("size", project) == ("cmake", "omni-size-template"),
+          str(target_kind("size", project)))
+    check("target.flash", target_kind("flash", project) == ("runner", ""))
+    check("target.run", target_kind("run", project) == ("runner", ""))
+    check("target.raw", target_kind("omni-size-template", project) ==
+          ("cmake", "omni-size-template"))
+
+
+def test_runner_argv() -> None:
+    argv = runner_argv("flash", "/x/omni.axf", ["--no-verify"])
+    check("runner.argv", argv[-4:] == ["flash", "program", "/x/omni.axf", "--no-verify"],
+          str(argv))
+    check("runner.base", bool(argv[0]), str(argv))
 
 
 def test_parser() -> None:
@@ -192,6 +213,8 @@ def test_e2e() -> None:
 
 def main() -> int:
     test_parser()
+    test_target_kind()
+    test_runner_argv()
     test_cache_context()
     test_build_directory()
     test_toolchain()
