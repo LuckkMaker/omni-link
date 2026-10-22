@@ -213,7 +213,9 @@ def run_bspgen(
     log: Callable[[str], None] = print,
 ) -> str:
     project_dir = os.path.abspath(project_dir)
-    map_file = find_map(project_dir, target, map_path, log=log)
+    # 设备实例只来自源码扫描：链接 map 可能缺失、陈旧或属于别的板，会让生成结果
+    # 随构建状态变化（bsp_config.h 反复被改写）。
+    map_file = None
     device_names: list[str] = []
     note = None
 
