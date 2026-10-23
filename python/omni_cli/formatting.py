@@ -7,6 +7,117 @@ import json
 import os
 import sys
 
+# ---------------------------------------------------------------- 颜色
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+GRAY = "\033[90m"
+
+_VT_ENABLED: bool | None = None
+
+
+def enable_vt(stream=None) -> bool:
+    """Windows 控制台打开 ANSI/VT 处理；成功（或非 Windows）返回 True。
+
+    Python 往 Windows 控制台写的是 WriteConsoleW，控制台默认不解释 ``\\033[``；
+    需要显式置 ENABLE_VIRTUAL_TERMINAL_PROCESSING。拿不到句柄（重定向到文件/
+    管道）时返回 False，调用方据此关闭颜色。
+    """
+
+    global _VT_ENABLED
+    if os.name != "nt":
+        return True
+    if _VT_ENABLED is not None:
+        return _VT_ENABLED
+
+    _VT_ENABLED = False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+        handle_id = -12 if stream is sys.stderr else -11  # STD_ERROR / STD_OUTPUT
+        handle = kernel32.GetStdHandle(handle_id)
+        mode = wintypes.DWORD()
+        if not handle or not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        enable_virtual_terminal_processing = 0x0004
+        if kernel32.SetConsoleMode(handle, mode.value | enable_virtual_terminal_processing):
+            _VT_ENABLED = True
+    except Exception:  # 无控制台 / API 不可用：静默降级
+        _VT_ENABLED = False
+    return _VT_ENABLED
+
+
+def color_enabled(mode: str = "auto", stream=None) -> bool:
+    """按 ``--color`` / 环境变量 / 终端类型决定是否输出 ANSI。
+
+    优先级：``always``/``never`` > ``NO_COLOR`` > ``OMNI_CLI_COLOR`` > auto。
+    """
+
+    stream = stream or sys.stdout
+    mode = (mode or "auto").lower()
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+
+    if os.environ.get("NO_COLOR"):
+        return False
+
+    env = (os.environ.get("OMNI_CLI_COLOR") or "").strip().lower()
+    if env in ("always", "1", "true", "yes"):
+        return True
+    if env in ("never", "0", "false", "no"):
+        return False
+
+    try:
+        if not stream.isatty():
+            return False
+    except (AttributeError, OSError, ValueError):
+        return False
+    return enable_vt(stream)
+
+
+class Palette:
+    """ANSI 着色器；禁用时所有方法原样返回文本。"""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def __call__(self, text, *codes) -> str:
+        if not self.enabled or not codes:
+            return text
+        return "".join(codes) + text + RESET
+
+    def ok(self, text) -> str:
+        return self(text, GREEN)
+
+    def err(self, text) -> str:
+        return self(text, RED)
+
+    def warn(self, text) -> str:
+        return self(text, YELLOW)
+
+    def dim(self, text) -> str:
+        return self(text, DIM)
+
+    def cyan(self, text) -> str:
+        return self(text, CYAN)
+
+    def bold(self, text) -> str:
+        return self(text, BOLD)
+
 
 def configure_stdio() -> None:
     """把 CLI 的 stdout/stderr 固定为 UTF-8。

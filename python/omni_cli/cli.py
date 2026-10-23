@@ -10,7 +10,7 @@ import sys
 
 from . import __version__, client, commands
 from .commands import commander
-from .formatting import configure_stdio, ctx_error
+from .formatting import configure_stdio, ctx_error, enable_vt
 
 PROG = "omni"
 
@@ -43,6 +43,8 @@ def main(argv=None) -> int:
     # 管道/重定向下必须显式 UTF-8，否则中文按系统 locale（中文 Windows=GBK）写出，
     # 调用方按 UTF-8 解码就成了 U+FFFD（实机报告 P1-4）。
     configure_stdio()
+    # Windows 控制台默认不解释 ANSI；先打开 VT，彩色输出才生效（失败则静默）。
+    enable_vt()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     # commander exec 用 argparse.REMAINDER 收集命令参数，尾部全局选项会被吞成命令参数；

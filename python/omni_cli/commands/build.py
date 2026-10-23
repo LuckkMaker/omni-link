@@ -12,18 +12,23 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from .. import context
+from ..builder.report import BuildReporter
 from ..builder.runner import (
     BUILD_TYPES,
     COMPILERS,
     DEFAULT_BUILD_TYPE,
     DEFAULT_COMPILER,
+    _cli_base,
+    build_directory,
     run_build,
     runner_argv,
 )
 from ..context import ProjectError
+from ..formatting import Palette, color_enabled
 from ..options import config_parser
 
 
@@ -52,7 +57,9 @@ def add_parser(sub):
     p.add_argument("-j", "--jobs", type=int, default=None, metavar="N",
                    help="并行编译任务数（默认交给 Ninja）")
     p.add_argument("-v", "--verbose", action="store_true", default=False,
-                   help="打印 cmake 的完整输出")
+                   help="打印完整命令（默认只显示缩写）并保留 cmake 全部输出")
+    p.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                   help="彩色输出（默认 auto：TTY 下开启；NO_COLOR 可关闭）")
     p.set_defaults(func=_run(_build))
 
 
@@ -92,7 +99,25 @@ def _build(args) -> int:
         target=args.board,
     )
     quiet = getattr(args, "quiet", False) or getattr(args, "json_", False)
-    log = (lambda message: None) if quiet else (lambda message: print(message))
+    build_dir = build_directory(ctx.project_dir, ctx.target or "", args.compiler,
+                                args.build_type)
+    reporter = BuildReporter(
+        Palette(color_enabled(getattr(args, "color", "auto"))),
+        quiet=quiet,
+        verbose=args.verbose,
+        project_dir=ctx.project_dir,
+        build_dir=build_dir,
+        root=ctx.repo_root,
+    )
+    reporter.header(
+        os.path.basename(os.path.normpath(ctx.project_dir)),
+        ctx.target or "?",
+        args.compiler,
+        args.build_type,
+    )
+    if args.verbose and not quiet:
+        reporter.info(f"omni root: {ctx.omni_root}")
+        reporter.info("omni CLI : " + " ".join(_cli_base()))
 
     result = run_build(
         project_dir=ctx.project_dir,
@@ -107,8 +132,10 @@ def _build(args) -> int:
         jobs=args.jobs,
         cmake_args=args.cmake_args,
         verbose=args.verbose,
-        stream_build=not (quiet or getattr(args, "json_", False)),
-        log=log,
+        stream_build=not quiet,
+        stream=None if quiet else reporter.line,
+        on_start=None if quiet else reporter.phase,
+        log=reporter.info,
     )
     payload = {"board": ctx.target, **result.as_dict()}
 
@@ -118,34 +145,12 @@ def _build(args) -> int:
         if getattr(args, "json_", False):
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return result.exit_code
-        # 失败时把 cmake 输出打到 stderr，方便定位。
-        tail = "\n".join(part for part in result.log if part)
-        if tail:
-            print(tail.rstrip(), file=sys.stderr)
-        print(
-            f"构建失败（exit {result.exit_code}）: {ctx.project_dir} "
-            f"[{ctx.target} / {args.compiler} / {args.build_type}]",
-            file=sys.stderr,
-        )
+        # 日志已经逐行实时打印过；这里只给结论，不再把整份日志重打一遍。
+        reporter.failure(result, phase=result.failed_phase or "build")
         return result.exit_code
 
     if not getattr(args, "quiet", False) and not getattr(args, "json_", False):
-        print(f"构建目录: {result.build_dir}")
-        if result.size:
-            size = result.size
-            print(
-                "Program Size: Code={code} RO-data={ro_data} RW-data={rw_data} "
-                "ZI-data={zi_data}".format(**size)
-            )
-        elif result.gnu_size:
-            gnu = result.gnu_size
-            print(
-                "Program Size: text={text} data={data} bss={bss}".format(**gnu)
-            )
-        for name, path in result.artifacts.items():
-            print(f"  {name:14s} {path}")
-        if args.configure_only:
-            print("（仅配置，未编译）")
+        reporter.success(result, configure_only=args.configure_only)
 
     # runner 目标（flash / run）：构建完成后调用 omni flash program。
     if result.runner:
@@ -156,10 +161,9 @@ def _build(args) -> int:
             )
         argv = runner_argv(result.runner, elf, args.runner_args)
         payload["runner_command"] = argv
-        if not getattr(args, "quiet", False) and not getattr(args, "json_", False):
-            print(f"runner: {' '.join(argv)}")
-        rc = _run_runner(argv, quiet=getattr(args, "quiet", False) or getattr(args, "json_", False),
-                         verbose=args.verbose, log=log)
+        if not quiet:
+            reporter.info(f"runner: {' '.join(argv)}")
+        rc = _run_runner(argv, quiet=quiet, verbose=args.verbose, log=reporter.info)
         payload["runner_exit_code"] = rc
         payload["success"] = rc == 0
         payload["exit_code"] = rc

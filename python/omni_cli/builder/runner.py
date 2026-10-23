@@ -14,11 +14,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .. import __version__
 from ..context import ProjectError
+from .report import steps_from_log, summarize_failure
 
 COMPILERS = ("ac6", "gcc", "clang", "ac5")
 DEFAULT_COMPILER = "ac6"
@@ -68,6 +70,14 @@ class BuildResult:
     size: Optional[dict] = None
     gnu_size: Optional[dict] = None
     log: list = field(default_factory=list)
+    #: 展示信息：耗时、日志落盘位置、失败统计（``--json`` 也会带出去）。
+    configure_seconds: float = 0.0
+    build_seconds: float = 0.0
+    log_path: Optional[str] = None
+    steps: int = 0
+    failed_targets: int = 0
+    first_error: Optional[str] = None
+    failed_phase: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -86,6 +96,13 @@ class BuildResult:
             "artifacts": self.artifacts,
             "size": self.size,
             "gnu_size": self.gnu_size,
+            "configure_seconds": round(self.configure_seconds, 2),
+            "build_seconds": round(self.build_seconds, 2),
+            "log_path": self.log_path,
+            "steps": self.steps,
+            "failed_targets": self.failed_targets,
+            "first_error": self.first_error,
+            "failed_phase": self.failed_phase,
             "log": self.log,
         }
 
@@ -255,18 +272,34 @@ def _cli_base() -> list:
     exe = shutil.which("omni")
     if exe and _usable_omni(exe):
         return [exe]
+
+    # 退回源码运行：CMake 会在「构建目录」里起子进程，不能指望继承调用者的
+    # cwd / PYTHONPATH，否则 configure 阶段会报 No module named omni_cli。
+    package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    parts = [part for part in os.environ.get("PYTHONPATH", "").split(os.pathsep) if part]
+    if os.path.normcase(package_root) not in {os.path.normcase(part) for part in parts}:
+        os.environ["PYTHONPATH"] = os.pathsep.join([package_root, *parts])
     return [sys.executable, "-m", "omni_cli"]
 
 
 def _cli_configure_args() -> list:
-    """让 CMake 用「当前这个 CLI」生成配置，避免 PATH 上的旧版本。"""
+    """让 CMake 用「当前这个 CLI」生成配置，避免 PATH 上的旧版本。
+
+    两种传法互斥，切换时（源码运行 ↔ 已安装 exe）必须清掉另一种，否则会被
+    CMakeCache 里的旧条目抢先命中（``omni-kconfig.cmake`` 优先看 python+module）。
+    """
 
     base = _cli_base()
     if len(base) == 1:
-        return [f"-DOMNI_CLI={base[0]}"]
+        return [
+            f"-DOMNI_CLI={base[0]}",
+            "-UOMNI_CLI_PYTHON",
+            "-UOMNI_CLI_MODULE",
+        ]
     return [
         f"-DOMNI_CLI_PYTHON={base[0]}",
         "-DOMNI_CLI_MODULE=omni_cli",
+        "-UOMNI_CLI",
     ]
 
 
@@ -278,14 +311,20 @@ def _require_tool(name: str, hint: str) -> str:
 
 
 def _run(cmd: list, log: Callable[[str], None], verbose: bool,
-         stream: bool = False) -> tuple:
+         stream: Optional[Callable[[str], None]] = None,
+         on_start: Optional[Callable[[list], None]] = None,
+         sink=None) -> tuple:
     """执行命令。
 
-    stream=True 时逐行实时转发输出（编译进度可见），同时仍完整捕获，
-    便于失败时报错与 --json 场景使用。
+    ``stream``：逐行实时回调（着色后打印）；为 None 时按老行为写 ``log``。
+    ``sink``：  原始日志文件句柄，写入不带 ANSI 的原文。
+    ``on_start``：命令即将执行时回调，用于打印缩写/全量命令行。
     """
 
-    log("$ " + " ".join(cmd))
+    if on_start is not None:
+        on_start(cmd)
+    else:
+        log("$ " + " ".join(cmd))
     chunks = []
     try:
         # 合并 stderr 到 stdout，保证输出顺序与进度条可用
@@ -304,14 +343,31 @@ def _run(cmd: list, log: Callable[[str], None], verbose: bool,
     assert proc.stdout is not None
     for line in proc.stdout:
         chunks.append(line)
-        if stream:
-            log(line.rstrip("\r\n"))
+        raw = line.rstrip("\r\n")
+        if sink is not None:
+            try:
+                sink.write(raw + "\n")
+            except OSError:
+                sink = None
+        if stream is not None:
+            stream(raw)
 
     returncode = proc.wait()
     output = "".join(chunks)
-    if verbose and not stream and output:
+    if verbose and stream is None and output:
         log(output.rstrip())
     return returncode, output
+
+
+def _finalize(result: BuildResult) -> BuildResult:
+    """补齐展示用的统计字段（步数、失败目标数、首个错误）。"""
+
+    text = "\n".join(part for part in result.log if part)
+    summary = summarize_failure(text)
+    result.steps = steps_from_log(text)
+    result.failed_targets = summary["targets"]
+    result.first_error = summary["first_error"]
+    return result
 
 
 def run_build(
@@ -329,6 +385,8 @@ def run_build(
     cmake_args: Optional[list] = None,
     verbose: bool = False,
     stream_build: bool = True,
+    stream: Optional[Callable[[str], None]] = None,
+    on_start: Optional[Callable[[str, list], None]] = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> BuildResult:
     log = log or (lambda message: None)
@@ -340,9 +398,6 @@ def run_build(
             f"未知构建类型 '{build_type}'（支持: {', '.join(BUILD_TYPES)}）", code=2
         )
 
-    # 让用户看到实际使用的 CLI 与框架根（排查环境变量指错 checkout 时很关键）
-    log(f"omni root: {omni_root}")
-    log("omni CLI : " + " ".join(_cli_base()))
     repo_root = os.path.dirname(omni_root)
     toolchain = toolchain_file(omni_root, compiler)
     build_dir = build_directory(project_dir, board, compiler, build_type)
@@ -388,52 +443,85 @@ def run_build(
         or clean
         or not os.path.isfile(cache_file)
     )
-    if need_configure:
-        configure_cmd = [
-            cmake,
-            "-S", project_dir,
-            "-B", build_dir,
-            "-G", "Ninja",
-            f"-DOMNI_WORKSPACE_DIR={repo_root}",
-            f"-DOMNI_BOARD={board}",
-            f"-DOMNI_COMPILER={compiler}",
-            f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
-            f"-DCMAKE_BUILD_TYPE={build_type}",
-            *(cmake_args or []),
-            *_cli_configure_args(),
-        ]
-        rc, output = _run(configure_cmd, log, verbose, stream=stream_build)
+
+    # 全量日志落盘：失败时用户能翻原文，而终端只留结论。
+    os.makedirs(build_dir, exist_ok=True)
+    sink = None
+    try:
+        result.log_path = os.path.join(build_dir, "build.log")
+        sink = open(result.log_path, "w", encoding="utf-8", errors="replace")
+    except OSError:
+        result.log_path = None
+        sink = None
+
+    streaming = stream if stream_build else None
+
+    def phase_start(kind: str):
+        if on_start is None:
+            return None
+        return lambda command: on_start(kind, command)
+
+    try:
+        if need_configure:
+            configure_cmd = [
+                cmake,
+                "-S", project_dir,
+                "-B", build_dir,
+                "-G", "Ninja",
+                f"-DOMNI_WORKSPACE_DIR={repo_root}",
+                f"-DOMNI_BOARD={board}",
+                f"-DOMNI_COMPILER={compiler}",
+                f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
+                f"-DCMAKE_BUILD_TYPE={build_type}",
+                *(cmake_args or []),
+                *_cli_configure_args(),
+            ]
+            started = time.monotonic()
+            rc, output = _run(configure_cmd, log, verbose, stream=streaming,
+                              on_start=phase_start("configure"), sink=sink)
+            result.configure_seconds = time.monotonic() - started
+            result.log.append(output)
+            if rc != 0:
+                result.exit_code = rc
+                result.failed_phase = "configure"
+                return _finalize(result)
+            result.configured = True
+        else:
+            _cached = read_cache_context(build_dir)
+            log("(CMake 已配置：board={b} compiler={c} type={t} → 跳过 configure；"
+                "需要强制时加 --cmake)".format(
+                    b=_cached.get("board", board),
+                    c=_cached.get("compiler", compiler),
+                    t=_cached.get("build_type", build_type)))
+
+        if configure_only:
+            result.success = True
+            return _finalize(result)
+
+        build_cmd = [cmake, "--build", build_dir]
+        if cmake_target:
+            build_cmd += ["--target", cmake_target]
+        if jobs:
+            build_cmd += ["--parallel", str(jobs)]
+        started = time.monotonic()
+        rc, output = _run(build_cmd, log, verbose, stream=streaming,
+                          on_start=phase_start("build"), sink=sink)
+        result.build_seconds = time.monotonic() - started
         result.log.append(output)
+        result.exit_code = rc
         if rc != 0:
-            result.exit_code = rc
-            return result
-        result.configured = True
-    else:
-        _cached = read_cache_context(build_dir)
-        log("(CMake 已配置：board={b} compiler={c} type={t} → 跳过 configure；"
-            "需要强制时加 --cmake)".format(
-                b=_cached.get("board", board),
-                c=_cached.get("compiler", compiler),
-                t=_cached.get("build_type", build_type)))
+            result.failed_phase = "build"
+            return _finalize(result)
 
-    if configure_only:
+        result.built = True
+        result.artifacts = collect_artifacts(build_dir)
+        result.size = parse_size(os.path.join(build_dir, "omni.axf.map"))
+        result.gnu_size = parse_gnu_size(os.path.join(build_dir, "omni.size.txt"))
         result.success = True
-        return result
-
-    build_cmd = [cmake, "--build", build_dir]
-    if cmake_target:
-        build_cmd += ["--target", cmake_target]
-    if jobs:
-        build_cmd += ["--parallel", str(jobs)]
-    rc, output = _run(build_cmd, log, verbose, stream=stream_build)
-    result.log.append(output)
-    result.exit_code = rc
-    if rc != 0:
-        return result
-
-    result.built = True
-    result.artifacts = collect_artifacts(build_dir)
-    result.size = parse_size(os.path.join(build_dir, "omni.axf.map"))
-    result.gnu_size = parse_gnu_size(os.path.join(build_dir, "omni.size.txt"))
-    result.success = True
-    return result
+        return _finalize(result)
+    finally:
+        if sink is not None:
+            try:
+                sink.close()
+            except OSError:
+                pass

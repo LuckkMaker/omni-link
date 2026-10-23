@@ -26,6 +26,12 @@ for stream in (sys.stdout, sys.stderr):
 
 from omni_cli.cli import build_parser
 from omni_cli.context import ProjectError
+from omni_cli.builder.report import (
+    compact_command,
+    shorten_path,
+    steps_from_log,
+    summarize_failure,
+)
 from omni_cli.builder.runner import (
     ARTIFACTS,
     _cli_configure_args,
@@ -39,6 +45,7 @@ from omni_cli.builder.runner import (
     target_kind,
     toolchain_file,
 )
+from omni_cli.formatting import Palette, color_enabled
 
 failures: list[str] = []
 
@@ -161,6 +168,64 @@ def test_parse_size_and_artifacts() -> None:
         check("artifacts.list", "omni.axf.map" in ARTIFACTS and "omni.elf" in ARTIFACTS)
 
 
+def test_report_helpers() -> None:
+    configure = [
+        "cmake", "-S", "D:/proj", "-B", "D:/proj/build/stm32f407ig/AC6/Debug",
+        "-G", "Ninja", "-DOMNI_BOARD=stm32f407ig",
+    ]
+    check("report.compact_configure",
+          compact_command(configure, "configure") ==
+          "cmake -S D:/proj -B D:/proj/build/stm32f407ig/AC6/Debug -G Ninja",
+          compact_command(configure, "configure"))
+
+    build = ["cmake", "--build", "D:/proj/build", "--target", "omni-size-x", "--parallel", "8"]
+    check("report.compact_build",
+          compact_command(build, "build") ==
+          "cmake --build D:/proj/build --target omni-size-x --parallel 8",
+          compact_command(build, "build"))
+
+    check("report.shorten", shorten_path(r"D:\ws\omni-emb\modules\a.h", r"D:\ws\omni-emb")
+          == "modules\\a.h" or shorten_path(r"D:\ws\omni-emb\modules\a.h", r"D:\ws\omni-emb")
+          == "modules/a.h", shorten_path(r"D:\ws\omni-emb\modules\a.h", r"D:\ws\omni-emb"))
+    check("report.shorten_outside",
+          shorten_path(r"D:\other\a.h", r"D:\ws") == r"D:\other\a.h")
+
+    sample = "\n".join([
+        "[1/129] Building C object a.o",
+        "FAILED: obj/a.o",
+        "D:/ws/modules/x/include/y.h:32:10: fatal error: 'Z.h' file not found",
+        "[2/129] Building C object b.o",
+        "FAILED: obj/a.o",  # 重打日志里重复的目标
+        "D:/ws/modules/x/include/y.h:32:10: fatal error: 'Z.h' file not found",
+    ])
+    summary = summarize_failure(sample)
+    check("report.failed_targets", summary["targets"] == 1, str(summary))
+    check("report.first_error", summary["first_error"] and summary["first_error"].endswith(
+        "fatal error: 'Z.h' file not found"), str(summary))
+    check("report.steps", steps_from_log(sample) == 129, str(steps_from_log(sample)))
+
+
+def test_color() -> None:
+    check("color.never", color_enabled("never") is False)
+    check("color.always", color_enabled("always") is True)
+
+    old = os.environ.get("NO_COLOR")
+    os.environ["NO_COLOR"] = "1"
+    try:
+        check("color.no_color", color_enabled("auto") is False)
+    finally:
+        if old is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = old
+
+    plain = Palette(False)("x", "\033[31m")
+    check("color.palette_off", plain == "x", repr(plain))
+    painted = Palette(True)("x", "\033[31m")
+    check("color.palette_on", painted.startswith("\033[31m") and painted.endswith("\033[0m"),
+          repr(painted))
+
+
 def test_cli_args() -> None:
     args = _cli_configure_args()
     check("cli_args.nonempty", bool(args), str(args))
@@ -192,6 +257,16 @@ def test_e2e() -> None:
     check("e2e.success", result.success, f"exit={result.exit_code}")
     check("e2e.size", result.size is not None and result.size["code"] > 0, str(result.size))
     check("e2e.artifacts", "omni.axf" in result.artifacts, str(sorted(result.artifacts)))
+    check("e2e.log_path", bool(result.log_path) and os.path.isfile(result.log_path),
+          str(result.log_path))
+    if result.log_path:
+        with open(result.log_path, encoding="utf-8", errors="replace") as handle:
+            raw_log = handle.read()
+        check("e2e.log_no_ansi", "\033[" not in raw_log)
+    check("e2e.steps", result.steps > 0, str(result.steps))
+    check("e2e.timing", result.build_seconds > 0, str(result.build_seconds))
+    check("e2e.no_failure", result.failed_targets == 0 and result.first_error is None,
+          f"{result.failed_targets} / {result.first_error}")
 
     # 第二次构建应跳过 configure（构建目录已配置），强制时才重新配置。
     again = run_build(
@@ -221,6 +296,8 @@ def main() -> int:
     test_build_directory()
     test_toolchain()
     test_parse_size_and_artifacts()
+    test_report_helpers()
+    test_color()
     test_cli_args()
     test_e2e()
     if failures:

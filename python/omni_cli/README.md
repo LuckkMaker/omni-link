@@ -23,6 +23,20 @@ omni (本包)
 
 ## 版本记录
 
+### 0.21.0（2026-10-23）
+
+- `omni build` 输出重做（仍然逐行实时转发，不缓冲、不过滤）：
+  - 头部 3 行给出工程/板·编译器·类型/构建目录，配置与构建命令显示缩写（`-v` 打全量）；
+  - 结尾给结论：成功 = 步数 + 耗时 + `Program Size` + 产物；失败 = exit + 失败目标数 + 首个错误 + 日志路径；
+  - **修复重复**：失败时不再把已经流式打印过的整份日志往 stderr 重打一遍（实测每次多 41 KB）；
+  - 新增 `--color auto|always|never`（TTY 自动着色，`NO_COLOR`/`OMNI_CLI_COLOR` 可覆盖），
+    Windows 控制台自动开启 VT；
+  - 全量原始日志落盘 `<build-dir>/build.log`（无 ANSI），`--json` 新增
+    `configure_seconds` / `build_seconds` / `log_path` / `steps` / `failed_targets` / `first_error` / `failed_phase`。
+- `-v` 恢复语义：显示完整命令；此前 `stream_build` 恒为真，`-v` 实际无效。
+- 修复源码运行时 `python -m omni_cli` 的 PYTHONPATH 继承问题：configure 阶段
+  （CMake 在构建目录里起子进程）不再报 `No module named omni_cli`。
+
 ### 0.16.0（2026-10-22）
 
 - `omni config bsp` 的 map 自动发现优先看 `build/<board>/**/*.map`：此前会抓到 `Listings/`、`Objects/`、`out/` 下的陈旧/其它板的 map，把不属于本板的设备实例写进 `bsp_config.h`（例如 f103cb 里多出 `_dev_gpioe`）。
@@ -450,7 +464,8 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 | `-o/--cmake-arg ARG` | 额外 cmake 参数（写成 `--cmake-arg=-DFOO=1`，可重复） |
 | `--runner-arg ARG` | 传给 runner（`omni flash program`）的参数，可重复 |
 | `-j/--jobs N` | 并行任务数 |
-| `-v/--verbose` | 打印 cmake 完整输出 |
+| `-v/--verbose` | 打印完整命令（默认只显示缩写）并保留 cmake 全部输出 |
+| `--color MODE` | `auto`（默认，TTY 下着色）/ `always` / `never` |
 | `--json` / `--quiet` | 供脚本与 CI 消费 |
 
 ```powershell
@@ -462,8 +477,33 @@ omni build -b stm32f407ig --project-dir examples\basic\template --configure-only
 omni build -b stm32f407ig --project-dir examples\basic\template --json
 ```
 
-输出包含构建目录、`Program Size: Code/RO-data/RW-data/ZI-data` 与
-`omni.axf` / `omni.hex` / `omni.bin` / `omni.axf.map` / `omni.size.txt` 的绝对路径。
+输出分三段（日志本身仍是实时逐行转发）：
+
+```text
+› omni build  template
+  board   stm32f407ig · ac6 · Debug
+  build   build\stm32f407ig\AC6\Debug
+
+› configure  cmake -S . -B .\build\stm32f407ig\AC6\Debug -G Ninja
+...
+› build  cmake --build .\build\stm32f407ig\AC6\Debug
+
+✓ 构建完成  129 步 · 1.2s
+  size          Code=6138  RO-data=582  RW-data=12  ZI-data=1652
+  omni.axf      ...\omni.axf
+  log           ...\build.log
+```
+
+失败时只给结论，不再重打日志：
+
+```text
+✗ 构建失败（exit 1）  15 个目标 · 12.3s
+  首个错误  modules\cmsis-rtx\Include\rtx_def.h:32:10: fatal error: 'RTX_Config.h' file not found
+  完整日志  build\stm32f407ig\AC6\Debug\build.log
+```
+
+原始日志（无 ANSI 转义）始终写到 `<build-dir>/build.log`，`--json` 里也有
+`log`、`first_error`、`failed_targets` 等字段。
 ### `boards` — 板定义（本地命令）
 
 不经过后端；读取 `omni/boards/<board>/board.yml`。板目录只保存板事实，
