@@ -36,6 +36,10 @@ APP_NAME = "omni-backend"
 CLI_ENTRY_SCRIPT = BACKEND_DIR / "omni_cli_main.py"
 CLI_APP_NAME = "omni"
 
+# 离线工具链安装器（单文件 omni-toolchain.exe，安装时/首次启动调用）
+TOOLCHAIN_ENTRY_SCRIPT = BACKEND_DIR / "toolchain_main.py"
+TOOLCHAIN_APP_NAME = "omni-toolchain"
+
 # Required runtime packages that must be importable by the building Python.
 # 注意：pyocd 是内置源码（python/pyocd/），check_package 会把 BACKEND_DIR 加入
 # sys.path 使其可导入；pyusb / hidapi 是 pyOCD 可选 USB 后端，项目实际用
@@ -440,6 +444,39 @@ def build_cli(python_exe: str):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def build_toolchain_installer(python_exe: str):
+    """把离线工具链安装器打成单文件 omni-toolchain.exe。"""
+
+    ensure_pyinstaller(python_exe)
+
+    cmd = [
+        python_exe, "-m", "PyInstaller",
+        "--name", TOOLCHAIN_APP_NAME,
+        "--noconfirm",
+        "--console",
+        "--onefile",
+        f"--distpath={DIST_DIR}",
+        f"--workpath={BUILD_DIR}",
+        f"--specpath={BACKEND_DIR}",
+        "--hidden-import", "omni_cli.toolchain_install",
+        "--paths", str(BACKEND_DIR),
+        str(TOOLCHAIN_ENTRY_SCRIPT),
+    ]
+
+    log("Running PyInstaller (toolchain installer)...")
+    log(f"Command: {' '.join(cmd)}")
+    subprocess.check_call(cmd, cwd=str(BACKEND_DIR))
+
+    exe_path = DIST_DIR / (f"{TOOLCHAIN_APP_NAME}.exe" if sys.platform == "win32" else TOOLCHAIN_APP_NAME)
+    if not exe_path.exists():
+        log(f"ERROR: Expected toolchain installer not found at {exe_path}")
+        sys.exit(1)
+    size_mb = exe_path.stat().st_size / (1024 * 1024)
+    log("Toolchain installer build successful!")
+    log(f"Executable: {exe_path}")
+    log(f"Size: {size_mb:.1f} MB")
+
+
 def main():
     _configure_stdio()
     parser = argparse.ArgumentParser(description="Build OMNI Link backend")
@@ -473,6 +510,7 @@ def main():
     py = ensure_python(args.python, require_packages=not args.cli_only)
     if not args.cli_only:
         build(py)
+        build_toolchain_installer(py)
     build_cli(py)
 
     cli_exe = DIST_DIR / (f"{CLI_APP_NAME}.exe" if sys.platform == "win32" else CLI_APP_NAME)

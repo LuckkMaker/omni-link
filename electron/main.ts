@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 import { app, BrowserWindow, ipcMain, shell, dialog, clipboard } from 'electron'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { PythonBridge } from './python-bridge'
 
@@ -53,7 +54,25 @@ async function startPythonBackend(): Promise<void> {
   }
 }
 
+/**
+ * 解析随安装包分发的 tools/ 目录。
+ * 生产：<安装目录>/tools（electron-builder extraFiles 复制到应用根）。
+ * 开发：仓库根/tools。
+ */
+function resolveToolsDir(): string | null {
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, '..', 'tools')]
+    : [join(process.cwd(), 'tools'), join(__dirname, '..', '..', 'tools')]
+  return candidates.find((path) => existsSync(path)) ?? null
+}
+
 app.whenReady().then(async () => {
+  const toolsDir = resolveToolsDir()
+  if (toolsDir) {
+    process.env.OMNI_TOOLS_DIR = toolsDir
+    console.log(`[Tools] using bundled tools: ${toolsDir}`)
+  }
+
   // 设置用户数据目录环境变量，供 Python 后端数据库使用
   // 生产模式下数据库会写入该用户可写目录（避免 Program Files 只读问题）
   // 开发模式下若未设置该变量，Python 仍会使用源码目录下 data/devices.db

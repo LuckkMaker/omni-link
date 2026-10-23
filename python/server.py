@@ -26,6 +26,12 @@ from core.events import event_manager
 from core.probe_monitor import probe_monitor
 from core.pyocd_backend import backend
 
+# 应用托管的 tools/ 与 CLI 共用同一套解析；源码态缺包时不影响后端启动。
+try:
+    from omni_cli import toolchain
+except Exception:  # pragma: no cover - 仅防御旧打包产物
+    toolchain = None
+
 # 后端版本号（与前端 package.json 保持一致）
 BACKEND_VERSION = "0.3.1"
 
@@ -212,6 +218,8 @@ def _configure_stdio() -> None:
 
 
 def main():
+    if toolchain is not None:
+        toolchain.prepare_environment()
     _configure_stdio()
     parser = argparse.ArgumentParser(description="OMNI Link Backend Server")
     parser.add_argument("--port", type=int, default=None,

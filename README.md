@@ -265,6 +265,14 @@ npm run package
 npm run package:clean
 ```
 
+```pwsh
+# 默认：主安装包不内置工具链，运行时回退系统 PATH
+.\build.ps1
+
+# 主安装包 + 独立离线工具链包
+.\build.ps1 -ToolchainPackage
+```
+
 > 未签名的安装包在 Windows 上会提示“未知发布者 / 有风险”（UAC 发布者未知、SmartScreen 拦截）。
 > 配置代码签名证书后重新打包即可消除，参数与方案见 [docs/tech/code-signing.md](docs/tech/code-signing.md)。
 

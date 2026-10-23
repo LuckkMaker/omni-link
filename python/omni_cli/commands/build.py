@@ -39,7 +39,7 @@ def add_parser(sub):
         help="配置并构建工程（CMake + Ninja；本地执行）",
     )
     p.add_argument("-c", "--compiler", default=DEFAULT_COMPILER, choices=COMPILERS,
-                   help=f"编译器（默认 {DEFAULT_COMPILER}；当前仅 ac6 提供工具链文件）")
+                   help=f"编译器（默认 {DEFAULT_COMPILER}；ac6 / gcc / clang 提供工具链文件）")
     p.add_argument("--build-type", dest="build_type", default=DEFAULT_BUILD_TYPE,
                    choices=BUILD_TYPES, help=f"构建类型（默认 {DEFAULT_BUILD_TYPE}）")
     p.add_argument("--cmake", action="store_true", default=False,
@@ -154,10 +154,11 @@ def _build(args) -> int:
 
     # runner 目标（flash / run）：构建完成后调用 omni flash program。
     if result.runner:
-        elf = result.artifacts.get("omni.axf")
+        # AC6 产物是 omni.axf，GCC/CLANG 是 omni.elf；两种都接受。
+        elf = result.artifacts.get("omni.axf") or result.artifacts.get("omni.elf")
         if not elf:
             raise ProjectError(
-                f"目标 '{result.runner}' 需要 omni.axf，但构建产物里没有", code=1
+                f"目标 '{result.runner}' 需要 omni.axf 或 omni.elf，但构建产物里没有", code=1
             )
         argv = runner_argv(result.runner, elf, args.runner_args)
         payload["runner_command"] = argv

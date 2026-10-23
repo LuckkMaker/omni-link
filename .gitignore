@@ -143,3 +143,18 @@ ehthumbs_vista.db
 .dsh-runtime/
 # 可行性 spike 的临时安装目录
 .dsh-spike/
+
+# ── 内置工具链二进制（README 之外不入库） ──
+tools/*
+!tools/README.md
+
+# ── 工具链压缩包收件箱（只保留 README） ──
+toolchains/*
+!toolchains/README.md
+
+# ── 离线工具链包产物 ──
+toolchain-release/
+!toolchains/tools.json
+
+# PyInstaller 生成的工具链 spec（build.py 每次重建）
+python/omni-toolchain.spec

@@ -20,6 +20,7 @@ from . import rtt
 from . import system
 from . import target
 from . import tool
+from . import toolchain
 
 _MODULES = (
     backend,
@@ -39,6 +40,7 @@ _MODULES = (
     system,
     target,
     tool,
+    toolchain,
 )
 
 

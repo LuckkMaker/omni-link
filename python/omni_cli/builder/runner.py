@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .. import __version__
+from .. import __version__, toolchain as omni_toolchain
 from ..context import ProjectError
 from .report import steps_from_log, summarize_failure
 
@@ -167,7 +167,7 @@ def toolchain_file(omni_root: str, compiler: str) -> str:
     if not os.path.isfile(path):
         raise ProjectError(
             f"编译器 {compiler} 的工具链文件尚未提供: {path}\n"
-            f"  当前只有 ac6 可用；GCC/CLANG/AC5 见 omni/cmake/README.md 的阶段 4–6。",
+            f"  ac6 / gcc / clang 见 omni/cmake/README.md；ac5 尚未接入。",
             code=1,
         )
     return path
@@ -304,9 +304,13 @@ def _cli_configure_args() -> list:
 
 
 def _require_tool(name: str, hint: str) -> str:
-    path = shutil.which(name)
+    path = omni_toolchain.resolve_tool(name)
     if not path:
-        raise ProjectError(f"未找到 {name}（{hint}）", code=1)
+        raise ProjectError(
+            f"未找到 {name}（{hint}）。可把它放进 OMNI Link 安装目录的 tools/，"
+            f"或用 {omni_toolchain.OVERRIDES.get(name, '环境变量')} 指定路径。",
+            code=1,
+        )
     return path
 
 
@@ -436,6 +440,18 @@ def run_build(
     cmake = _require_tool("cmake", "安装 CMake 或用 vcpkg/Keil 自带的 cmake")
     _require_tool("ninja", "安装 Ninja（CMake 生成器固定为 Ninja）")
 
+    # 把解析到的编译器绝对路径交给 CMake：这样 OMNI_CLANG / OMNI_GCC 覆盖
+    # 和安装目录 tools/ 都能生效，而不是只依赖 PATH 的第一个同名程序。
+    compiler_args = []
+    if compiler == "clang":
+        cc = omni_toolchain.resolve_tool("clang")
+        if cc:
+            compiler_args.append(f"-DCMAKE_C_COMPILER={cc}")
+    elif compiler == "gcc":
+        cc = omni_toolchain.resolve_tool("arm-none-eabi-gcc")
+        if cc:
+            compiler_args.append(f"-DCMAKE_C_COMPILER={cc}")
+
     cache_file = os.path.join(build_dir, "CMakeCache.txt")
     need_configure = (
         force_configure
@@ -473,6 +489,7 @@ def run_build(
                 f"-DOMNI_COMPILER={compiler}",
                 f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
                 f"-DCMAKE_BUILD_TYPE={build_type}",
+                *compiler_args,
                 *(cmake_args or []),
                 *_cli_configure_args(),
             ]

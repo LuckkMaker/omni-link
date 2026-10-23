@@ -8,7 +8,7 @@
 import argparse
 import sys
 
-from . import __version__, client, commands
+from . import __version__, client, commands, toolchain
 from .commands import commander
 from .formatting import configure_stdio, ctx_error, enable_vt
 
@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # 先挂上安装目录里的 tools/：cmake/ninja/clang/gcc 的子进程都继承这份 PATH。
+    toolchain.prepare_environment()
     # 管道/重定向下必须显式 UTF-8，否则中文按系统 locale（中文 Windows=GBK）写出，
     # 调用方按 UTF-8 解码就成了 U+FFFD（实机报告 P1-4）。
     configure_stdio()

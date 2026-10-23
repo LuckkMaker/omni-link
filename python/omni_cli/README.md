@@ -9,8 +9,9 @@ OMNI CLI 有两类命令：
 - **调试/烧录类**：`backend` / `probe` / `target` / `flash` / `commander` / `debug` / `monitor` / `device` / `pack` / `rtt` / `system` / `file` / `tool`。
   它们是 OMNI Link 后端的瘦客户端，通过 HTTP 复用 REST 接口，不复制后端业务逻辑。
   （例外：`file checksum` 纯本地计算，不需要后端。）
-- **工程配置类**：`omni config`。本地执行，不经过后端，实现在 `omni_cli.config` 内；
-  只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据，不调用 `omni/scripts` 下的旧脚本。
+- **工程配置/构建类**：`omni config`、`omni build`、`omni toolchain`。本地执行，
+  不经过后端，实现在 `omni_cli.config` / `omni_cli.builder` / `omni_cli.toolchain` 内；
+  只依赖 omni-emb 仓库的 `Kconfig` / `soc` / `boards` 数据和本机工具链。
 
 ```
 omni (本包)
@@ -36,6 +37,13 @@ omni (本包)
 - `-v` 恢复语义：显示完整命令；此前 `stream_build` 恒为真，`-v` 实际无效。
 - 修复源码运行时 `python -m omni_cli` 的 PYTHONPATH 继承问题：configure 阶段
   （CMake 在构建目录里起子进程）不再报 `No module named omni_cli`。
+- 新增 `omni toolchain`（`--json`）：显示 cmake / ninja / clang / gcc / cbuild
+  的解析来源。安装目录的 `tools/` 默认前插到 `PATH`，缺失时回退系统环境；
+  显式覆盖用 `OMNI_CMAKE` / `OMNI_NINJA` / `OMNI_CLANG` / `OMNI_GCC` / `OMNI_CBUILD`。
+- `-t flash/run` 同时接受 `omni.axf`（AC6）与 `omni.elf`（GCC/CLANG）。
+- 新增独立 `omni-toolchain.exe`（离线工具链安装器）与 `omni toolchain` 的
+  `env` / `shared` / `app` / `system` 来源显示；工具链默认装到
+  `%LOCALAPPDATA%\OMNI\toolchains`，不再塞进主安装包。
 
 ### 0.16.0（2026-10-22）
 
@@ -455,7 +463,7 @@ python ../../../omni/scripts/omni_config/omni_config.py config --board stm32f407
 | 选项 | 说明 |
 | --- | --- |
 | `-b/--board` | 板级目标（多板工程必填） |
-| `-c/--compiler` | `ac6`（默认）/ `gcc` / `clang` / `ac5`；当前仅 ac6 提供工具链文件 |
+| `-c/--compiler` | `ac6`（默认）/ `gcc` / `clang` / `ac5`；ac6 / gcc / clang 提供工具链文件 |
 | `--build-type` | `Debug`（默认）/ `Release` |
 | `--cmake` | 强制重新执行 CMake 配置（默认已有构建目录时跳过） |
 | `--clean` | 先删除该上下文的构建目录 |
@@ -504,6 +512,30 @@ omni build -b stm32f407ig --project-dir examples\basic\template --json
 
 原始日志（无 ANSI 转义）始终写到 `<build-dir>/build.log`，`--json` 里也有
 `log`、`first_error`、`failed_targets` 等字段。
+
+### `toolchain` — 工具解析（本地命令）
+
+显示 cmake / ninja / clang / arm-none-eabi-gcc / cbuild 的最终路径与来源：
+
+- `env`：`OMNI_TOOLS_DIR`
+- `shared`：独立安装器的共享目录（默认 `%LOCALAPPDATA%\OMNI\toolchains`）
+- `app`：安装目录 `tools/`（离线全量包/开发态）
+- `system`：用户系统 `PATH`
+
+```powershell
+omni toolchain
+omni toolchain --json
+
+# 独立离线安装器（也可由主安装器联动调用）
+omni-toolchain.exe --offline .\toolchain-offline
+omni-toolchain.exe --offline .\toolchain-offline.zip --only cmake --only ninja
+```
+
+解析顺序：显式覆盖环境变量 → `OMNI_TOOLS_DIR` → `OMNI_TOOLCHAIN_HOME`/共享目录 →
+安装目录 `tools/` → 系统 `PATH`。多个工具目录会一起前插 PATH；同一版本只让
+最高优先级的目录导出 CMSIS-Toolbox 需要的 `CLANG_TOOLCHAIN_x_y_z` /
+`GCC_TOOLCHAIN_x_y_z`。
+
 ### `boards` — 板定义（本地命令）
 
 不经过后端；读取 `omni/boards/<board>/board.yml`。板目录只保存板事实，

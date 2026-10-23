@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "description": "OMNI Link 离线工具链包清单；archive 相对本文件所在目录。",
+  "tools": [
+    {
+      "name": "cmake",
+      "version": "3.31.2",
+      "archive": "cmake-3.31.2-windows-x86_64.zip",
+      "source": "cmake-3.31.2-windows-x86_64",
+      "target": "cmake",
+      "probe": "bin/cmake.exe",
+      "sha256": "109c29a744d648863d3637b4963c90088045c8d92799c68c9b9d8713407776c8"
+    },
+    {
+      "name": "ninja",
+      "version": "1.13.2",
+      "archive": "tools.ninja-build.ninja-1.13.2.zip",
+      "mode": "file",
+      "file": "ninja.exe",
+      "target": "ninja",
+      "probe": "ninja.exe",
+      "sha256": "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65"
+    },
+    {
+      "name": "llvm-embedded",
+      "version": "19.1.5",
+      "archive": "compilers.arm.llvm-embedded-19.1.5.zip",
+      "source": "",
+      "target": "llvm-embedded/19.1.5",
+      "probe": "bin/clang.exe",
+      "sha256": "216f8ac510885ac6215ba97013763fb5c01d425ba4317e97ea7ff1900821a2a0"
+    },
+    {
+      "name": "gcc-arm-none-eabi",
+      "version": "14.3.1",
+      "archive": "compilers.arm.arm-none-eabi-gcc-14.3.1.zip",
+      "source": "",
+      "target": "gcc-arm-none-eabi/14.3.1",
+      "probe": "bin/arm-none-eabi-gcc.exe",
+      "sha256": "864c0c8815857d68a1bbba2e5e2782255bb922845c71c97636004a3d74f60986"
+    },
+    {
+      "name": "cmsis-toolbox",
+      "version": "2.13.0",
+      "archive": "cmsis-toolbox-windows-amd64.zip",
+      "source": "cmsis-toolbox-windows-amd64",
+      "target": "cmsis-toolbox/2.13.0",
+      "probe": "bin/cbuild.exe",
+      "sha256": "91a3ff7c578b56f552126b2177d6016d7f14b95b39830fc0b22146695819f2cb"
+    }
+  ]
+}

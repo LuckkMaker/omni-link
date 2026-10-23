@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     OMNI Link 一键打包脚本（Windows）
 .DESCRIPTION
@@ -32,9 +32,18 @@
     要求产物必须已签名：未配置签名或签名失败时直接以非零退出码结束（适合 CI）
 .PARAMETER VerifyOnly
     只检查 release/ 下现有产物的签名状态，不执行任何构建
+.PARAMETER WithTools
+    生成独立离线工具链包（release/toolchain-offline-<version>），不再把 tools/ 塞进主安装包
+.PARAMETER ToolchainPackage
+    同 -WithTools（更明确的别名）
+.PARAMETER ToolchainManifest
+    离线工具链清单，默认 toolchains/tools.json
+.PARAMETER ToolchainVersion
+    离线工具链包版本，默认 package.json 的 version
 .EXAMPLE
     .\build.ps1
-    .\build.ps1 -Clean
+    .\build.ps1 -WithTools
+    .\build.ps1 -ToolchainPackage -ToolchainManifest .\toolchains\tools.json
     .\build.ps1 -Python "C:\Python312\python.exe"
     .\build.ps1 -SkipBackend
     .\build.ps1 -CliOnly
@@ -54,7 +63,11 @@ param(
     [string]$CertSubject,
     [string]$TimestampServer,
     [switch]$RequireSigned,
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [switch]$WithTools,
+    [switch]$ToolchainPackage,
+    [string]$ToolchainManifest,
+    [string]$ToolchainVersion
 )
 
 $ErrorActionPreference = "Stop"
@@ -326,6 +339,9 @@ function Find-Python {
 
 $pyExe = Find-Python
 
+# 工具链不再默认内置到主安装包。需要离线包时加 -WithTools / -ToolchainPackage，
+# 在 Step 1 构建出 omni-toolchain.exe 后再生成独立离线包。
+
 # ---------------------------------------------------------------------------
 # Step 1: Build backend with PyInstaller
 # ---------------------------------------------------------------------------
@@ -358,8 +374,49 @@ if (-not $SkipBackend) {
     }
     $cliSizeMB = [math]::Round((Get-Item $cliExe).Length / 1MB, 1)
     Write-Host "[build] CLI exe: $cliExe ($cliSizeMB MB)" -ForegroundColor Green
+
+    # 工具链安装器（随主安装包分发，约 7 MB）
+    $toolchainExe = "$ProjectRoot\python\dist\omni-toolchain.exe"
+    if (-not (Test-Path $toolchainExe)) {
+        Write-Host "ERROR: Toolchain installer not found at '$toolchainExe'" -ForegroundColor Red
+        exit 1
+    }
+    $toolchainSizeMB = [math]::Round((Get-Item $toolchainExe).Length / 1MB, 1)
+    Write-Host "[build] Toolchain installer: $toolchainExe ($toolchainSizeMB MB)" -ForegroundColor Green
 } else {
     Write-Host "[build] Skipping backend build." -ForegroundColor DarkGray
+}
+
+# ---------------------------------------------------------------------------
+# Step 1.5: Build offline toolchain package (optional)
+# ---------------------------------------------------------------------------
+if ($WithTools -or $ToolchainPackage) {
+    Write-Host ""
+    Write-Host "--- Build offline toolchain package ---" -ForegroundColor Yellow
+    $tcArgs = @{ OutputDir = (Join-Path $ProjectRoot "toolchain-release") }
+    if ($ToolchainManifest) {
+        $tcArgs["Manifest"] = if ([System.IO.Path]::IsPathRooted($ToolchainManifest)) {
+            $ToolchainManifest
+        } else {
+            Join-Path $ProjectRoot $ToolchainManifest
+        }
+    }
+    if ($ToolchainVersion) { $tcArgs["Version"] = $ToolchainVersion }
+    & (Join-Path $ProjectRoot "scripts\build-toolchain-offline.ps1") @tcArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: offline toolchain package build failed." -ForegroundColor Red
+        exit 1
+    }
+}
+
+# electron-builder 需要 omni-toolchain.exe（extraResources）。
+if (-not $SkipFrontend) {
+    $toolchainExe = "$ProjectRoot\python\dist\omni-toolchain.exe"
+    if (-not (Test-Path $toolchainExe)) {
+        Write-Host "ERROR: Toolchain installer not found at '$toolchainExe'." -ForegroundColor Red
+        Write-Host "       先运行 python\build.py（或去掉 -SkipBackend）。" -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 # ---------------------------------------------------------------------------
