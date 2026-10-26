@@ -1,29 +1,17 @@
 """工具链发现与 PATH 注入。
 
-工具链可以由独立安装器放到用户级共享目录，也可以由离线全量包放在应用目录：
+安装包不再自带工具链：cmake / ninja / 编译器都由用户环境提供。
 
-```
-%LOCALAPPDATA%/OMNI/toolchains/          # 独立安装器（推荐）
-├── cmake/bin/cmake.exe
-├── ninja/ninja.exe
-├── llvm-embedded/19.1.5/bin/clang.exe
-├── gcc-arm-none-eabi/14.2.1/bin/arm-none-eabi-gcc.exe
-└── cmsis-toolbox/2.13.0/bin/cbuild.exe
-
-<安装目录>/tools/                         # 离线全量包（可选）
-```
-
-解析优先级（只对当前进程及其子进程生效，不改用户系统环境）：
+解析顺序（只对当前进程及其子进程生效，不改用户系统环境）：
 
 1. 显式覆盖：``OMNI_CMAKE`` / ``OMNI_NINJA`` / ``OMNI_CLANG`` /
    ``OMNI_GCC`` / ``OMNI_CBUILD``。
-2. ``OMNI_TOOLS_DIR`` 指定的目录。
-3. 共享工具链目录 ``OMNI_TOOLCHAIN_HOME``，默认
-   ``%LOCALAPPDATA%/OMNI/toolchains``。
-4. 安装目录下的 ``tools/``（开发态是仓库根下的 ``tools/``）。
-5. 系统 ``PATH``。
-
-多个工具目录会一起前插 PATH；缺哪个工具就自然回退到后面的目录或系统。
+2. 可选工具目录（目录不存在则跳过）：``OMNI_TOOLS_DIR`` 指定的目录、
+   ``OMNI_TOOLCHAIN_HOME``（默认 ``%LOCALAPPDATA%/OMNI/toolchains``）、
+   安装目录下的 ``tools/``（源码态是仓库根下的 ``tools/``）。这些目录里的
+   ``bin``（含带版本号的变体）会前插到 PATH，并为 CMSIS-Toolbox 派生
+   ``CLANG_TOOLCHAIN_<ver>`` / ``GCC_TOOLCHAIN_<ver>`` / ``CMSIS_TOOLBOX_ROOT``。
+3. 系统 ``PATH``。
 """
 
 from __future__ import annotations

@@ -24,6 +24,15 @@ omni (本包)
 
 ## 版本记录
 
+### 0.22.0（未发布）
+
+- **移除离线工具链打包**：不再产出 `omni-toolchain.exe`，也不再附带 `toolchains/`、
+  `tools/`、`scripts/build-toolchain-offline.ps1`、`scripts/prepare-tools.ps1`。
+  构建工具（cmake / ninja / 编译器）改由用户环境提供：显式覆盖环境变量 →
+  可选工具目录（存在才生效）→ 系统 `PATH`；`omni toolchain` 仍可查看解析结果。
+- 安装包与 `package.json` 同步去掉 `toolchain:package` / `package:with-tools`，
+  以及 `toolchain/omni-toolchain.exe` 这项 extraResources。
+
 ### 0.21.0（2026-10-23）
 
 - `omni build` 输出重做（仍然逐行实时转发，不缓冲、不过滤）：
@@ -518,17 +527,15 @@ omni build -b stm32f407ig --project-dir examples\basic\template --json
 显示 cmake / ninja / clang / arm-none-eabi-gcc / cbuild 的最终路径与来源：
 
 - `env`：`OMNI_TOOLS_DIR`
-- `shared`：独立安装器的共享目录（默认 `%LOCALAPPDATA%\OMNI\toolchains`）
-- `app`：安装目录 `tools/`（离线全量包/开发态）
+- `shared`：`OMNI_TOOLCHAIN_HOME`（默认 `%LOCALAPPDATA%\OMNI\toolchains`）
+- `app`：安装目录 `tools/`（源码态是仓库根的 `tools/`）
 - `system`：用户系统 `PATH`
+
+安装包不再自带工具链；以上目录都是可选的，不存在就直接跳过。
 
 ```powershell
 omni toolchain
 omni toolchain --json
-
-# 独立离线安装器（也可由主安装器联动调用）
-omni-toolchain.exe --offline .\toolchain-offline
-omni-toolchain.exe --offline .\toolchain-offline.zip --only cmake --only ninja
 ```
 
 解析顺序：显式覆盖环境变量 → `OMNI_TOOLS_DIR` → `OMNI_TOOLCHAIN_HOME`/共享目录 →

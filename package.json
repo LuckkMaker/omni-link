@@ -15,8 +15,6 @@
     "python:dev": "cd python && ..\\.venv\\Scripts\\python.exe server.py",
     "python:install": "python -m venv .venv && .venv\\Scripts\\pip.exe install -r python/requirements.txt",
     "package": "powershell -ExecutionPolicy Bypass -File build.ps1",
-    "package:with-tools": "powershell -ExecutionPolicy Bypass -File build.ps1 -ToolchainPackage",
-    "toolchain:package": "powershell -ExecutionPolicy Bypass -File scripts/build-toolchain-offline.ps1",
     "package:clean": "powershell -ExecutionPolicy Bypass -File build.ps1 -Clean"
   },
   "build": {
@@ -42,10 +40,6 @@
       {
         "from": "python/dist/omni.exe",
         "to": "python/omni.exe"
-      },
-      {
-        "from": "python/dist/omni-toolchain.exe",
-        "to": "toolchain/omni-toolchain.exe"
       }
     ],
     "win": {

@@ -189,6 +189,20 @@ class ElfBackend:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    def _is_abs_source_path(path: str) -> bool:
+        """源码路径是否已是绝对路径（POSIX `/`、UNC `//`、Windows 盘符 `X:/`）。
+
+        DWARF 里的路径来自不同编译器：armclang/Keil 通常给绝对路径，gcc/clang 可能给
+        相对文件名 + 目录表。判断绝对路径时不能只看前导 `/`，否则 Windows 的 `C:/...`
+        会被当成相对路径，再拼一次 comp_dir，得到 `…/Debug/D:/…` 这种坏路径。
+        """
+        if not path:
+            return False
+        if path.startswith('/'):
+            return True
+        return len(path) >= 2 and path[1] == ':' and path[0].isalpha()
+
+    @staticmethod
     def _line_full_path(info) -> str:
         """组合 DWARF 行区间信息为完整源码路径（/ 分隔，不带尾斜杠）。
 
@@ -197,13 +211,14 @@ class ElfBackend:
         若只用 basename 会把它们混为一谈。此函数把三者拼成可区分的完整路径，
         供可断点行 / 断点定位等按文件查询时精确匹配。
         """
-        rel = (getattr(info, 'filename', '') or '').replace('\\', '/')
-        comp_dir = (getattr(info, 'comp_dir', '') or '').replace('\\', '/')
-        dirname = (getattr(info, 'dirname', '') or '').replace('\\', '/')
+        rel = (getattr(info, 'filename', '') or '').replace('\\', '/').rstrip('/')
+        comp_dir = (getattr(info, 'comp_dir', '') or '').replace('\\', '/').rstrip('/')
+        dirname = (getattr(info, 'dirname', '') or '').replace('\\', '/').rstrip('/')
         full = rel
-        if dirname and rel and not rel.startswith('/'):
+        if dirname and rel and not ElfBackend._is_abs_source_path(rel):
             full = dirname + '/' + rel
-        if comp_dir and full and not full.startswith('/') and not comp_dir.startswith('/'):
+        if comp_dir and full and not ElfBackend._is_abs_source_path(full) \
+                and not ElfBackend._is_abs_source_path(comp_dir):
             full = comp_dir + '/' + full
         return full.rstrip('/')
 
