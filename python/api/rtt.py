@@ -79,6 +79,10 @@ async def rtt_start(uid: str, req: RttStartRequest):
 
     在目标 RAM 中搜索 SEGGER RTT 控制块，解析通道，恢复目标运行并开始轮询。
     使用 async + asyncio.wait_for 包装，防止 SWD 通信挂起导致请求永不返回。
+
+    超时后不仅返回 408，还会给后端的启动流程发取消令牌：否则那个 to_thread
+    线程会继续扫描，稍后把会话装上去并推送 rtt.started——前端已经显示"启动
+    失败"，后端却在跑，随后的 Stop/Start 状态完全错乱（实机报告）。
     """
     try:
         result = await asyncio.wait_for(
@@ -94,22 +98,32 @@ async def rtt_start(uid: str, req: RttStartRequest):
         )
     except asyncio.TimeoutError:
         # SWD 通信挂起（常见于外部工具如 Keil 下载后 session 状态异常）
+        cancelled = await asyncio.to_thread(rtt_backend.cancel_start, uid, "timeout")
         msg = (f"RTT 启动超时（{int(RTT_START_TIMEOUT)}秒）。"
                "可能是外部工具占用调试接口或 session 状态异常，"
                "请断开并重新连接仿真器后重试")
+        if cancelled:
+            msg += "；已取消后台仍在进行的启动"
         event_manager.log("error", f"RTT: {msg}")
         event_manager.emit("rtt.error", {"uid": uid, "error": msg})
         raise HTTPException(status_code=408, detail=msg)
 
+    if result.get("cancelled"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "RTT 启动已取消")
+    if result.get("busy"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "RTT 启动进行中")
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("error", "RTT start failed"))
     return result
 
 
 @router.post("/probes/{uid}/rtt/stop")
-def rtt_stop(uid: str):
-    """停止 RTT 会话"""
-    return rtt_backend.stop(uid)
+async def rtt_stop(uid: str):
+    """停止 RTT 会话（同时取消仍在进行的启动）
+
+    stop 会等待轮询线程退出（最多 1s），放线程池执行避免阻塞事件循环。
+    """
+    return await asyncio.to_thread(rtt_backend.stop, uid)
 
 
 @router.get("/probes/{uid}/rtt/channels")

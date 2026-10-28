@@ -28,6 +28,11 @@ class FlashOperationCancelled(Exception):
 # 每次轮询间隔 2s，2 轮=约 4s 确认时间。
 REMOVAL_GRACE_POLLS = 2
 
+# 一次连接尝试"仍算进行中"的时长（秒）。超过它仍没返回，基本可判定线程卡在
+# J-Link DLL / USB 里（原生调用无法取消），允许用户重试；重试本身也受 DLL 锁
+# 等待上限（core/jlink_lock.py）保护，不会无限挂起。
+CONNECT_INFLIGHT_TTL = 45.0
+
 
 class ProbeState(Enum):
     """探针连接状态"""
@@ -93,6 +98,9 @@ class PyOCDBackend(BackendInterface):
         # 保证调试操作不被周期性刷新并发访问 pyOCD target 影响。
         self._op_locks: dict[str, threading.Lock] = {}
         self._op_locks_guard = threading.Lock()
+        # 正在进行的连接尝试（uid -> 开始时间 monotonic）。连接是原生阻塞调用，
+        # 超时后线程无法取消；用它阻止用户连续重试时叠加更多卡死的线程。
+        self._connect_inflight: dict[str, float] = {}
 
     # ── 探针扫描 ──────────────────────────────────────────────
 
@@ -145,39 +153,44 @@ class PyOCDBackend(BackendInterface):
         看不到它（详见 detect_probe_changes 注释）。因此这里把"正持有活动会话
         但仍插着的探针"补充进来，避免会话建立后探针从设备列表/拔出检测中消失。
 
-        线程安全：J-Link DLL 不是线程安全的（详见 core/jlink_lock.py）。若此刻
-        已有其他线程在调用 DLL（连接/烧录/调试可能持续数十秒），本轮不做枚举，
-        直接用缓存返回 —— 既不并发调用同一个 DLL，也不阻塞调用方
-        （后台探针监控线程每 2s 就会调用本函数一次）。
+        线程安全：J-Link DLL 不是线程安全的（详见 core/jlink_lock.py），
+        ``install_pylink_lock`` 已给每个 pylink 方法单独加锁；本函数不再用一把
+        粗锁包住整段（含 CMSIS-DAP/USB）枚举，否则慢枚举会连带阻塞所有 J-Link 操作。
         """
         from pyocd.core.helpers import ConnectHelper
-        from core.jlink_lock import JLINK_DLL_LOCK
 
         result = []
         seen = set()
 
-        if JLINK_DLL_LOCK.acquire(blocking=False):
-            try:
-                probes = ConnectHelper.get_all_connected_probes(blocking=False)
-                for probe in probes:
-                    uid = probe.unique_id
-                    seen.add(uid)
-                    # 首次发现时缓存探针信息；已连接的探针 product_name 会变化，用缓存保持一致
-                    if uid not in self._probe_info_cache:
-                        info = ProbeInfo(
-                            uid=uid,
-                            vendor=probe.vendor_name or "Unknown",
-                            product=probe.product_name or "Unknown",
-                            vid=getattr(probe, 'vid', 0) or 0,
-                            pid=getattr(probe, 'pid', 0) or 0,
-                            serial=getattr(probe, 'serial_number', None) or uid,
-                        )
-                        self._probe_info_cache[uid] = info
-                    result.append(self._probe_info_cache[uid])
-            finally:
-                JLINK_DLL_LOCK.release()
-        else:
-            # DLL 正被其他线程占用：用缓存信息应答，不做枚举（也绝不并发调用 DLL）
+        # 注意：这里**不再**用 JLINK_DLL_LOCK 包住整个枚举。
+        # 原因：pyOCD 的聚合枚举会把 J-Link 和 CMSIS-DAP（libusb/HID）一起扫一遍，
+        # 后者在部分机器上会阻塞数秒甚至更久（实测卡在 HidD_SetFeature /
+        # libusb_interrupt_transfer）。旧实现把这整段枚举放在 J-Link DLL 锁里，
+        # 于是后台每 2s 一次的探针扫描会把所有 J-Link 操作（连接/RTT/烧录）挡在
+        # 锁外，表现为"随机卡死、连接超时"。
+        # 现在 pylink 调用本身已被 install_pylink_lock 逐个加锁（见 core/jlink_lock.py），
+        # 不再需要外层粗锁；枚举慢只会拖慢探针列表刷新，不阻塞 J-Link。
+        try:
+            probes = ConnectHelper.get_all_connected_probes(blocking=False)
+            for probe in probes:
+                uid = probe.unique_id
+                seen.add(uid)
+                # 首次发现时缓存探针信息；已连接的探针 product_name 会变化，用缓存保持一致
+                if uid not in self._probe_info_cache:
+                    info = ProbeInfo(
+                        uid=uid,
+                        vendor=probe.vendor_name or "Unknown",
+                        product=probe.product_name or "Unknown",
+                        vid=getattr(probe, 'vid', 0) or 0,
+                        pid=getattr(probe, 'pid', 0) or 0,
+                        serial=getattr(probe, 'serial_number', None) or uid,
+                    )
+                    self._probe_info_cache[uid] = info
+                result.append(self._probe_info_cache[uid])
+        except Exception as exc:
+            # DLL 忙/卡死（JLinkDllBusy）或枚举瞬时失败：不要让后台监控线程
+            # 反复抛异常，也不要误判"探针全没了"——退回缓存信息。
+            logger.debug("Probe enumeration skipped: %s", exc)
             result.extend(self._probe_info_cache.values())
             seen.update(self._probe_info_cache)
 
@@ -323,6 +336,50 @@ class PyOCDBackend(BackendInterface):
                 connect_mode: str | None = None, force: bool = False,
                 device: str | None = None,
                 packs: list[str] | None = None) -> bool:
+        """连接指定探针（**同一探针同一时刻只允许一个连接尝试**）。
+
+        为什么需要这个闸门：``pyocd``/``pylink`` 的 ``open()`` 是原生阻塞调用，
+        HTTP 层超时（前端 30s / 后端 20s）根本不会真的终止它。旧实现超时后把
+        线程丢在后台不管，用户看到"timeout of 10000ms exceeded"就又点一次，
+        于是每次重试都再起一个线程去抢同一把 J-Link DLL 锁 / 同一个 USB 句柄：
+        线程越积越多，全都永久卡在 DLL 里，最后连关闭、断开、其他探针操作也排队，
+        整个后端失去响应（实机报告："多次连接和断开 jlink 后残留，再也连不上"）。
+
+        现在：同一探针的连接尝试带时间戳登记；上一次还没返回时，新请求立即失败并
+        给出可执行的提示，不再制造新的僵尸线程。TTL 之后允许重试（此时 DLL 锁
+        等待上限会保证重试在有限时间内返回，而不是无限挂起）。
+        """
+        now = time.monotonic()
+        with self._lock:
+            started = self._connect_inflight.get(probe_uid)
+            if started is not None and now - started < CONNECT_INFLIGHT_TTL:
+                waited = now - started
+                msg = (f"上一次连接尝试仍未返回（已 {waited:.0f}s），探针可能被卡住的 "
+                       "J-Link 调用占用。请稍候重试；若持续失败，请重启后端"
+                       "（omni backend stop）或重新插拔探针。")
+                session_info = self._sessions.get(probe_uid)
+                if session_info is None:
+                    session_info = ProbeSession(uid=probe_uid)
+                    self._sessions[probe_uid] = session_info
+                session_info.state = ProbeState.ERROR
+                session_info.error = msg
+                logger.warning("Connect to %s rejected: previous attempt still running", probe_uid)
+                return False
+            self._connect_inflight[probe_uid] = now
+        try:
+            return self._connect_impl(probe_uid, target=target, interface=interface,
+                                      speed=speed, connect_mode=connect_mode,
+                                      force=force, device=device, packs=packs)
+        finally:
+            with self._lock:
+                if self._connect_inflight.get(probe_uid) == now:
+                    self._connect_inflight.pop(probe_uid, None)
+
+    def _connect_impl(self, probe_uid: str, target: str | None = None,
+                      interface: str = "swd", speed: int | None = None,
+                      connect_mode: str | None = None, force: bool = False,
+                      device: str | None = None,
+                      packs: list[str] | None = None) -> bool:
         """连接指定探针
 
         Args:
@@ -445,6 +502,20 @@ class PyOCDBackend(BackendInterface):
         # JTAG 连接失败时的降速重试频率（Hz）
         JTAG_FALLBACK_SPEED = 1000000
 
+        # 探针类型前缀：pyOCD 的 DebugProbeAggregator 支持 "jlink:<serial>" 形式，
+        # 只在对应后端里查找。这一点很关键——不加前缀时，即使目标就是 J-Link，
+        # `choose_probe` 仍会把 CMSIS-DAP 的 libusb/HID 枚举跑一遍；实测该枚举会在
+        # HidD_SetFeature / libusb_interrupt_transfer 里阻塞十几秒到永远，于是
+        # “J-Link 连接超时”其实卡在完全不相关的 DAPLink 枚举上（py-spy 栈已确认）。
+        probe_type_prefix = ""
+        cached_info = self._probe_info_cache.get(probe_uid)
+        looks_jlink = bool(device) or (
+            cached_info is not None
+            and ("jlink" in (cached_info.product or "").lower()
+                 or "segger" in (cached_info.vendor or "").lower()))
+        if looks_jlink:
+            probe_type_prefix = "jlink:"
+
         def _do_connect(freq: int, proto: str):
             """实际的连接逻辑，在线程池中执行"""
             opts = dict(options)
@@ -452,7 +523,7 @@ class PyOCDBackend(BackendInterface):
             opts['dap_protocol'] = proto
             sess = ConnectHelper.session_with_chosen_probe(
                 blocking=False,
-                unique_id=probe_uid,
+                unique_id=f"{probe_type_prefix}{probe_uid}",
                 target_override=target_override,
                 init_board=False,
                 options=opts,
@@ -475,15 +546,53 @@ class PyOCDBackend(BackendInterface):
 
         session = None
         last_error = None
+        # 连接超时后，worker 线程无法取消；如果它之后才把 session 打开，必须把
+        # 这个"迟到"的会话关掉，否则探针会一直被一个没人持有的会话占用（表现为
+        # 后面所有连接都失败、只能重启后端/拔插）。
+        def _late_flag() -> dict:
+            return {"timed_out": False, "closed": False}
+
+        def _close_late_session(fut, flag):
+            # 只处理"已经结束"的 future：done_callback 里一定成立；超时路径里调用时
+            # 必须显式检查 fut.done()，绝不能在这里 result() 阻塞——那会把 HTTP
+            # 线程重新拖回原生调用，等于没超时（实机复现：请求卡到 30s+）。
+            if not flag["timed_out"] or flag["closed"] or not fut.done():
+                return
+            if fut.cancelled():
+                return
+            flag["closed"] = True
+            try:
+                late = fut.result()
+            except Exception:
+                return
+            if late is None:
+                return
+            try:
+                late.options.set('resume_on_disconnect', False)
+            except Exception:
+                pass
+            try:
+                late.close()
+                event_manager.log("warning",
+                                  "连接在超时后才完成，已自动关闭迟到的会话（释放探针）")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to close late session: %s", exc)
+
         try:
             import concurrent.futures
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
+                timeout_flag = _late_flag()
                 future = executor.submit(_do_connect, actual_speed, interface)
+                future.add_done_callback(lambda f: _close_late_session(f, timeout_flag))
                 try:
                     session = future.result(timeout=CONNECT_TIMEOUT)
                 except concurrent.futures.TimeoutError:
+                    timeout_flag["timed_out"] = True
                     future.cancel()
+                    # 极小概率：设置标志前 worker 刚好完成，done_callback 已按"未超时"
+                    # 跳过；这里补一次，确保迟到的会话一定被关闭。
+                    _close_late_session(future, timeout_flag)
                     last_error = f"连接超时（{int(CONNECT_TIMEOUT)}秒），目标可能未上电或未复位"
                     event_manager.log("error", f"Connection timeout: {last_error}")
                 except Exception as e:
@@ -499,13 +608,22 @@ class PyOCDBackend(BackendInterface):
                             event_manager.log("warning",
                                               f"JTAG connect failed at {actual_speed}Hz: {e}; "
                                               f"retrying at {JTAG_FALLBACK_SPEED}Hz...")
+                            fallback_flag = _late_flag()
                             try:
                                 future2 = executor.submit(_do_connect, JTAG_FALLBACK_SPEED, interface)
+                                future2.add_done_callback(
+                                    lambda f: _close_late_session(f, fallback_flag))
                                 session = future2.result(timeout=CONNECT_TIMEOUT)
                                 if session is not None:
                                     last_error = None
                                     event_manager.log("info",
                                                       f"JTAG connected at fallback {JTAG_FALLBACK_SPEED}Hz")
+                            except concurrent.futures.TimeoutError:
+                                fallback_flag["timed_out"] = True
+                                future2.cancel()
+                                _close_late_session(future2, fallback_flag)
+                                last_error = (f"JTAG 降速连接超时"
+                                              f"（{int(CONNECT_TIMEOUT)}秒）")
                             except Exception as e2:
                                 last_error = str(e2)
                         # JTAG 降速重试仍失败，提供明确的错误信息
@@ -605,6 +723,9 @@ class PyOCDBackend(BackendInterface):
         """
         with self._lock:
             session_info = self._sessions.pop(probe_uid, None)
+            # 用户显式断开 = 明确要求复位连接状态：清掉"连接进行中"标记，允许立刻重连。
+            # （真卡死的原生线程仍受 DLL 锁等待上限保护，不会把新请求无限拖住。）
+            self._connect_inflight.pop(probe_uid, None)
 
         if session_info and session_info.session:
             # 先通知前端探针已断开，UI 立即更新

@@ -32,7 +32,10 @@ def add_parser(sub):
     s.add_argument("--size", type=parse_int, help="搜索范围大小")
     s.add_argument("--up-channel", type=int, default=0, help="监听的 up channel（默认 0）")
     s.add_argument("--down-channel", type=int, default=0, help="发送的 down channel（默认 0）")
-    s.set_defaults(func=run_command(_start))
+    # 后端 RTT_START_TIMEOUT=30s：CLI 的 HTTP 超时必须比它长，否则会把后端仍在
+    # 正常扫描的启动误判成 "timed out"（随后日志里又出现"已启动"）。
+    # set_defaults 优先于 common_parser 的 --timeout=30 默认值，用户显式传入仍生效。
+    s.set_defaults(func=run_command(_start), timeout=45)
 
     s = ps.add_parser("stop", parents=[common_parser()], help="停止 RTT 会话（已缓存的上行数据仍可读取）")
     s.add_argument("--uid", help="探针唯一 ID（缺省取第一个探针）")

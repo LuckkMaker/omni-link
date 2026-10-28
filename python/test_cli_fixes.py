@@ -323,20 +323,20 @@ def test_flash_payload_rtt_stopped() -> None:
 
 def test_rtt_user_halted() -> None:
     print("== 11. RTT 用户暂停标志同步 ==")
-    from core.rtt_backend import rtt_backend
+    from core.rtt_backend import RTTBackend, _RttSession
 
     uid = "__unit_test_uid__"
-    rtt_backend.set_user_halted(uid, True)
-    check("无 RTT 会话时不登记", rtt_backend._user_halted.get(uid) is None)
-    rtt_backend._control_blocks[uid] = object()
+    backend = RTTBackend()
+    backend.set_user_halted(uid, True)
+    check("无 RTT 会话时不登记", uid not in backend._sessions)
+    backend._sessions[uid] = _RttSession(uid, object(), 0, 0)
     try:
-        rtt_backend.set_user_halted(uid, True)
-        check("有会话时登记用户暂停", rtt_backend._user_halted.get(uid) is True)
-        rtt_backend.set_user_halted(uid, False)
-        check("继续运行时清除用户暂停", rtt_backend._user_halted.get(uid) is False)
+        backend.set_user_halted(uid, True)
+        check("有会话时登记用户暂停", backend._sessions[uid].user_halted is True)
+        backend.set_user_halted(uid, False)
+        check("继续运行时清除用户暂停", backend._sessions[uid].user_halted is False)
     finally:
-        rtt_backend._control_blocks.pop(uid, None)
-        rtt_backend._user_halted.pop(uid, None)
+        backend._sessions.pop(uid, None)
 
 
 def test_verify_reset_order() -> None:

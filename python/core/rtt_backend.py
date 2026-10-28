@@ -47,6 +47,19 @@ RTT_SCAN_WORDS_PER_READ = 4096
 # 遇到坏块时二分下探的最小粒度（字）。到该粒度仍失败即判定为真实读失败，
 # 避免把"某段 RAM 读不动"静默当成"没有控制块"。
 RTT_SCAN_MIN_WORDS = 16
+# 读取失败时的二分下探深度：16KB -> 4KB -> 1KB。再往下只是在确认"这段 RAM
+# 读不动"这件事上反复发读请求——实测 J-Link 读不存在的 CCM 段时，16KB 大读会
+# 先失败，随后 64KB 区段被放大成 2048 次读 + 1024 条 WARN，把一次扫描拖到几十秒
+# （用户看到的 0x1000F2C0~0x1000F300 刷屏即此）。现在最多下探两级，1KB 仍失败
+# 就整段跳过并只记一条结论。
+RTT_SCAN_MAX_BISECT_DEPTH = 2
+# 单个 region 记录的失败明细上限（错误信息只展示前几条，其余汇总成计数）。
+RTT_SCAN_MAX_FAILURES = 8
+# 扫描前对 region 起始做一次小读（16 字节）探测可读性：读不动就整段跳过，
+# 不再用 16KB 大读去"发现"某段 RAM 不可读（J-Link 首次失败可能耗时数秒）。
+RTT_SCAN_PROBE_BYTES = 16
+# 连续多少个扫描块读取失败就判定整个 region 不可读并提前结束该 region。
+RTT_SCAN_MAX_CONSECUTIVE_FAILURES = 2
 
 # ELF 中 RTT 控制块的符号名。pyOCD 官方 rtt_manager 也用这个名字。
 # 固件加载 ELF 时优先用符号地址直接定位，可完全跳过 RAM 全扫描（192KB 全扫
@@ -244,6 +257,47 @@ def _halted_location(uid: str) -> str:
     return text
 
 
+class _StartToken:
+    """一次 RTT 启动流程的取消令牌。
+
+    启动可能在 ``asyncio.wait_for`` 超时后仍留在后台线程里（to_thread 无法取消），
+    也可能被用户 Stop 打断。令牌让仍在跑的启动流程在下一个检查点自行退出，
+    而不是在 HTTP 已经返回失败后偷偷把会话装上去（表现为"前端显示超时，稍后日志
+    却打印 RTT 启动成功"，随后 Stop/Start 状态完全错乱）。
+    """
+
+    __slots__ = ("cancel", "created_at")
+
+    def __init__(self):
+        self.cancel = threading.Event()
+        self.created_at = time.monotonic()
+
+
+class _RttSession:
+    """一个 RTT 会话的完整状态（每个探针同时最多一个）。
+
+    轮询线程持有会话对象本身，而不再每轮从共享字典按 uid 取状态：这样 stop()
+    之后即使旧线程还卡在一次读里，它醒来也会发现"我已经不是当前会话"并退出，
+    不会因为新会话复用了同一个 uid 而继续跑（旧实现会因此泄漏轮询线程，多个
+    线程同时读同一 target，最终把 J-Link/应用拖死）。
+    """
+
+    __slots__ = ("uid", "cb", "lock", "running", "stop", "thread",
+                 "up_channel", "down_channel", "user_halted")
+
+    def __init__(self, uid: str, cb, up_channel: int, down_channel: int):
+        self.uid = uid
+        self.cb = cb
+        self.lock = threading.Lock()
+        self.running = threading.Event()
+        self.running.set()
+        self.stop = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.up_channel = up_channel
+        self.down_channel = down_channel
+        self.user_halted = False
+
+
 class RTTBackend:
     """RTT 后端
 
@@ -252,19 +306,10 @@ class RTTBackend:
     """
 
     def __init__(self):
-        # uid -> RTTControlBlock
-        self._control_blocks: dict[str, object] = {}
-        # uid -> 轮询线程
-        self._poll_threads: dict[str, threading.Thread] = {}
-        # uid -> 运行标志（Event）
-        self._running: dict[str, threading.Event] = {}
-        # uid -> 锁（协调 up channel read 与 down channel write）
-        self._locks: dict[str, threading.Lock] = {}
-        # uid -> 选中的 up/down channel 索引
-        self._up_channel: dict[str, int] = {}
-        self._down_channel: dict[str, int] = {}
-        # uid -> 用户主动 halt 标志（True=用户主动暂停，轮询线程不自动恢复）
-        self._user_halted: dict[str, bool] = {}
+        # uid -> _RttSession（当前活动会话）
+        self._sessions: dict[str, _RttSession] = {}
+        # uid -> _StartToken（正在进行的启动流程，可被 stop()/超时取消）
+        self._starting: dict[str, _StartToken] = {}
         # 全局锁，保护字典操作
         self._global_lock = threading.Lock()
         # uid -> RTT 操作互斥锁（start/reset 共用，threading.Lock）。防止 asyncio.wait_for
@@ -285,23 +330,57 @@ class RTTBackend:
         up_channel: int = 0,
         down_channel: int = 0,
     ) -> dict:
-        """启动 RTT（带每探针互斥，防止并发启动操作同一 target）
+        """启动 RTT（带每探针互斥 + 可取消令牌）
 
-        此方法经 asyncio.to_thread 调用，外层有 5s 超时兜底；但超时后线程
-        并不会真正终止（to_thread 无法取消）。用 per-uid 互斥锁保证同一探针
-        同时只有一个启动流程在跑，避免超时残留的僵尸线程与新请求重复复位、
-        重复启动轮询。
+        此方法经 asyncio.to_thread 调用，外层有 RTT_START_TIMEOUT 兜底；但超时后
+        线程并不会真正终止（to_thread 无法取消）。这里做两层保护：
+
+        1. ``_starting`` 令牌：同一探针同时只允许一个启动流程，重复请求立即返回
+           "启动仍在进行中"，不再排队 6s 后才失败；
+        2. 令牌可被 :meth:`cancel_start` / :meth:`stop` 置位，后台线程在下一个
+           检查点（每次块读、复位等待前后）自行退出，不会在 HTTP 已经超时之后
+           再把会话装上去。
         """
         with self._global_lock:
             lock = self._ops_locks.setdefault(uid, threading.Lock())
-        if not lock.acquire(timeout=6.0):
+            if uid in self._starting:
+                return {"success": False, "busy": True,
+                        "error": "该探针的 RTT 启动仍在进行中（正在扫描控制块），请稍候"}
+        if not lock.acquire(timeout=RTT_OP_LOCK_WAIT):
             return {"success": False,
-                    "error": "已有另一个 RTT 启动仍在进行中，请稍后重试"}
+                    "error": "已有另一个 RTT 复位/启动操作进行中，请稍后重试"}
+        token = None
         try:
+            # 拿到操作锁后再次检查：避免与 stop() 或另一个刚结束的 start 竞争
+            with self._global_lock:
+                if uid in self._starting:
+                    return {"success": False, "busy": True,
+                            "error": "该探针的 RTT 启动仍在进行中（正在扫描控制块），请稍候"}
+                token = _StartToken()
+                self._starting[uid] = token
             return self._start_inner(uid, address=address, size=size,
-                                     up_channel=up_channel, down_channel=down_channel)
+                                     up_channel=up_channel,
+                                     down_channel=down_channel, token=token)
         finally:
+            if token is not None:
+                with self._global_lock:
+                    if self._starting.get(uid) is token:
+                        self._starting.pop(uid, None)
             lock.release()
+
+    def cancel_start(self, uid: str, reason: str = "timeout") -> bool:
+        """请求取消该探针仍在进行的 RTT 启动（HTTP 超时 / stop / 断开时调用）。
+
+        Returns:
+            True 表示确实有一个启动流程被标记取消。
+        """
+        with self._global_lock:
+            token = self._starting.get(uid)
+        if token is None:
+            return False
+        token.cancel.set()
+        event_manager.log("warning", f"RTT: 已请求取消正在进行的启动（{reason}）")
+        return True
 
     def _start_inner(
         self,
@@ -310,6 +389,7 @@ class RTTBackend:
         size: Optional[int] = None,
         up_channel: int = 0,
         down_channel: int = 0,
+        token: Optional[_StartToken] = None,
     ) -> dict:
         """启动 RTT 核心实现（启动流程已在 start() 中加互斥）
 
@@ -321,15 +401,29 @@ class RTTBackend:
             size: 控制块搜索范围大小，None 则自动
             up_channel: 监听的 up channel 索引（target -> host）
             down_channel: 发送的 down channel 索引（host -> target）
+            token: 启动取消令牌（None 表示独立调用，不响应取消）
 
         Returns:
             {success, up_channels, down_channels, error?}
         """
+        if token is None:
+            token = _StartToken()
+
+        def _cancelled() -> bool:
+            return token.cancel.is_set()
+
+        def _cancelled_result() -> dict:
+            return {"success": False, "cancelled": True,
+                    "error": "RTT 启动已取消（超时/停止）"}
+
         # 已在运行则先返回当前状态
         with self._global_lock:
-            if uid in self._control_blocks and self._running.get(uid, threading.Event()).is_set():
-                cb = self._control_blocks[uid]
-                return self._build_start_result(cb, uid, up_channel, down_channel)
+            current = self._sessions.get(uid)
+            if current is not None and current.running.is_set():
+                return self._build_start_result(current.cb, uid, up_channel, down_channel)
+
+        if _cancelled():
+            return _cancelled_result()
 
         # 互斥检查：同一探针下 Monitor 与 RTT 不能同时运行
         try:
@@ -375,6 +469,12 @@ class RTTBackend:
             try:
                 mem_map = target.get_memory_map()
                 ram_regions = list(mem_map.iter_matching_regions(type=MemoryType.RAM))
+                # 扫描顺序：优先主 SRAM（0x2000_0000~0x3FFF_FFFF），再按容量从大到小。
+                # 多数 Cortex-M 的控制块在 0x2000_0000 起的 .bss 里，而 CCM/DTCM
+                # （如 STM32F407 的 0x1000_0000，64KB）通常没有 RTT 且可能根本读不动。
+                # 先扫 SRAM 就能在 0.2s 内命中并完全跳过 CCM，避免开局先吃一次
+                # 不可读区段的失败（J-Link 首次失败可达数秒）。
+                ram_regions.sort(key=self._rtt_region_priority)
                 if ram_regions:
                     event_manager.log("info", f"RTT: found {len(ram_regions)} RAM region(s):")
                     for i, r in enumerate(ram_regions):
@@ -405,9 +505,21 @@ class RTTBackend:
             symbol_checked = False
             # 记录每个 region 的扫描结论，失败时汇总成可执行的错误信息
             scan_failures: list[str] = []
+            # 本次启动中已确认不可读的地址范围。启动失败会复位重试搜索，
+            # 不可读的 CCM 区段没必要每次再花几秒去失败一次（J-Link 首次
+            # 访问坏区段可能要 2~9s）。
+            dead_ranges: list[tuple[int, int]] = []
+
+            def _in_dead_range(lo: int, hi: int) -> bool:
+                for dead_lo, dead_hi in dead_ranges:
+                    if lo < dead_hi and hi > dead_lo:
+                        return True
+                return False
 
             def _try_parse_at(addr: int, origin: str):
                 """在指定地址解析控制块；不成立则返回 None。"""
+                if _cancelled():
+                    return None
                 try:
                     cb_obj = RTTControlBlock.from_target(target, address=addr, size=0)
                     cb_obj.start()
@@ -420,6 +532,26 @@ class RTTBackend:
                     event_manager.log("warning", f"RTT: 解析 0x{addr:08X} 失败（{origin}）: {e}")
                 return None
 
+            def _log_scan_result(r, res) -> None:
+                """把一次 region 扫描的结论压缩成一两条日志（不再逐 64B 段刷屏）。"""
+                failures = res.get("failures") or []
+                if res.get("unreadable"):
+                    event_manager.log(
+                        "warning",
+                        f"RTT: region 0x{r.start:08X} 不可读，已跳过"
+                        + (f"（{failures[0]}）" if failures else ""))
+                    return
+                if failures:
+                    shown = "；".join(failures[:2])
+                    more = f" 等共 {res.get('failure_count', len(failures))} 段" \
+                        if res.get("failure_count", len(failures)) > 2 else ""
+                    event_manager.log(
+                        "info",
+                        f"RTT: region 0x{r.start:08X} 部分区段不可读（{shown}{more}），"
+                        "已扫描可读部分")
+                if res["hit"] is None:
+                    event_manager.log("info", f"RTT: no control block in region 0x{r.start:08X}")
+
             def _search_control_block(limit_bytes: Optional[int] = None):
                 """在所有 RAM region 中搜索 RTT 控制块
 
@@ -427,28 +559,48 @@ class RTTBackend:
                 否则遍历所有 RAM region（对标 J-Link RTT Viewer 的行为）。
                 limit_bytes 非 None 时，每个 RAM region 只扫描起始 limit_bytes
                 字节（快速探测）；None 时完整扫描整个 region。
+                每次块读之间都会检查取消令牌，Stop/HTTP 超时后能在一次读的
+                时间内退出，而不是扫完整个 RAM。
                 """
                 nonlocal last_error
                 del scan_failures[:]
 
                 # 用户指定了地址，只搜索指定范围
                 if address is not None:
+                    range_end = address + (size or 1)
+                    if _in_dead_range(address, range_end):
+                        # 已经确认读不动：直接给出与首次失败一致的结论，不要用
+                        # "跳过重复尝试"覆盖真正的错误（否则用户看不到根因）。
+                        msg = f"0x{address:08X} 区段不可读（本次启动中已确认）"
+                        scan_failures.append(msg)
+                        if not last_error:
+                            last_error = msg
+                        event_manager.log("info",
+                                          f"RTT: 用户指定范围 0x{address:08X} 在本次启动中"
+                                          "已确认不可读，跳过重复尝试")
+                        return None
                     event_manager.log("info", f"RTT: searching at specified address 0x{address:08X}"
                                       f"{f' size=0x{size:X}' if size else ''}...")
                     if size:
-                        res = self._fast_scan_region(target, address, size)
+                        res = self._fast_scan_region(target, address, size,
+                                                     cancel=token.cancel)
                         hit = res["hit"]
+                        if res.get("unreadable"):
+                            dead_ranges.append((address, range_end))
                         if res["candidates"]:
                             for cand in res["candidates"]:
                                 cb_obj = _try_parse_at(cand, "用户指定范围内候选")
                                 if cb_obj is not None:
                                     return cb_obj
                         if hit is None:
-                            if not res["candidates"]:
-                                last_error = (f"用户指定范围 0x{address:08X} "
-                                              f"(size=0x{size:X}) 中未找到控制块")
                             if res["failures"]:
                                 scan_failures.extend(res["failures"])
+                                last_error = (f"用户指定范围 0x{address:08X} "
+                                              f"(size=0x{size:X}) 有区段无法读取："
+                                              + "；".join(res["failures"][:2]))
+                            elif not res["candidates"]:
+                                last_error = (f"用户指定范围 0x{address:08X} "
+                                              f"(size=0x{size:X}) 中未找到控制块")
                             return None
                     cb_obj = _try_parse_at(address, "用户指定地址")
                     if cb_obj is not None:
@@ -459,25 +611,35 @@ class RTTBackend:
 
                 # 自动模式：遍历所有 RAM region，用大块 read32 粗扫定位控制块
                 for r in ram_regions:
+                    if _cancelled():
+                        return None
+                    if _in_dead_range(r.start, r.start + r.length):
+                        scan_failures.append(
+                            f"0x{r.start:08X}~0x{r.start + r.length:08X} 不可读（已确认）")
+                        event_manager.log("info",
+                                          f"RTT: region 0x{r.start:08X} 本次启动中已确认"
+                                          "不可读，跳过")
+                        continue
                     effective = None
                     if limit_bytes is not None and r.length > limit_bytes:
                         effective = limit_bytes
                     scope = f"first {effective // 1024}KiB" if effective else "all"
                     event_manager.log("info", f"RTT: scanning RAM region 0x{r.start:08X} "
                                       f"(size=0x{r.length:X}, scope={scope})...")
-                    res = self._fast_scan_region(target, r, max_bytes=effective)
+                    res = self._fast_scan_region(target, r, max_bytes=effective,
+                                                 cancel=token.cancel)
+                    _log_scan_result(r, res)
+                    if res.get("unreadable"):
+                        dead_ranges.append((r.start, r.start + r.length))
                     for f in res["failures"]:
-                        event_manager.log("warning", f"RTT: {f}")
                         scan_failures.append(f)
                     if res["candidates"]:
                         for cand in res["candidates"]:
                             cb_obj = _try_parse_at(cand, f"region 0x{r.start:08X} 候选")
                             if cb_obj is not None:
                                 return cb_obj
-                    if res["hit"] is None:
-                        event_manager.log("info", f"RTT: no control block in region 0x{r.start:08X}"
-                                          + (f"（{len(res['failures'])} 段读取失败）"
-                                             if res["failures"] else ""))
+                if _cancelled():
+                    return None
                 if scan_failures:
                     last_error = ("控制块未找到，且以下 RAM 段无法读取：" +
                                   "；".join(scan_failures[:4]))
@@ -525,9 +687,12 @@ class RTTBackend:
 
             # 第1轮：低地址快速探测（每个 RAM region 前 16KB）。控制块就在 .bss 前部
             # 时（绝大多数固件）这一步即可命中；16KB@28KB/s ≈ 0.6s，远快于原来的 64KB。
-            if cb is None:
+            if cb is None and not _cancelled():
                 event_manager.log("info", "RTT: 低地址快速探测（每个 RAM region 前 16KB）...")
                 cb = _search_control_block(limit_bytes=0x4000)
+
+            if _cancelled():
+                return _cancelled_result()
 
             # 探测未命中且目标处于暂停态：主场景（如"下载程序后未复位运行"）固件
             # 尚未初始化 RTT。单纯 resume 不会重跑启动代码，必须复位运行，让固件
@@ -554,6 +719,8 @@ class RTTBackend:
                 max_reset_attempts = 2
                 reboot_sleep = 1.2  # 等待固件启动并完成 RTT 控制块初始化
                 while cb is None and reset_attempts < max_reset_attempts:
+                    if _cancelled():
+                        return _cancelled_result()
                     reset_attempts += 1
                     try:
                         target.reset(reset_type=None)   # 复位使固件从启动代码重新执行
@@ -562,7 +729,9 @@ class RTTBackend:
                         event_manager.log("warning", f"RTT: 复位运行目标失败: {e}")
                         break
 
-                    time.sleep(reboot_sleep)
+                    # 用 Event.wait 而不是 sleep：Stop/超时能在 1.2s 等待中立刻打断
+                    if token.cancel.wait(reboot_sleep):
+                        return _cancelled_result()
 
                     # 复位后目标可能停在 reset vector（reset catch），halt 确保内存读取可靠
                     try:
@@ -583,9 +752,12 @@ class RTTBackend:
                                           "RTT: 仍未找到控制块，再次复位运行尝试初始化...")
 
             # 目标正运行但低地址未命中：控制块可能位于 RAM 高地址，做一次完整扫描确认
-            if cb is None and not target_halted:
+            if cb is None and not target_halted and not _cancelled():
                 event_manager.log("info", "RTT: 低地址未命中，对全部 RAM 完整扫描...")
                 cb = _search_control_block()
+
+            if _cancelled():
+                return _cancelled_result()
 
             if cb is None or len(cb.up_channels) == 0:
                 # 失败时给出可执行的诊断：
@@ -595,7 +767,13 @@ class RTTBackend:
                 reason = f"（{last_error}）" if last_error else ""
                 where = _halted_location(uid)
                 msg = ("未检测到 SEGGER RTT 控制块" + reason + "。")
-                if where:
+                if scan_failures:
+                    # 扫描本身有读失败：真正的原因是"这些 RAM 段读不动"，
+                    # 不要再让用户去怀疑固件有没有初始化 RTT。
+                    msg += ("上述 RAM 段无法读取，通常说明目标内存映射与芯片不符"
+                            "（例如把不存在的 CCM 区段列为 RAM）、目标掉电，"
+                            "或调试探针访问受限；请确认目标型号/连接后重试。")
+                elif where:
                     msg += f"{where}——"
                     msg += ("若该地址停在死循环/异常处理里，说明固件尚未执行到 "
                             "SEGGER_RTT_Init()，控制块还没被写进 RAM；"
@@ -618,21 +796,25 @@ class RTTBackend:
             if down_channel >= num_down:
                 down_channel = 0
 
+            # 收尾竞态：控制块虽然找到了，但请求可能已经超时/被 Stop 取消。
+            # 此时绝不能把会话装上去——否则前端已显示"启动失败/已停止"，后端却
+            # 在轮询、稍后还推送 rtt.started（用户看到的"通知成功/状态错乱"）。
             with self._global_lock:
-                self._control_blocks[uid] = cb
-                self._up_channel[uid] = up_channel
-                self._down_channel[uid] = down_channel
-                self._user_halted[uid] = False
-                running = threading.Event()
-                running.set()
-                self._running[uid] = running
-                self._locks[uid] = threading.Lock()
+                if _cancelled() or self._starting.get(uid) is not token:
+                    return _cancelled_result()
+                previous = self._sessions.get(uid)
+                session = _RttSession(uid, cb, up_channel, down_channel)
+                self._sessions[uid] = session
                 # 新会话从空缓存开始（固件重新初始化后控制块/缓冲区地址都可能变化），
                 # 但 seq 续用上一次的 next_seq：这样旧会话的 --since 游标仍然有效，
                 # 不会因为两个会话块数相同而误判成“没有新数据”。
-                previous = self._captures.get(uid)
-                start_seq = previous.stats()["next_seq"] if previous is not None else 1
+                prev_capture = self._captures.get(uid)
+                start_seq = prev_capture.stats()["next_seq"] if prev_capture is not None else 1
                 self._captures[uid] = RttCapture(start_seq=start_seq)
+                # 旧会话（理论上 stop() 已清理；这里兜底，避免线程泄漏）
+                if previous is not None:
+                    previous.stop.set()
+                    previous.running.clear()
 
             # 找到控制块后恢复目标运行（对标 CLI：search → resume）
             try:
@@ -643,10 +825,10 @@ class RTTBackend:
             event_manager.log("info", f"RTT: started (up={up_channel}, down={down_channel})")
             event_manager.emit("rtt.started", {"uid": uid})
 
-            # 启动轮询线程
-            thread = threading.Thread(target=self._poll_loop, args=(uid,), daemon=True)
-            with self._global_lock:
-                self._poll_threads[uid] = thread
+            # 启动轮询线程（线程持有 session 对象，stop 后不会被新会话"复活"）
+            thread = threading.Thread(target=self._poll_loop, args=(session,),
+                                      daemon=True, name=f"rtt-poll-{uid[:12]}")
+            session.thread = thread
             thread.start()
 
             return self._build_start_result(cb, uid, up_channel, down_channel)
@@ -681,34 +863,44 @@ class RTTBackend:
             "down_channel": down_channel,
         }
 
-    def _poll_loop(self, uid: str):
+    @staticmethod
+    def _rtt_region_priority(region) -> tuple:
+        """RAM region 扫描顺序：主 SRAM 优先，其次容量大的。
+
+        多数 Cortex-M 的 RTT 控制块在 0x2000_0000 起的 .bss 中；CCM/DTCM
+        （如 STM32F407 的 0x1000_0000）通常没有 RTT，而且部分 J-Link 配置下
+        根本读不动。先扫主 SRAM 可以在亚秒级命中并跳过这些区段。
+        """
+        start = getattr(region, "start", 0)
+        length = getattr(region, "length", 0)
+        preferred = 0 if 0x20000000 <= start < 0x40000000 else 1
+        return (preferred, -int(length), int(start))
+
+    def _poll_loop(self, session: _RttSession):
         """轮询线程：持续读取所有 up channel 数据并推送到前端
 
-        改造说明：遍历所有 up_channels 分别读取，事件 payload 带 channel 索引。
-        前端根据 tab 模式（All Channel 或单通道）过滤显示。
+        线程持有创建它时的 ``session`` 对象：每轮先确认自己仍是该 uid 的当前
+        会话（``self._sessions[uid] is session``），否则退出。这样 stop() 后
+        即使线程还卡在一次读里，醒来也不会因为新会话复用了同一个 uid 而继续
+        跑——旧实现会因此泄漏轮询线程，多线程同时读同一 target，最终拖死应用。
 
         自动恢复机制：定期检查目标内核状态，若检测到内核被暂停（如硬件复位后
         pyOCD 的 reset catch 机制暂停了内核），且非用户主动暂停，则自动 resume，
         使固件重新运行并恢复 RTT 数据流。同时重新读取控制块描述符，确保缓存
         的 buffer 地址/大小与复位后固件重新初始化的值一致。
         """
+        uid = session.uid
         poll_interval = POLL_INTERVAL
         consecutive_errors = 0
         # 内核状态检查计数器（每 ~3 秒检查一次，避免高频 SWD 事务增加延迟）
         state_check_counter = 0
         STATE_CHECK_INTERVAL = 300  # 300 * 10ms = 3s
 
-        while True:
-            running = self._running.get(uid)
-            if running is None or not running.is_set():
+        while not session.stop.is_set():
+            if self._sessions.get(uid) is not session:
                 break
 
-            lock = self._locks.get(uid)
-            cb = self._control_blocks.get(uid)
-            if lock is None or cb is None:
-                break
-
-            # 探针已断开
+            # 探针已断开（只由仍持有会话的一方通知，避免 stop() 已通知后重复）
             if not backend.is_connected(uid):
                 event_manager.emit("rtt.stopped", {"uid": uid, "reason": "disconnected"})
                 break
@@ -717,7 +909,7 @@ class RTTBackend:
             state_check_counter += 1
             if state_check_counter >= STATE_CHECK_INTERVAL:
                 state_check_counter = 0
-                self._check_and_auto_resume(uid, cb, lock)
+                self._check_and_auto_resume(session)
 
             # 与调试/Flash 操作协调：commander 调试命令、寄存器读取、Flash 操作
             # 都会持有 per-uid op_lock。RTT 轮询用非阻塞方式获取，拿不到就跳过本轮，
@@ -725,15 +917,15 @@ class RTTBackend:
             # 典型症状是偶发的 "Target is not halted" 或寄存器读取失败。
             op_lock = backend.get_op_lock(uid)
             if not op_lock.acquire(blocking=False):
-                time.sleep(poll_interval)
+                session.stop.wait(poll_interval)
                 continue
 
             sleep_for = poll_interval
             try:
                 capture = self._captures.get(uid)
-                with lock:
+                with session.lock:
                     # 遍历所有 up channels，分别读取并推送
-                    for up_idx, up_ch in enumerate(cb.up_channels):
+                    for up_idx, up_ch in enumerate(session.cb.up_channels):
                         try:
                             data = up_ch.read()
                         except Exception:
@@ -764,20 +956,23 @@ class RTTBackend:
                 sleep_for = min(0.5, poll_interval * (2 ** consecutive_errors))
             finally:
                 op_lock.release()
-            time.sleep(sleep_for)
+            session.stop.wait(sleep_for)
 
         # 线程退出时清理
         event_manager.log("info", f"RTT: polling stopped for probe {uid[:16]}")
 
-    def _check_and_auto_resume(self, uid: str, cb: object, lock: threading.Lock):
+    def _check_and_auto_resume(self, session: _RttSession):
         """检查目标内核状态，若被暂停且非用户主动暂停则自动恢复
 
         硬件复位后 pyOCD 的 reset catch 机制会暂停内核，导致固件不运行、
         RTT 无数据。此方法检测到该情况后自动 resume，并重新读取控制块描述符
         以同步固件重新初始化后的 buffer 地址/大小。
         """
-        if self._user_halted.get(uid, False):
+        uid = session.uid
+        if session.user_halted:
             return  # 用户主动暂停，不自动恢复
+        if session.stop.is_set() or self._sessions.get(uid) is not session:
+            return
 
         # 与调试/Flash 操作互斥：拿不到就跳过本轮状态检查，避免并发访问 target。
         op_lock = backend.get_op_lock(uid)
@@ -785,12 +980,12 @@ class RTTBackend:
             return
         try:
             from pyocd.core.target import Target
-            target = getattr(cb, 'target', None)
+            target = getattr(session.cb, 'target', None)
             if target is None:
-                session = backend._get_session(uid)
-                if not session:
+                py_session = backend._get_session(uid)
+                if not py_session:
                     return
-                target = session.target
+                target = py_session.target
 
             state = target.get_state()
             if state == Target.State.HALTED:
@@ -808,8 +1003,8 @@ class RTTBackend:
                 # 重新读取控制块描述符，确保缓存的 buffer 地址/大小与
                 # 复位后固件重新初始化的值一致（防止读取到旧地址导致数据异常）
                 try:
-                    with lock:
-                        for up_ch in cb.up_channels:
+                    with session.lock:
+                        for up_ch in session.cb.up_channels:
                             if hasattr(up_ch, '_read_descriptor'):
                                 up_ch._read_descriptor()
                 except Exception as e:
@@ -830,8 +1025,9 @@ class RTTBackend:
         halt 之后目标又跑起来、寄存器读取偶发失败。
         """
         with self._global_lock:
-            if uid in self._control_blocks:
-                self._user_halted[uid] = bool(halted)
+            session = self._sessions.get(uid)
+            if session is not None:
+                session.user_halted = bool(halted)
 
     # ── 目标设备控制（Run/Halt/Reset）─────────────────────────
     # 直接操作 session.target，不影响轮询线程。
@@ -849,7 +1045,9 @@ class RTTBackend:
         try:
             session.target.resume()
             with self._global_lock:
-                self._user_halted[uid] = False
+                rtt_session = self._sessions.get(uid)
+                if rtt_session is not None:
+                    rtt_session.user_halted = False
             event_manager.log("info", "RTT: 目标内核已运行 (run)")
             return {"success": True, "state": "running"}
         except Exception as e:
@@ -867,7 +1065,9 @@ class RTTBackend:
         try:
             session.target.halt()
             with self._global_lock:
-                self._user_halted[uid] = True
+                rtt_session = self._sessions.get(uid)
+                if rtt_session is not None:
+                    rtt_session.user_halted = True
             event_manager.log("info", "RTT: 目标内核已暂停 (halt)")
             return {"success": True, "state": "halted"}
         except Exception as e:
@@ -948,10 +1148,14 @@ class RTTBackend:
                 except Exception:
                     pass
                 with self._global_lock:
-                    self._user_halted[uid] = False
+                    rtt_session = self._sessions.get(uid)
+                    if rtt_session is not None:
+                        rtt_session.user_halted = False
             else:
                 with self._global_lock:
-                    self._user_halted[uid] = True
+                    rtt_session = self._sessions.get(uid)
+                    if rtt_session is not None:
+                        rtt_session.user_halted = True
 
             state = "running" if run else "halted"
             event_manager.log("info", "RTT: reset 完成，仅芯片复位")
@@ -964,44 +1168,74 @@ class RTTBackend:
             if acquired:
                 op_lock.release()
 
-    def _read_region_block32(self, target, addr: int, words: int, failures: list) -> list:
-        """读取 words 个字；遇到坏块时二分下探定位真正读不动的段。
+    def _read_region_block32(self, target, addr: int, words: int, failures: list,
+                             depth: int = 0,
+                             counter: Optional[dict] = None) -> list:
+        """读取 words 个字；遇到坏块时**有限深度**二分下探定位读不动的段。
 
         返回实际读到的 (起始地址, 字列表) 列表——可能是 0/1/多段。
-        以前这里一遇异常就 `return None`，把"这段 RAM 读不动"静默当成
-        "没有控制块"，用户看到的却是"未检测到 SEGGER RTT 控制块"这种误导性提示。
-        现在把失败段记进 failures，调用方会原样报给用户。
+
+        旧实现一路二分到 64 字节：一个 64KB 的不可读区段会被放大成 2048 次读 +
+        1024 条失败记录（用户看到的 0x1000F2C0~0x1000F300 刷屏），J-Link 下首次
+        16KB 读就可能阻塞数秒，最终把 RTT 启动拖过超时。现在最多下探
+        ``RTT_SCAN_MAX_BISECT_DEPTH`` 级（16KB→4KB→1KB），1KB 仍失败就整段记为
+        不可读；失败明细还有条数上限，避免日志/内存被刷爆。
+
+        counter 可选：累计真实失败段数（含超出明细上限的部分），调用方据此判断
+        「整段不可读」。
         """
         try:
             return [(addr, target.read_memory_block32(addr, words))]
         except Exception as e:
-            if words <= RTT_SCAN_MIN_WORDS:
-                failures.append(f"0x{addr:08X}~0x{addr + words * 4:08X} 读取失败（{e}）")
+            remaining = RTT_SCAN_MAX_FAILURES - len(failures)
+            if counter is not None:
+                counter["n"] = counter.get("n", 0) + 1
+            if (words <= RTT_SCAN_MIN_WORDS
+                    or depth >= RTT_SCAN_MAX_BISECT_DEPTH
+                    or remaining <= 0):
+                if remaining > 0:
+                    failures.append(
+                        f"0x{addr:08X}~0x{addr + words * 4:08X} 读取失败（{e}）")
                 return []
-            half = words // 2
-            if half <= 0:
-                return []
-            out = self._read_region_block32(target, addr, half, failures)
-            out += self._read_region_block32(target, addr + half * 4, words - half,
-                                             failures)
+            # 四等分（比二分少一层、且同一层失败可被调用方判定为整段不可读）
+            part = words // 4
+            if part < RTT_SCAN_MIN_WORDS:
+                part = words // 2
+                splits = 2
+            else:
+                splits = 4
+            out: list = []
+            for i in range(splits):
+                sub_addr = addr + i * part * 4
+                sub_words = part if i < splits - 1 else words - part * (splits - 1)
+                if sub_words <= 0:
+                    break
+                out += self._read_region_block32(target, sub_addr, sub_words,
+                                                 failures, depth + 1, counter)
             return out
 
     def _fast_scan_region(self, target, region, max_bytes: Optional[int] = None,
                           magic: bytes = RTT_MAGIC,
-                          control_block_id: bytes = RTT_CB_ID) -> dict:
+                          control_block_id: bytes = RTT_CB_ID,
+                          cancel: Optional[threading.Event] = None) -> dict:
         """在单个 RAM region（或任意地址区间）中快速定位 RTT 控制块。
 
         用大块 read_memory_block32 批量读取，在 host 侧匹配 'SEGG' 前缀
         （小端 word）。命中后再按字内偏移还原真实起始地址并回读 16 字节确认
         完整 'SEGGER RTT' 标识——所以控制块即使不是 4 字节对齐也能找到。
 
-        返回 {"hit": Optional[int], "candidates": list[int], "failures": list[str]}：
-          hit        第一个确认命中的控制块地址（兼容旧调用方）
-          candidates 在范围内确认带完整标识的候选地址列表
-          failures   读取失败的 RAM 段描述（调用方必须报出来，不能吞掉）
+        返回 {"hit", "candidates", "failures", "unreadable", "failure_count",
+        "reads"}：
+          hit           第一个确认命中的控制块地址（兼容旧调用方）
+          candidates    在范围内确认带完整标识的候选地址列表
+          failures      读取失败的 RAM 段描述（有上限，调用方必须报出来）
+          unreadable    起始探测即失败 / 连续失败：整段不可读，已提前放弃
+          failure_count 实际失败段总数（可能大于 len(failures)）
+          reads         实际发出的读请求次数（测试与诊断用）
 
         max_bytes 非 None 时只扫描 region 起始 max_bytes（0 或 None 表示全扫）。
         region 也可以是整数起始地址（此时 max_bytes 必须给出长度）。
+        cancel 置位时在块边界立即返回。
         """
         magic_int = int.from_bytes(magic, 'little')  # b'SEGG' -> 0x47474553
         if isinstance(region, int):
@@ -1017,35 +1251,86 @@ class RTTBackend:
         cid_len = max(RTT_CB_ID_LEN, len(control_block_id))
         failures: list = []
         candidates: list = []
+        fail_counter = {"n": 0}
+        reads = 0
         hit = None
+        unreadable = False
 
+        def _note_failure(text: str) -> None:
+            fail_counter["n"] += 1
+            if len(failures) < RTT_SCAN_MAX_FAILURES:
+                failures.append(text)
+
+        # 起始可读性探测：16 字节，读不动就整段跳过。比"读 16KB 才发现读不动"
+        # 少一次可能长达数秒的 J-Link 失败重试，也不会产生大量失败明细。
+        if span > 0:
+            probe_len = min(RTT_SCAN_PROBE_BYTES, span)
+            reads += 1
+            try:
+                probe = bytes(target.read_memory_block8(start, probe_len))
+            except Exception:
+                probe = None
+                unreadable = True
+            if probe is None:
+                _note_failure(f"0x{start:08X} 起始 {probe_len} 字节不可读")
+                return {"hit": None, "candidates": [], "failures": failures,
+                        "unreadable": True, "failure_count": fail_counter["n"],
+                        "reads": reads}
+
+        consecutive_failures = 0
         addr = start
         while addr < region_end:
+            if cancel is not None and cancel.is_set():
+                break
             n = min(RTT_SCAN_WORDS_PER_READ, (region_end - addr) // 4)
             if n <= 0:
                 break
-            for base, words in self._read_region_block32(target, addr, n, failures):
+            before = fail_counter["n"]
+            reads += 1
+            for base, words in self._read_region_block32(target, addr, n, failures,
+                                                         0, fail_counter):
                 for i, w in enumerate(words):
-                    if (w & 0xFFFFFFFF) != magic_int:
-                        continue
-                    # 字内偏移：控制块可能不 4 字节对齐（0/1/2/3）
-                    for off in range(4):
+                    w &= 0xFFFFFFFF
+                    # 4 字节对齐命中；同时检查跨字的不对齐命中（'SEGG' 落在
+                    # 字内偏移 1~3 时会跨到下一个字）。旧实现对每个偏移都回读
+                    # 16 字节确认，非对齐偏移永远不可能命中，纯属浪费读请求。
+                    offsets = [0] if w == magic_int else []
+                    if i + 1 < len(words):
+                        nxt = words[i + 1] & 0xFFFFFFFF
+                        for off in (1, 2, 3):
+                            shifted = ((w >> (8 * off)) |
+                                       ((nxt << (32 - 8 * off)) & 0xFFFFFFFF))
+                            if shifted == magic_int:
+                                offsets.append(off)
+                    for off in offsets:
                         cand = base + i * 4 + off
                         if cand < start or cand + cid_len > region_end:
                             continue
                         if cand in candidates:
                             continue
+                        reads += 1
                         try:
                             raw = bytes(target.read_memory_block8(cand, cid_len))
                         except Exception as e:
-                            failures.append(f"0x{cand:08X} 候选确认读取失败（{e}）")
+                            _note_failure(f"0x{cand:08X} 候选确认读取失败（{e}）")
                             continue
                         if raw.startswith(control_block_id):
                             candidates.append(cand)
                             if hit is None:
                                 hit = cand
+            if fail_counter["n"] > before:
+                consecutive_failures += 1
+                if consecutive_failures >= RTT_SCAN_MAX_CONSECUTIVE_FAILURES:
+                    # 连续两个 16KB 块读不动：这不是"局部坏点"，而是整段不可读
+                    # （CCM/未上电的 RAM 区…），继续扫只会重复失败。
+                    unreadable = True
+                    break
+            else:
+                consecutive_failures = 0
             addr += n * 4
-        return {"hit": hit, "candidates": candidates, "failures": failures}
+        return {"hit": hit, "candidates": candidates, "failures": failures,
+                "unreadable": unreadable, "failure_count": fail_counter["n"],
+                "reads": reads}
 
     def get_core_state(self, uid: str) -> dict:
         """查询目标内核状态"""
@@ -1071,23 +1356,20 @@ class RTTBackend:
             data: 原始字节数据
             channel: down channel 索引，None 则使用启动时选中的
         """
-        cb = self._control_blocks.get(uid)
-        if cb is None:
+        with self._global_lock:
+            session = self._sessions.get(uid)
+        if session is None:
             return {"success": False, "error": "RTT not started"}
 
-        lock = self._locks.get(uid)
-        if lock is None:
-            return {"success": False, "error": "RTT not started"}
-
-        down_idx = channel if channel is not None else self._down_channel.get(uid, 0)
+        down_idx = channel if channel is not None else session.down_channel
 
         try:
-            with lock:
-                if down_idx >= len(cb.down_channels):
+            with session.lock:
+                if down_idx >= len(session.cb.down_channels):
                     return {"success": False, "error": f"Invalid down channel {down_idx}"}
-                if not cb.down_channels:
+                if not session.cb.down_channels:
                     return {"success": False, "error": "No down channels available"}
-                written = cb.down_channels[down_idx].write(data)
+                written = session.cb.down_channels[down_idx].write(data)
                 return {"success": True, "bytes_written": written}
         except Exception as e:
             logger.exception("RTT send failed")
@@ -1102,10 +1384,12 @@ class RTTBackend:
 
     def get_channels(self, uid: str) -> dict:
         """获取当前 RTT 通道信息"""
-        cb = self._control_blocks.get(uid)
-        if cb is None:
+        with self._global_lock:
+            session = self._sessions.get(uid)
+        if session is None:
             return {"success": False, "error": "RTT not started"}
-        return self._build_start_result(cb, uid, self._up_channel.get(uid, 0), self._down_channel.get(uid, 0))
+        return self._build_start_result(session.cb, uid,
+                                        session.up_channel, session.down_channel)
 
     def get_capture_stats(self, uid: str) -> dict:
         """上行缓存统计；该探针从未启动过 RTT 时返回 available=False。"""
@@ -1146,31 +1430,36 @@ class RTTBackend:
 
     def is_running(self, uid: str) -> bool:
         """RTT 是否正在运行"""
-        running = self._running.get(uid)
-        return running is not None and running.is_set()
+        with self._global_lock:
+            session = self._sessions.get(uid)
+        return session is not None and session.running.is_set()
 
     def stop(self, uid: str, reason: str = "user") -> dict:
-        """停止 RTT
+        """停止 RTT（同时取消仍在进行的启动）
 
         Args:
             reason: 停止原因，传递给前端用于 UI 反馈
                 "user" - 用户手动停止
                 "flash" - Flash 操作前自动停止（固件下载后 RTT 控制块失效）
                 "disconnected" - 探针断开
+
+        实现要点：
+        - 先取消 ``_starting`` 令牌，让仍在扫描/复位等待的启动线程尽快退出，
+          不会在 stop 之后又把会话装回来（用户看到的"停了又自己启动/状态错乱"）；
+        - 只等轮询线程很短时间：线程可能正卡在一次 DLL 读里，join 太久没有意义，
+          它持有 session 对象，醒来会因 ``stop`` 置位/会话被替换而自行退出。
         """
         with self._global_lock:
-            running = self._running.pop(uid, None)
-            thread = self._poll_threads.pop(uid, None)
-            self._control_blocks.pop(uid, None)
-            self._locks.pop(uid, None)
-            self._up_channel.pop(uid, None)
-            self._down_channel.pop(uid, None)
-            self._user_halted.pop(uid, None)
-
-        if running:
-            running.clear()
-        if thread:
-            thread.join(timeout=2)
+            token = self._starting.pop(uid, None)
+            session = self._sessions.pop(uid, None)
+        if token is not None:
+            token.cancel.set()
+        if session is not None:
+            session.running.clear()
+            session.stop.set()
+            thread = session.thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=1.0)
 
         event_manager.log("info", f"RTT: stopped (reason={reason})")
         event_manager.emit("rtt.stopped", {"uid": uid, "reason": reason})
@@ -1178,12 +1467,16 @@ class RTTBackend:
 
     def on_probe_disconnected(self, uid: str):
         """探针断开时调用，清理 RTT 会话"""
-        if uid in self._control_blocks:
+        with self._global_lock:
+            has_session = uid in self._sessions
+        if has_session or uid in self._starting:
             self.stop(uid, reason="disconnected")
 
     def cleanup_all(self):
         """清理所有 RTT 会话（应用退出时调用）"""
-        for uid in list(self._control_blocks.keys()):
+        with self._global_lock:
+            uids = set(self._sessions) | set(self._starting)
+        for uid in uids:
             self.stop(uid)
         # 历史缓存随进程退出一起释放，避免 uid 长期累积
         with self._global_lock:
