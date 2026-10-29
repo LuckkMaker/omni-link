@@ -1,121 +1,211 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useLayoutEffect, type ChangeEvent } from 'react'
 import { RotateCcw, ArrowLeft, ArrowRight } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useToolsStore } from '@/stores/tools.store'
+import { useNotificationStore } from '@/stores/notification.store'
+
+/** 三个输入框的标识 */
+type Field = 'dec' | 'hex' | 'bin'
+
+/** 32 位无符号最大值 */
+const MAX_UINT32 = 0xFFFFFFFF
+
+/** 各输入框允许输入的字符：十进制 0-9，十六进制 0-9a-fA-F，二进制 0/1 */
+const DIGIT_RE: Record<Field, RegExp> = {
+  dec: /[0-9]/,
+  hex: /[0-9a-fA-F]/,
+  bin: /[01]/,
+}
+
+/** 各输入框的最大位数：十六进制 8 位、二进制 32 位、十进制 10 位（均为 32 位无符号） */
+const MAX_LEN: Record<Field, number> = {
+  dec: 10,
+  hex: 8,
+  bin: 32,
+}
+
+/** 超出最大位数时的提示 */
+const LEN_HINT: Record<Field, string> = {
+  dec: '十进制最多 10 位（32 位无符号范围）',
+  hex: '十六进制最多 8 位（32 位）',
+  bin: '二进制最多 32 位',
+}
+
+/**
+ * 忽略进制前缀：输入框本身不显示 0x / 0b，粘贴带前缀的文本时也按无前缀处理。
+ * （正常键入时 'x' / 'b' 会被过滤掉，所以这里只对粘贴等场景生效。）
+ */
+function stripPrefix(field: Field, v: string): string {
+  if (field === 'hex') return v.replace(/^0[xX]/, '')
+  if (field === 'bin') return v.replace(/^0[bB]/, '')
+  return v
+}
+
+/**
+ * 输入过滤：直接丢弃不属于该进制的字符（在字符进入输入框之前拦掉），
+ * 并按被丢弃的字符数量修正光标位置，保证在中间插入/删除时不会跳到末尾。
+ */
+function filterInput(field: Field, raw: string, caret: number) {
+  // 粘贴 "0x1F" / "0b1010" 时先去掉前缀
+  const stripped = stripPrefix(field, raw)
+  if (stripped !== raw) {
+    raw = stripped
+    caret = Math.max(0, caret - 2)
+  }
+
+  const allowDigit = DIGIT_RE[field]
+  let text = ''
+  let nextCaret = caret
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (allowDigit.test(ch)) text += ch
+    else if (i < caret) nextCaret--
+  }
+
+  // 十六进制统一以大写显示（只改大小写，不影响光标位置）
+  if (field === 'hex') text = text.toUpperCase()
+
+  return { text, caret: Math.max(0, Math.min(nextCaret, text.length)) }
+}
 
 export default function NumberConverter() {
   // 从持久化 store 读取值
   const decimal = useToolsStore((s) => s.ncDecimal)
-  const hex = useToolsStore((s) => s.ncHex)
+  // 兼容旧版本持久化下来的 0x 前缀写法，并统一大写
+  const hex = stripPrefix('hex', useToolsStore((s) => s.ncHex)).toUpperCase()
   const binary = useToolsStore((s) => s.ncBinary)
   const setNcValues = useToolsStore((s) => s.setNcValues)
 
-  const [error, setError] = useState('')
+  // 输入被拒绝等提示统一走应用的全局通知（右下角通知 + 状态栏历史）
+  const notify = useNotificationStore((s) => s.push)
+  // 同一条提示 1.5s 内去重，避免连续键入被拦下的字符时通知刷屏
+  const lastWarnRef = useRef<{ key: string; at: number }>({ key: '', at: 0 })
+  const warn = useCallback((key: string, title: string, message: string) => {
+    const now = Date.now()
+    if (lastWarnRef.current.key === key && now - lastWarnRef.current.at < 1500) return
+    lastWarnRef.current = { key, at: now }
+    notify({ type: 'warning', title, message, autoClose: true, autoCloseDelay: 3000 })
+  }, [notify])
 
   // 移位位数（0-31），用于左移 / 右移操作
   const [shiftAmount, setShiftAmount] = useState('1')
 
   // 核心数值（无符号 32 位），所有输入最终同步到这个值
   const value = (() => {
-    try {
-      return parseInt(decimal, 10) >>> 0
-    } catch {
-      return 0
-    }
+    const num = parseInt(decimal, 10)
+    return Number.isNaN(num) ? 0 : num >>> 0
   })()
 
-  const updateAll = useCallback((val: number, except?: 'dec' | 'hex' | 'bin') => {
+  /**
+   * 正在编辑的输入框草稿。
+   * 用户键入的文本（未规范化的写法，如前导 0、空串）
+   * 只保留在草稿中，store 里始终保存规范值 —— 这样输入内容随时可以被删掉，
+   * 不会像以前那样被写回输入框导致卡住。
+   */
+  const [draft, setDraft] = useState<{ field: Field; text: string } | null>(null)
+
+  // 三个输入框的引用，用于输入被过滤后恢复光标
+  const inputRefs = {
+    dec: useRef<HTMLInputElement>(null),
+    hex: useRef<HTMLInputElement>(null),
+    bin: useRef<HTMLInputElement>(null),
+  }
+  const caretRef = useRef<{ field: Field; pos: number } | null>(null)
+
+  // 过滤掉字符后浏览器会把光标移到末尾，这里按修正后的位置还原
+  useLayoutEffect(() => {
+    const pending = caretRef.current
+    if (!pending) return
+    caretRef.current = null
+    const el = inputRefs[pending.field].current
+    if (el && document.activeElement === el) {
+      el.setSelectionRange(pending.pos, pending.pos)
+    }
+  })
+
+  // 把数值以规范形式同步到三个输入框，并结束当前草稿
+  const writeValue = useCallback((val: number) => {
     const v = val >>> 0
-    const newDec = except !== 'dec' ? String(v) : decimal
-    const newHex = except !== 'hex' ? '0x' + v.toString(16).toUpperCase() : hex
-    const newBin = except !== 'bin' ? v.toString(2) : binary
-    setNcValues(newDec, newHex, newBin)
-    setError('')
-  }, [decimal, hex, binary, setNcValues])
+    setNcValues(String(v), v.toString(16).toUpperCase(), v.toString(2))
+    setDraft(null)
+  }, [setNcValues])
 
-  const handleDecimalChange = useCallback((v: string) => {
-    setNcValues(v, hex, binary)
-    const cleaned = v.trim()
-    if (cleaned === '') {
-      updateAll(0, 'dec')
-      return
-    }
-    if (!/^\d+$/.test(cleaned)) {
-      setError('十进制输入包含非法字符')
-      return
-    }
-    const num = parseInt(cleaned, 10)
-    if (num > 0xFFFFFFFF) {
-      setError('数值超出 32 位无符号范围')
-      return
-    }
-    updateAll(num, 'dec')
-  }, [hex, binary, setNcValues, updateAll])
+  const handleChange = useCallback((field: Field, e: ChangeEvent<HTMLInputElement>) => {
+    const el = e.target
+    const raw = el.value
+    const { text, caret } = filterInput(field, raw, el.selectionStart ?? raw.length)
 
-  const handleHexChange = useCallback((v: string) => {
-    const cleaned = v.replace(/^0x/i, '').trim()
-    setNcValues(decimal, v, binary)
-    if (cleaned === '') {
-      updateAll(0, 'hex')
+    // 超出该进制的最大位数（如前导 0 堆到 16 位的 0000000000FFF223）：拒绝这次输入
+    if (text.length > MAX_LEN[field]) {
+      warn(`len-${field}`, LEN_HINT[field], '超出的字符已忽略')
       return
     }
-    if (!/^[0-9a-fA-F]+$/.test(cleaned)) {
-      setError('十六进制输入包含非法字符')
-      return
-    }
-    const num = parseInt(cleaned, 16)
-    updateAll(num, 'hex')
-  }, [decimal, binary, setNcValues, updateAll])
 
-  const handleBinaryChange = useCallback((v: string) => {
-    const cleaned = v.replace(/^0b/i, '').trim()
-    setNcValues(decimal, hex, v)
-    if (cleaned === '') {
-      updateAll(0, 'bin')
+    // 超出 32 位无符号范围：拒绝这次输入，字符不会进入输入框
+    const num = text === ''
+      ? 0
+      : parseInt(text, field === 'hex' ? 16 : field === 'bin' ? 2 : 10)
+    if (num > MAX_UINT32) {
+      warn('range', '数值超出 32 位无符号范围', '最大 4294967295 (0xFFFFFFFF)，本次输入已忽略')
       return
     }
-    if (!/^[01]+$/.test(cleaned)) {
-      setError('二进制输入包含非法字符')
+
+    setDraft({ field, text })
+    if (text !== raw) caretRef.current = { field, pos: caret }
+
+    if (text === '') {
+      // 空输入：数值按 0 处理，当前字段保持为空便于继续输入
+      setNcValues('0', '0', '0')
       return
     }
-    const num = parseInt(cleaned, 2)
-    updateAll(num, 'bin')
-  }, [decimal, hex, setNcValues, updateAll])
+
+    // 输入合法：更新数值，当前输入框继续显示用户原始文本（草稿）
+    setNcValues(String(num), num.toString(16).toUpperCase(), num.toString(2))
+  }, [setNcValues, warn])
+
+  // 失焦：丢弃草稿，输入框回到规范值
+  const handleBlur = useCallback(() => {
+    setDraft(null)
+  }, [])
 
   const handleToggleBit = useCallback((bitIndex: number) => {
-    const newVal = (value ^ (1 << bitIndex)) >>> 0
-    updateAll(newVal)
-  }, [value, updateAll])
+    writeValue(value ^ (1 << bitIndex))
+  }, [value, writeValue])
 
   const handleReset = useCallback(() => {
-    updateAll(0)
-  }, [updateAll])
+    writeValue(0)
+  }, [writeValue])
 
-  // 解析移位位数，非法或越界时返回 null 并提示
+  // 解析移位位数，非法或越界时提示
   const parseShiftAmount = useCallback((): number | null => {
     const n = parseInt(shiftAmount, 10)
     if (Number.isNaN(n) || n < 0 || n > 31) {
-      setError('移位位数需为 0-31 的整数')
+      warn('shift', '移位位数无效', '移位位数需为 0-31 的整数')
       return null
     }
     return n
-  }, [shiftAmount])
+  }, [shiftAmount, warn])
 
   // 左移：低位补 0，超过 32 位部分丢弃
   const handleShiftLeft = useCallback(() => {
     const n = parseShiftAmount()
     if (n === null) return
-    updateAll((value << n) >>> 0)
-  }, [parseShiftAmount, value, updateAll])
+    writeValue((value << n) >>> 0)
+  }, [parseShiftAmount, value, writeValue])
 
   // 右移：逻辑右移，高位补 0
   const handleShiftRight = useCallback(() => {
     const n = parseShiftAmount()
     if (n === null) return
-    updateAll(value >>> n)
-  }, [parseShiftAmount, value, updateAll])
+    writeValue(value >>> n)
+  }, [parseShiftAmount, value, writeValue])
+
+  // 输入框显示文本：正在编辑的字段显示草稿，其余显示 store 中的规范值
+  const decText = draft?.field === 'dec' ? draft.text : decimal
+  const hexText = draft?.field === 'hex' ? draft.text : hex
+  const binText = draft?.field === 'bin' ? draft.text : binary
 
   // 生成 32 位的位信息（bit 31 在左，bit 0 在右）
   const bitValue = (bitIndex: number) => (value >> bitIndex) & 1
@@ -135,10 +225,13 @@ export default function NumberConverter() {
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">Decimal value</label>
           <Input
-            value={decimal}
-            onChange={(e) => handleDecimalChange(e.target.value)}
+            ref={inputRefs.dec}
+            value={decText}
+            onChange={(e) => handleChange('dec', e)}
+            onBlur={handleBlur}
             className="font-mono"
             placeholder="0"
+            inputMode="numeric"
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
@@ -147,10 +240,12 @@ export default function NumberConverter() {
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">Hex value</label>
           <Input
-            value={hex}
-            onChange={(e) => handleHexChange(e.target.value)}
+            ref={inputRefs.hex}
+            value={hexText}
+            onChange={(e) => handleChange('hex', e)}
+            onBlur={handleBlur}
             className="font-mono"
-            placeholder="0x0"
+            placeholder="0"
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
@@ -159,20 +254,19 @@ export default function NumberConverter() {
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">Binary value</label>
           <Input
-            value={binary}
-            onChange={(e) => handleBinaryChange(e.target.value)}
+            ref={inputRefs.bin}
+            value={binText}
+            onChange={(e) => handleChange('bin', e)}
+            onBlur={handleBlur}
             className="font-mono"
             placeholder="0"
+            inputMode="numeric"
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
           />
         </div>
       </div>
-
-      {error && (
-        <p className="text-sm text-destructive">{error}</p>
-      )}
 
       {/* 32 位 bit 可视化与勾选 — 两行显示，每行 16 位 */}
       <div className="rounded-lg border border-border bg-card p-5">

@@ -8,7 +8,9 @@ Pack 文件存储在用户数据目录的 packs/ 子目录下。
 安装清单存储在 packs/installed_packs.json。
 """
 
+import gc
 import json
+import logging
 import os
 import shutil
 import sys
@@ -18,7 +20,21 @@ from typing import Optional
 
 from core import database
 
+_LOG = logging.getLogger(__name__)
+
 _lock = threading.Lock()
+
+# TARGET 注册锁：持久导入、启动加载、临时挂包都可能在并发请求里触发，
+# 统一串行化，避免同一个 Pack 被重复解析。
+_target_lock = threading.Lock()
+
+# 临时/持久 Pack 的解析缓存：abs_path -> (mtime_ns, size)。
+# 命中时跳过 pyOCD 的整包解析（大 DFP 解析很慢），只保留 TARGET 中的注册结果。
+_pack_load_cache: dict[str, tuple[int, int]] = {}
+
+# 持久 Pack 的“所有权”：pack_name -> 本 Pack 实际新增的 TARGET 键。
+# 卸载时只删这些键，绝不误删内置型号或其它 Pack 提供的同名型号。
+_pack_owned: dict[str, set[str]] = {}
 
 
 def _get_data_dir() -> str:
@@ -64,6 +80,111 @@ def save_manifest(manifest: list[dict]) -> None:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
 
+def _resolve_manifest_path(entry: dict) -> str:
+    """返回清单条目的可用路径。
+
+    旧版本/拷贝来的清单可能记录了失效的绝对路径（例如指向另一份源码树），
+    但 Pack 文件仍在 ``packs/`` 下。此时按 filename 回退并回写 entry["path"]，
+    避免启动时整包被跳过（表现为 `omni target list` 看不到已导入型号）。
+    """
+    path = entry.get("path") or ""
+    if path and os.path.isfile(path):
+        return path
+
+    filename = entry.get("filename") or os.path.basename(path)
+    if filename:
+        candidate = os.path.join(get_packs_dir(), filename)
+        if os.path.isfile(candidate):
+            entry["path"] = candidate
+            return candidate
+    return path
+
+
+def _file_signature(path: str) -> tuple[int, int]:
+    """Pack 文件的缓存签名；mtime_ns 精度足够检测重新导入/替换。"""
+    st = os.stat(path)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def validate_pack_paths(paths) -> list[str]:
+    """规范化并校验 .pack 路径列表。
+
+    支持单个字符串或列表；返回去重后的绝对路径。缺失文件抛
+    ``FileNotFoundError``，扩展名/空路径抛 ``ValueError``。
+    """
+    if paths is None:
+        return []
+    if isinstance(paths, str):
+        paths = [paths]
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("Pack 路径不能为空")
+        path = os.path.abspath(os.path.expanduser(raw.strip()))
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Pack 文件不存在: {path}")
+        if not path.lower().endswith(".pack"):
+            raise ValueError(f"不是 .pack 文件: {path}")
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def _register_pack_targets(pack_path: str) -> set[str]:
+    """把整个 Pack 注册进 pyOCD TARGET，返回本 Pack 新增的键。
+
+    调用方（持久导入/启动加载）用返回集合记录“所有权”，卸载时只删这些键。
+    """
+    from pyocd.target import TARGET
+    from pyocd.target.pack.pack_target import PackTargets
+
+    with _target_lock:
+        before = set(TARGET)
+        PackTargets.populate_targets_from_pack(pack_path)
+        added = set(TARGET) - before
+        try:
+            _pack_load_cache[pack_path] = _file_signature(pack_path)
+        except OSError:
+            pass
+        return added
+
+
+def ensure_pack_targets(paths) -> list[str]:
+    """临时挂包：把 Pack 中的型号注册到当前后端进程的 pyOCD TARGET。
+
+    与 pyOCD ``--pack`` 的进程内语义一致：不复制文件、不写设备库、不写清单；
+    后端重启后失效。已加载且 (mtime_ns, size) 未变化的 Pack 直接命中缓存。
+    """
+    normalized = validate_pack_paths(paths)
+    if not normalized:
+        return []
+
+    from pyocd.target.pack.pack_target import PackTargets
+
+    with _target_lock:
+        for path in normalized:
+            try:
+                signature = _file_signature(path)
+            except OSError as e:
+                raise FileNotFoundError(f"Pack 文件不可访问: {path}: {e}") from e
+
+            if _pack_load_cache.get(path) == signature:
+                continue
+
+            try:
+                PackTargets.populate_targets_from_pack(path)
+            except Exception as e:
+                raise ValueError(f"加载 CMSIS-Pack 失败: {path}: {e}") from e
+            _pack_load_cache[path] = signature
+
+    return normalized
+
+
 def _extract_pack_info(pack_path: str) -> dict:
     """从 Pack 文件名提取基本信息
 
@@ -95,11 +216,14 @@ def _extract_pack_info(pack_path: str) -> dict:
     return {"name": name, "version": version, "filename": filename}
 
 
-def _extract_devices_from_pack(pack_path: str) -> list[dict]:
+def _extract_devices_from_pack(pack_path: str, strict: bool = False) -> list[dict]:
     """从 Pack 中提取设备元数据列表
 
     直接解析 .pack（ZIP）中的 PDSC XML，不依赖 pyOCD 导入。
     提取每个设备的: part_number, vendor, core, flash_size, ram_size, flash_base, ram_base
+
+    ``strict=True`` 时，非 ZIP、缺少 PDSC 或 XML 解析失败会抛 ``ValueError``。
+    预览/导入用它拒绝 IDE 之外的文件，避免把无效 .pack 安装成 0 设备条目。
 
     PDSC 结构:
     <package>
@@ -134,6 +258,8 @@ def _extract_devices_from_pack(pack_path: str) -> list[dict]:
             # 查找 PDSC 文件
             pdsc_files = [f for f in zf.namelist() if f.endswith('.pdsc')]
             if not pdsc_files:
+                if strict:
+                    raise ValueError(f"CMSIS-Pack 中缺少 .pdsc 文件: {pack_path}")
                 return devices
 
             with zf.open(pdsc_files[0]) as pf:
@@ -225,8 +351,9 @@ def _extract_devices_from_pack(pack_path: str) -> list[dict]:
                             devices.append(device_info)
 
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Failed to extract devices from pack: {e}")
+        if strict:
+            raise ValueError(f"CMSIS-Pack 解析失败: {e}") from e
+        _LOG.warning("Failed to extract devices from pack: %s", e)
 
     return devices
 
@@ -458,7 +585,7 @@ def preview_pack(pack_path: str) -> list[dict]:
     """
     if not os.path.exists(pack_path):
         raise FileNotFoundError(f"Pack 文件不存在: {pack_path}")
-    return _extract_devices_from_pack(pack_path)
+    return _extract_devices_from_pack(pack_path, strict=True)
 
 
 def import_pack(pack_path: str, selected_parts: Optional[list[str]] = None) -> dict:
@@ -477,35 +604,60 @@ def import_pack(pack_path: str, selected_parts: Optional[list[str]] = None) -> d
     Raises: Exception on failure
     """
     with _lock:
-        if not os.path.exists(pack_path):
+        if not os.path.isfile(pack_path):
             raise FileNotFoundError(f"Pack 文件不存在: {pack_path}")
 
         pack_info = _extract_pack_info(pack_path)
+
+        # 先解析并校验源文件，再复制/注册：无效 .pack 不会留下半成品安装。
+        all_devices = _extract_devices_from_pack(pack_path, strict=True)
+        if not all_devices:
+            raise ValueError(f"CMSIS-Pack 中未找到芯片定义: {pack_path}")
+
+        # 按 selected_parts 过滤（只影响设备库展示，不影响整包 TARGET 注册）
+        if selected_parts is not None:
+            selected_set = {p.lower() for p in selected_parts}
+            devices = [d for d in all_devices if d["part_number"].lower() in selected_set]
+            if not devices:
+                raise ValueError(
+                    "--parts 未匹配到 Pack 中的任何芯片: " + ", ".join(selected_parts)
+                )
+        else:
+            devices = all_devices
+
         packs_dir = get_packs_dir()
         dest_path = os.path.join(packs_dir, pack_info["filename"])
 
         # 复制 Pack 文件
         shutil.copy2(pack_path, dest_path)
 
-        # 注册芯片到 TARGET 字典（可选，失败不影响设备目录写入）
+        # 注册整包芯片到 TARGET 字典（失败不影响设备目录写入）。
+        # 选择部分设备只影响设备库展示，不到 TARGET：与 pyOCD 加载整包一致。
+        added_targets: set[str] = set()
         try:
-            from pyocd.target.pack.pack_target import PackTargets
-            PackTargets.populate_targets_from_pack(dest_path)
+            added_targets = _register_pack_targets(dest_path)
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"pyOCD target registration skipped (devices still added to catalog): {e}"
+            _LOG.warning(
+                "pyOCD target registration skipped (devices still added to catalog): %s", e
             )
+        # 同名旧版本可能已注册过：保留旧所有权并合并，避免重导入后卸载漏删
+        _pack_owned[pack_info["name"]] = _pack_owned.get(pack_info["name"], set()) | added_targets
 
-        # 提取设备元数据
-        all_devices = _extract_devices_from_pack(dest_path)
-
-        # 按 selected_parts 过滤
-        if selected_parts is not None:
-            selected_set = {p.lower() for p in selected_parts}
-            devices = [d for d in all_devices if d["part_number"].lower() in selected_set]
-        else:
-            devices = all_devices
+        # 同步设备库：移除本 Pack 之前导入、但本次未选中的条目。
+        # 重新导入是“替换选择”语义；否则 full → --parts 重导入后，未选中的旧条目
+        # 仍会留在 device list 中，与 pack list 的 device_count 不一致。
+        selected_part_numbers = {d["part_number"] for d in devices}
+        try:
+            for existing in database.list_devices():
+                if (
+                    existing.get("source") == "pack"
+                    and existing.get("pack") == pack_info["name"]
+                    and existing.get("part_number") not in selected_part_numbers
+                ):
+                    database.delete_device(existing["part_number"])
+        except Exception as e:
+            _LOG.warning("Failed to prune old devices for pack %s: %s",
+                         pack_info["name"], e)
 
         # 写入 XML 设备目录
         for dev in devices:
@@ -521,7 +673,9 @@ def import_pack(pack_path: str, selected_parts: Optional[list[str]] = None) -> d
             "version": pack_info["version"],
             "filename": pack_info["filename"],
             "path": dest_path,
+            # devices = 用户勾选（设备库展示）；all_devices = 整包型号（卸载兜底）
             "devices": [d["part_number"] for d in devices],
+            "all_devices": [d["part_number"] for d in all_devices],
             "device_count": len(devices),
             "installed_at": datetime.now().isoformat(),
         }
@@ -545,8 +699,8 @@ def get_pack_devices(pack_name: str) -> dict:
     if entry is None:
         raise ValueError(f"未找到 Pack: {pack_name}")
 
-    pack_path = entry.get("path", "")
-    if not os.path.exists(pack_path):
+    pack_path = _resolve_manifest_path(entry)
+    if not os.path.isfile(pack_path):
         raise FileNotFoundError(f"Pack 文件缺失: {pack_path}")
 
     # 从 Pack 文件重新提取所有设备
@@ -564,10 +718,11 @@ def get_pack_devices(pack_name: str) -> dict:
 
 
 def update_pack_devices(pack_name: str, selected_parts: list[str]) -> dict:
-    """更新 Pack 的设备选择
+    """更新 Pack 的设备选择（仅影响设备库展示，不改变 TARGET 注册）
 
-    - 新选择的设备：添加到 XML 目录 + 注册 TARGET
-    - 取消选择的设备：从 XML 目录删除 + 注销 TARGET
+    整包在导入时已注册到 pyOCD TARGET；取消勾选只从设备库移除条目，
+    型号仍可通过 ``--target`` 连接（与 pyOCD 加载整包的语义一致）。
+    这样也避免误删内置型号或其它 Pack 提供的同名目标。
 
     Returns: {"pack": manifest_entry, "added": [...], "removed": [...], "device_count": N}
     """
@@ -577,7 +732,7 @@ def update_pack_devices(pack_name: str, selected_parts: list[str]) -> dict:
         if entry is None:
             raise ValueError(f"未找到 Pack: {pack_name}")
 
-        pack_path = entry.get("path", "")
+        pack_path = _resolve_manifest_path(entry)
         currently_imported = {p.lower() for p in entry.get("devices", [])}
         selected_set = {p.lower() for p in selected_parts}
 
@@ -595,21 +750,15 @@ def update_pack_devices(pack_name: str, selected_parts: list[str]) -> dict:
                 dev["pack"] = pack_name
                 database.upsert_device(dev)
 
-        # 移除取消选择的设备
+        # 移除取消选择的设备（只删设备库条目；TARGET 保持整包可用）
         for part in to_remove:
             database.delete_device(part)
-            # 从 TARGET 字典中移除
-            try:
-                from pyocd.target import TARGET
-                keys_to_remove = [k for k in TARGET if k.lower() == part]
-                for k in keys_to_remove:
-                    TARGET.pop(k, None)
-            except Exception:
-                pass
 
         # 更新清单
         entry["devices"] = list(selected_set)
         entry["device_count"] = len(selected_set)
+        if not entry.get("all_devices"):
+            entry["all_devices"] = [d["part_number"] for d in all_devices]
         save_manifest(manifest)
 
         return {
@@ -630,11 +779,14 @@ def list_installed_packs() -> list[dict]:
     needs_update = False
     result = []
     for entry in manifest:
-        pack_path = entry.get("path", "")
-        entry["file_exists"] = os.path.exists(pack_path)
+        original_path = entry.get("path", "")
+        pack_path = _resolve_manifest_path(entry)
+        if pack_path != original_path:
+            needs_update = True
+        entry["file_exists"] = os.path.isfile(pack_path)
 
         # 从文件名重新解析 name/version，修复旧清单数据
-        if pack_path and os.path.exists(pack_path):
+        if pack_path and os.path.isfile(pack_path):
             fresh_info = _extract_pack_info(pack_path)
             if entry.get("name") != fresh_info["name"] or entry.get("version") != fresh_info["version"]:
                 # 更新 XML 目录中设备的 pack 引用名
@@ -662,10 +814,41 @@ def list_installed_packs() -> list[dict]:
     return result
 
 
+def _pack_removable_keys(manifest: list[dict], pack_name: str,
+                         owned: set[str] | None = None) -> set[str]:
+    """计算卸载时可安全从 TARGET 删除的键。
+
+    规则：本 Pack 的候选型号（实际注册所有权 ∪ all_devices ∪ devices）
+    减去内置型号、减去其它已安装 Pack 声明的型号。纯函数，便于测试。
+    """
+    entry = next((m for m in manifest if m.get("name") == pack_name), None)
+    if entry is None:
+        return set()
+
+    candidates = {p.lower() for p in (owned or set())}
+    candidates |= {p.lower() for p in entry.get("all_devices") or []}
+    candidates |= {p.lower() for p in entry.get("devices") or []}
+
+    other_parts: set[str] = set()
+    for m in manifest:
+        if m.get("name") == pack_name:
+            continue
+        for p in (m.get("all_devices") or m.get("devices") or []):
+            other_parts.add(p.lower())
+
+    try:
+        from pyocd.target.builtin import BUILTIN_TARGETS
+        builtin_keys = {k.lower() for k in BUILTIN_TARGETS}
+    except Exception:
+        builtin_keys = set()
+
+    return candidates - builtin_keys - other_parts
+
+
 def remove_pack(pack_name: str) -> bool:
     """卸载 Pack
 
-    1. 从 TARGET 字典中移除该 Pack 注册的芯片
+    1. 仅从 TARGET 移除**本 Pack 拥有**的芯片（内置型号与其它 Pack 的同名型号保持不动）
     2. 从 XML 目录中移除 source="pack" 且 pack=name 的设备
     3. 删除 Pack 文件
     4. 更新安装清单
@@ -683,18 +866,20 @@ def remove_pack(pack_name: str) -> bool:
         if entry is None:
             return False
 
-        # 从 TARGET 字典中移除
+        # 计算本 Pack 可安全移除的型号（排除内置与其它 Pack 声明的型号）。
+        owned = _pack_owned.pop(pack_name, None) or set()
+        removable = _pack_removable_keys(manifest, pack_name, owned)
+
+        # 从 TARGET 字典中移除本 Pack 独有的键；内置目标永不删除
         try:
             from pyocd.target import TARGET
-            parts_to_remove = entry.get("devices", [])
-            keys_to_remove = []
-            for key in list(TARGET.keys()):
-                if key.lower() in [p.lower() for p in parts_to_remove]:
-                    keys_to_remove.append(key)
-            for key in keys_to_remove:
-                TARGET.pop(key, None)
-        except Exception:
-            pass
+            keys_to_remove = [k for k in list(TARGET.keys()) if k.lower() in removable]
+            with _target_lock:
+                for key in keys_to_remove:
+                    TARGET.pop(key, None)
+                _pack_load_cache.pop(_resolve_manifest_path(entry), None)
+        except Exception as e:
+            _LOG.warning("Failed to unregister TARGET entries for pack %s: %s", pack_name, e)
 
         # 从 XML 目录中移除
         all_devices = database.list_devices()
@@ -702,13 +887,19 @@ def remove_pack(pack_name: str) -> bool:
             if dev.get("source") == "pack" and dev.get("pack") == pack_name:
                 database.delete_device(dev["part_number"])
 
-        # 删除 Pack 文件
-        pack_path = entry.get("path", "")
-        if pack_path and os.path.exists(pack_path):
+        # 删除 Pack 文件。pyOCD 的 CmsisPack 会持有 ZipFile 句柄，且目标类/设备
+        # 之间可能存在引用环；仅从 TARGET 删除键后直接 os.remove 在 Windows 上常因
+        # 句柄尚未释放而失败（表现为 pack remove 成功但 packs/ 下留下孤儿 .pack）。
+        # 先触发一轮 GC 析构，再删除；活动会话仍占用时保留文件并告警。
+        pack_path = _resolve_manifest_path(entry)
+        if pack_path and os.path.isfile(pack_path):
+            gc.collect()
             try:
                 os.remove(pack_path)
-            except Exception:
-                pass
+            except OSError as e:
+                _LOG.warning(
+                    "Pack file still in use, left on disk: %s (%s)", pack_path, e
+                )
 
         # 更新清单
         manifest = [m for m in manifest if m["name"] != pack_name]
@@ -720,18 +911,34 @@ def remove_pack(pack_name: str) -> bool:
 def load_installed_packs() -> int:
     """启动时加载所有已安装的 Pack（重新注册到 TARGET 字典）
 
+    路径失效时按 filename 从 packs/ 自愈；每个包注册后记录所有权，
+    供 ``remove_pack`` 精确卸载。
+
     Returns: 成功加载的 Pack 数量
     """
     manifest = load_manifest()
     count = 0
+    needs_update = False
     for entry in manifest:
-        pack_path = entry.get("path", "")
-        if not os.path.exists(pack_path):
+        original_path = entry.get("path", "")
+        pack_path = _resolve_manifest_path(entry)
+        if pack_path != original_path:
+            needs_update = True
+        if not os.path.isfile(pack_path):
+            _LOG.warning("Installed CMSIS-Pack file missing, skipped: %s (%s)",
+                         entry.get("name", "?"), pack_path)
             continue
         try:
-            from pyocd.target.pack.pack_target import PackTargets
-            PackTargets.populate_targets_from_pack(pack_path)
+            added = _register_pack_targets(pack_path)
+            _pack_owned[entry.get("name", "")] = _pack_owned.get(entry.get("name", ""), set()) | added
             count += 1
-        except Exception:
+        except Exception as e:
+            _LOG.warning("Failed to load installed CMSIS-Pack %s (%s): %s",
+                         entry.get("name", "?"), pack_path, e)
             continue
+    if needs_update:
+        try:
+            save_manifest(manifest)
+        except Exception:
+            pass
     return count

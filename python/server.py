@@ -21,9 +21,16 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from api import probes, flash, targets, files, devices, commander, rtt, tools, monitor, system, packs, zone
+from omni_tools import router as omni_tool_router
 from core.events import event_manager
 from core.probe_monitor import probe_monitor
 from core.pyocd_backend import backend
+
+# 应用托管的 tools/ 与 CLI 共用同一套解析；源码态缺包时不影响后端启动。
+try:
+    from omni_cli import toolchain
+except Exception:  # pragma: no cover - 仅防御旧打包产物
+    toolchain = None
 
 # 后端版本号（与前端 package.json 保持一致）
 BACKEND_VERSION = "0.3.1"
@@ -36,7 +43,7 @@ logger = logging.getLogger("omni-link")
 #
 # 后端启动后把 {pid, port} 写入一个用户级、跨安装布局都相同的文件，任何调用方
 # （CLI `omni`、其他工具）都能据此发现并复用**同一个**后端进程，而不会各自再拉起
-# 一个后端去抢同一探针。路径计算必须与 CLI 侧 omnilink_cli/config.py 的
+# 一个后端去抢同一探针。路径计算必须与 CLI 侧 omni_cli/config.py 的
 # _state_dir 保持一致。
 # ---------------------------------------------------------------------------
 def _state_dir() -> str:
@@ -92,6 +99,11 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     event_manager.set_loop(loop)
 
+    # J-Link DLL 非线程安全：把所有 pylink.JLink 调用串行化。
+    # 必须在探针监控线程以及任何 API 请求之前安装（详见 core/jlink_lock.py）。
+    from core.jlink_lock import install_pylink_lock
+    install_pylink_lock()
+
     # 启动探针热插拔监控
     probe_monitor.start(loop)
 
@@ -128,6 +140,8 @@ async def lifespan(app: FastAPI):
     monitor_backend.cleanup_all()
     from core.elf_backend import elf_backend
     elf_backend.cleanup_all()
+    # OMNI Tool：释放可能占用的串口
+    omni_tool_router.cleanup()
     logger.info("Application shutdown")
 
 
@@ -155,6 +169,7 @@ app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(tools.router, prefix="/api", tags=["tools"])
 app.include_router(zone.router, prefix="/api", tags=["zone"])
+app.include_router(omni_tool_router.router, prefix="/api", tags=["omni-tool"])
 
 
 # WebSocket 端点
@@ -184,7 +199,28 @@ def load_config_port():
         return None
 
 
+def _configure_stdio() -> None:
+    """把后端 stdout/stderr 固定为 UTF-8。
+
+    后端 stderr 由 CLI/Electron 重定向到 UTF-8 日志文件；若 Python 按系统 locale
+    （中文 Windows=cp936）写日志，日志文件里就会是 GBK 字节，用 UTF-8 打开即乱码。
+    stdout 只输出握手 JSON（ASCII），不受影响。尊重用户显式设置的 PYTHONIOENCODING。
+    """
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main():
+    if toolchain is not None:
+        toolchain.prepare_environment()
+    _configure_stdio()
     parser = argparse.ArgumentParser(description="OMNI Link Backend Server")
     parser.add_argument("--port", type=int, default=None,
                         help="监听端口 (默认读取 backend.config.json，未配置则自动分配)")

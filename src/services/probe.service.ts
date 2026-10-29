@@ -33,7 +33,12 @@ export async function connectProbe(
   }
 ): Promise<{ connected: boolean; uid: string; target: TargetInfo | null }> {
   const client = await api()
-  const { data } = await client.post(`/api/probes/${uid}/connect`, options ?? {})
+  const { data } = await client.post(`/api/probes/${uid}/connect`, options ?? {}, {
+    // 30s：后端连接超时 15s + HTTP 兜底 20s，前端必须比后端更晚超时，
+    // 否则 axios 默认 10s 会先把请求判死（日志里 "timeout of 10000ms exceeded"），
+    // 而后端的连接线程仍在跑；用户再点一次就连锁堆积卡死的连接线程。
+    timeout: 30000,
+  })
   return data
 }
 

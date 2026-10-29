@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = []
-hiddenimports += collect_submodules('omnilink_cli')
+hiddenimports = ['kconfiglib']
+hiddenimports += collect_submodules('omni_cli')
 
 
 a = Analysis(
-    ['D:\\workspace\\embedded\\omni-link\\python\\omni_cli_main.py'],
-    pathex=['D:\\workspace\\embedded\\omni-link\\python'],
+    ['D:\\workspaces\\project\\omni-link\\python\\omni_cli_main.py'],
+    pathex=['D:\\workspaces\\project\\omni-link\\python'],
     binaries=[],
     datas=[],
     hiddenimports=hiddenimports,

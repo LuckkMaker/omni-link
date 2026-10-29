@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useRttStore } from '@/stores/rtt.store'
 import { useProbeStore } from '@/stores/probe.store'
 import { useNotificationStore } from '@/stores/notification.store'
@@ -52,6 +52,10 @@ export function RttTabBar({ running }: RttTabBarProps) {
   const [showAddDialog, setShowAddDialog] = useState(false)
   const [newChannel, setNewChannel] = useState('0')
 
+  // 启停操作序号：启动请求可能在 Stop 之后才返回（后端扫描较慢时尤其明显）。
+  // 用序号把"迟到的结果"丢掉，避免已停止后又弹"启动成功"、或把 running 置回 true。
+  const opSeqRef = useRef(0)
+
   const handleAddTab = () => {
     const ch = Number(newChannel)
     const chInfo = upChannels.find((c) => c.index === ch)
@@ -62,6 +66,7 @@ export function RttTabBar({ running }: RttTabBarProps) {
   // ── 启停会话（逻辑迁自 ConfigPanel，封装 rttService 调用 + 状态更新 + 通知） ──
   const handleStart = useCallback(async () => {
     if (!uid) return
+    const seq = ++opSeqRef.current
     const {
       setStarting,
       setError,
@@ -85,6 +90,18 @@ export function RttTabBar({ running }: RttTabBarProps) {
         up_channel: selectedUpChannel,
         down_channel: selectedDownChannel,
       })
+      // 期间用户点了停止/又发起新的启动：这次结果已过期，不能改 UI 状态，
+      // 也要把这条 progress 通知收掉（否则会永远转圈）。
+      if (seq !== opSeqRef.current) {
+        useNotificationStore.getState().update(notifId, {
+          type: 'info',
+          title: 'RTT 启动结果已忽略',
+          message: '启动期间会话状态已变化',
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
+        return
+      }
       if (result.success) {
         setChannels(result.up_channels, result.down_channels)
         setRunning(true)
@@ -109,6 +126,16 @@ export function RttTabBar({ running }: RttTabBarProps) {
         })
       }
     } catch (e) {
+      if (seq !== opSeqRef.current) {
+        useNotificationStore.getState().update(notifId, {
+          type: 'info',
+          title: 'RTT 启动结果已忽略',
+          message: '启动期间会话状态已变化',
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
+        return
+      }
       // 从 axios 错误响应中提取后端 HTTPException 的 detail 字段
       const axiosErr = e as { response?: { data?: { detail?: string } }; message?: string }
       const msg = axiosErr.response?.data?.detail ?? (e instanceof Error ? e.message : String(e))
@@ -121,13 +148,16 @@ export function RttTabBar({ running }: RttTabBarProps) {
         autoCloseDelay: 8000,
       })
     } finally {
-      setStarting(false)
+      if (seq === opSeqRef.current) setStarting(false)
     }
   }, [uid])
 
   const handleStop = useCallback(async () => {
     if (!uid) return
-    const { setRunning, reset } = useRttStore.getState()
+    // 让仍在返回途中的启动结果失效（后端也会取消后台启动流程）
+    opSeqRef.current += 1
+    const { setRunning, setStarting, reset } = useRttStore.getState()
+    setStarting(false)
     try { await rttService.stop(uid) } catch { /* 忽略 */ }
     setRunning(false)
     reset()

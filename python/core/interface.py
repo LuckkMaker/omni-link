@@ -73,9 +73,31 @@ class TargetInfo:
 @dataclass
 class FlashResult:
     success: bool
+    # 写入类操作（program/fill）实际写入的字节数
     bytes_written: int = 0
+    # 校验操作实际比对的字节数（verify 专用）
+    bytes_verified: int = 0
+    # 擦除操作实际擦除的字节数（erase 专用）
+    bytes_erased: int = 0
     duration_ms: int = 0
     error: Optional[str] = None
+
+    def to_payload(self, omit_zero_written: bool = False) -> dict:
+        """转为 API 响应字典，只保留本次操作有意义的计数字段。
+
+        - verify 不写 Flash，``bytes_written=0`` 会误导脚本（实机报告 P3-1）；
+        - erase 不写 Flash，同理用 ``bytes_erased`` 表达擦除量；
+        - 为 0 的 ``bytes_verified`` / ``bytes_erased`` 不输出，避免 program 响应里
+          混入与本次操作无关的字段。
+        """
+        data = asdict(self)
+        if omit_zero_written and not data.get("bytes_written"):
+            data.pop("bytes_written", None)
+        if not data.get("bytes_verified"):
+            data.pop("bytes_verified", None)
+        if not data.get("bytes_erased"):
+            data.pop("bytes_erased", None)
+        return data
 
 
 class BackendInterface(ABC):
@@ -98,8 +120,9 @@ class BackendInterface(ABC):
         """获取当前连接目标的芯片信息"""
 
     @abstractmethod
-    def set_target(self, probe_uid: str, part_number: str) -> bool:
-        """手动设置目标芯片型号"""
+    def set_target(self, probe_uid: str, part_number: str,
+                   packs: list[str] | None = None) -> bool:
+        """手动设置目标芯片型号（packs 为可选的临时 .pack 路径列表）"""
 
     @abstractmethod
     def erase(

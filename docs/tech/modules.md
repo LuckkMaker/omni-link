@@ -42,7 +42,8 @@
 - **关键组件**：`RttTerminal`、`RttTabBar`、`ConfigPanel`、`InputBar`、`SendFileButton`、`SaveFormatDialog`、`MultiStringDialog`
 - **设计思路**：
   - RTT 会话在 `MainLayout` 顶层启用，切页面不中断数据流
-  - 启动有 5 秒超时保护，避免长时间阻塞
+  - 启动有 30 秒超时保护；超时/停止会取消后台启动流程（避免前端已报失败、稍后又"启动成功"）
+  - 控制块扫描按「ELF 符号 → 主 SRAM 优先」顺序进行，不可读 RAM 区段快速跳过（不再逐 64 字节刷屏）
 - **注意**：若外部工具（如 IDE 调试器、其他 RTT 客户端）占用调试接口，会导致 SWD 挂起，需依赖超时保护并提示用户释放接口
 
 ## Monitor 页

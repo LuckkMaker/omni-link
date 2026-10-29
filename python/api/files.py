@@ -95,7 +95,22 @@ async def save_file(req: SaveRequest):
 
 
 def read_hex(file_path: str):
-    """读取 Intel HEX 文件，合并为连续二进制数据"""
+    """读取 Intel HEX 文件，合并为连续二进制数据（data 为 base64，供前端使用）"""
+    parsed = parse_intel_hex(file_path)
+    return {
+        "format": "hex",
+        "base_address": parsed["base_address"],
+        "data": base64.b64encode(parsed["data"]).decode("ascii"),
+        "size": parsed["size"],
+        "mtime": os.path.getmtime(file_path),
+    }
+
+
+def parse_intel_hex(file_path: str) -> dict:
+    """解析 Intel HEX 为 {base_address, data(bytes), size}。
+
+    供本模块路由与 ``omni_tools.session`` 复用，保证上位机各处解析结果一致。
+    """
     base_addr = 0
     min_addr = None
     max_addr = None
@@ -127,7 +142,7 @@ def read_hex(file_path: str):
                 break
 
     if min_addr is None:
-        return {"format": "hex", "base_address": 0, "data": "", "size": 0, "mtime": os.path.getmtime(file_path)}
+        return {"base_address": 0, "data": b"", "size": 0}
 
     # 填充连续数据（空隙用 0xFF 填充）
     total = max_addr - min_addr
@@ -135,13 +150,7 @@ def read_hex(file_path: str):
     for addr, b in data_map.items():
         raw[addr - min_addr] = b
 
-    return {
-        "format": "hex",
-        "base_address": min_addr,
-        "data": base64.b64encode(bytes(raw)).decode("ascii"),
-        "size": total,
-        "mtime": os.path.getmtime(file_path),
-    }
+    return {"base_address": min_addr, "data": bytes(raw), "size": total}
 
 
 def read_elf(file_path: str):

@@ -495,14 +495,17 @@ def is_target_registered(part_number: str) -> bool:
         return True
 
     if source == "pack":
-        # Pack 导入的芯片：检查 Pack 是否在安装清单中
+        # Pack 导入的芯片：检查 Pack 文件是否仍然存在。
+        # 不能只看清单里的 file_exists——import_pack 不写该字段（它只是
+        # list_installed_packs 的临时派生值），否则所有 Pack 芯片都会被误报“不可烧录”。
         try:
-            from core.pack_manager import load_manifest
+            from core.pack_manager import load_manifest, _resolve_manifest_path
             manifest = load_manifest()
             pack_name = device.get("pack", "")
             for entry in manifest:
                 if entry.get("name") == pack_name:
-                    return entry.get("file_exists", False)
+                    pack_path = _resolve_manifest_path(entry)
+                    return bool(pack_path) and os.path.isfile(pack_path)
             return False
         except Exception:
             return False

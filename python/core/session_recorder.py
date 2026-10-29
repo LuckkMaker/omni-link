@@ -191,12 +191,27 @@ class SessionRecorder:
         except (IndexError, struct.error):
             return None
 
+    def flush(self):
+        """把当前文件的用户态缓冲刷到磁盘（不加 fsync）。
+
+        采样进行中文件未关闭，``read_range`` 若不先 flush 就读不到最后一批
+        样本；CLI ``monitor read --follow`` / 前端历史加载都依赖这份实时可见性。
+        """
+        with self._lock:
+            if self._file is not None:
+                try:
+                    self._file.flush()
+                except OSError:
+                    pass
+
     def read_range(self, start_ms=None, end_ms=None, limit=None):
         """跨全部文件读取 [start_ms, end_ms] 范围内的样本。
 
+        读取前先 flush 当前文件，保证采样进行中也能读到最新样本。
         返回 list[dict]: [{vars: [(id,name,type,address), ...], samples: [(t_ms, {id:value}), ...]}, ...]
         每文件一段（变量集可能不同）。
         """
+        self.flush()
         with self._lock:
             files = list(self._files)
         out = []
