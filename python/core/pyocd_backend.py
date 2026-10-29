@@ -507,12 +507,16 @@ class PyOCDBackend(BackendInterface):
         # `choose_probe` 仍会把 CMSIS-DAP 的 libusb/HID 枚举跑一遍；实测该枚举会在
         # HidD_SetFeature / libusb_interrupt_transfer 里阻塞十几秒到永远，于是
         # “J-Link 连接超时”其实卡在完全不相关的 DAPLink 枚举上（py-spy 栈已确认）。
+        # 是否加前缀只看探针自身类型，不能因为传入了 device 就认定是 J-Link：
+        # 内置设备库里的型号都带 jlink_device 字段，API 层会给 CMSIS-DAP 探针
+        # 也兜底传入 device。若据此加 "jlink:" 前缀，DebugProbeAggregator 只在
+        # J-Link 后端里查找，CMSIS-DAP 探针永远匹配不到，connect 直接返回
+        # None 并报 "Probe xxxx not found"（内置型号连不上、DFP 导入型号正常的根因）。
         probe_type_prefix = ""
         cached_info = self._probe_info_cache.get(probe_uid)
-        looks_jlink = bool(device) or (
-            cached_info is not None
-            and ("jlink" in (cached_info.product or "").lower()
-                 or "segger" in (cached_info.vendor or "").lower()))
+        looks_jlink = cached_info is not None and (
+            "jlink" in (cached_info.product or "").lower()
+            or "segger" in (cached_info.vendor or "").lower())
         if looks_jlink:
             probe_type_prefix = "jlink:"
 

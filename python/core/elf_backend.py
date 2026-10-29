@@ -72,6 +72,33 @@ def _pick_best(root: str, candidates: list[str]) -> str:
     return max(candidates, key=common)
 
 
+# 读取源码文件的编码探测顺序：UTF-8 优先，失败回退 GB18030（兼容 GB2312/GBK，
+# Keil 在中文 Windows 下保存的源码即为此编码）。
+_SOURCE_ENCODINGS = ("utf-8", "gb18030")
+
+
+def detect_source_encoding(raw: bytes) -> str:
+    """探测源码文本编码，返回可直接用于 open() 的编码名。"""
+    for enc in _SOURCE_ENCODINGS:
+        try:
+            raw.decode(enc)
+            return enc
+        except UnicodeDecodeError:
+            continue
+    return "utf-8"
+
+
+def read_source_text(path: str) -> str:
+    """按 UTF-8 → GB18030 自动探测编码读取源码文件，避免中文注释乱码。"""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    enc = detect_source_encoding(raw)
+    try:
+        return raw.decode(enc)
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace")
+
+
 # 悬停可识别的核心寄存器名（小写）。与 zone.py 的 _HOVER_REG_NAMES 对齐，
 # 悬停这些名字时直接返回寄存器当前值（目标需暂停）。
 HOVER_REG_NAMES = {
@@ -632,12 +659,11 @@ class ElfBackend:
             try:
                 if not os.path.isfile(p):
                     continue
-                with open(p, "r", encoding="utf-8", errors="replace") as fh:
-                    for line_no, raw in enumerate(fh, 1):
-                        if lower in raw.lower():
-                            results.append({"file": p, "line": line_no, "text": raw.rstrip("\n")})
-                            if len(results) >= limit:
-                                return {"success": True, "results": results, "truncated": True}
+                for line_no, raw in enumerate(read_source_text(p).split("\n"), 1):
+                    if lower in raw.lower():
+                        results.append({"file": p, "line": line_no, "text": raw.rstrip("\n")})
+                        if len(results) >= limit:
+                            return {"success": True, "results": results, "truncated": True}
             except OSError:
                 continue
         return {"success": True, "results": results}
@@ -1480,8 +1506,7 @@ class ElfBackend:
         lines = cache.get(file)
         if lines is None:
             try:
-                with open(file, 'r', encoding='utf-8', errors='replace') as f:
-                    lines = f.read().split('\n')
+                lines = read_source_text(file).split('\n')
             except Exception:
                 lines = []
             cache[file] = lines

@@ -26,7 +26,7 @@ from core.core_peripherals import (
     trigger_stir,
     write_scb_field,
 )
-from core.elf_backend import elf_backend
+from core.elf_backend import elf_backend, detect_source_encoding, read_source_text
 from core.peripheral_backend import peripheral_backend
 from core.pyocd_backend import backend, register_session_closed
 from core.rtt_backend import rtt_backend
@@ -957,8 +957,7 @@ async def zone_source_content(uid: str, file: str):
     if file_path is None:
         return {"success": False, "error": f"File not found: {file}"}
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.read().split('\n')
+        lines = read_source_text(file_path).split('\n')
         return {"success": True, "file": file_path.replace('\\', '/'), "lines": lines}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -971,8 +970,18 @@ async def zone_source_save(uid: str, req: SourceSaveRequest):
     if file_path is None:
         raise HTTPException(status_code=400, detail=f"File not found: {req.file}")
     try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(req.content)
+        # 按原文件编码写回，避免 GB2312/GBK 源码被静默转成 UTF-8（Keil 会再次乱码）
+        try:
+            with open(file_path, 'rb') as f:
+                enc = detect_source_encoding(f.read())
+        except OSError:
+            enc = 'utf-8'
+        try:
+            data = req.content.encode(enc)
+        except (UnicodeEncodeError, LookupError):
+            data = req.content.encode('utf-8')
+        with open(file_path, 'wb') as f:
+            f.write(data)
         return {"success": True, "file": file_path.replace('\\', '/')}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
