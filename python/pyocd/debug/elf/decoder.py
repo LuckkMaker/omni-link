@@ -38,6 +38,40 @@ def _decode_path(data):
         except UnicodeDecodeError:
             return data.decode('utf-8', errors='replace')
 
+def _line_table_index_base(lineprog):
+    """行程序文件表/目录表的索引起始值。
+
+    DWARF 5 起（见 DWARF5 第 6.2.2 节）行程序头改用 0 基索引：文件表第一个条目是 0，
+    目录表第一个条目（即 DW_AT_comp_dir）也是 0；DWARF 2-4 则是 1 基。
+    """
+    header = getattr(lineprog, 'header', None)
+    version = getattr(header, 'version', 4)
+    return 0 if version >= 5 else 1
+
+
+def _line_source_of(lineprog, file_index, base):
+    """把行程序的（文件索引, 目录索引）解析成 (filename, dirname)。
+
+    索引越界或条目缺失时返回 ("", "")，由调用方按 DW_AT_comp_dir 兜底。
+    DWARF 5 的目录索引 0 就是 comp_dir 本身，按实际条目返回；DWARF 4 的 dir_index == 0
+    表示「没有目录」，此时目录名留空。
+    """
+    directories = lineprog['include_directory']
+    entries = lineprog['file_entry']
+
+    entry_index = file_index - base
+    if entry_index < 0 or entry_index >= len(entries):
+        return ("", "")
+    fileinfo = entries[entry_index]
+    filename = _decode_path(fileinfo.name)
+
+    dirname = ""
+    dir_index = fileinfo.dir_index - base
+    if dir_index >= 0 and dir_index < len(directories):
+        dirname = _decode_path(directories[dir_index])
+    return (filename, dirname)
+
+
 FunctionInfo = namedtuple('FunctionInfo', 'name subprogram low_pc high_pc')
 LineInfo = namedtuple('LineInfo', 'cu filename dirname line comp_dir')
 SymbolInfo = namedtuple('SymbolInfo', 'name address size type')
@@ -189,6 +223,9 @@ class DwarfAddressDecoder(object):
                 if comp_dir_attr:
                     comp_dir = _decode_path(comp_dir_attr.value)
 
+            # 行程序头里的文件/目录索引：DWARF 5 起为 0 基，DWARF <= 4 为 1 基
+            index_base = _line_table_index_base(lineprog)
+
             prevstate = None
             skipThisSequence = False
             for entry in lineprog.get_entries():
@@ -207,17 +244,7 @@ class DwarfAddressDecoder(object):
 
                 # Looking for a range of addresses in two consecutive states.
                 if prevstate and not skipThisSequence:
-                    try:
-                        fileinfo = lineprog['file_entry'][prevstate.file - 1]
-                        filename = _decode_path(fileinfo.name)
-                        try:
-                            dirname = lineprog['include_directory'][fileinfo.dir_index - 1]
-                            dirname = _decode_path(dirname)
-                        except IndexError:
-                            dirname = ""
-                    except IndexError:
-                        filename = ""
-                        dirname = ""
+                    filename, dirname = _line_source_of(lineprog, prevstate.file, index_base)
                     info = LineInfo(cu=cu, filename=filename, dirname=dirname, line=prevstate.line, comp_dir=comp_dir)
                     fromAddr = prevstate.address
                     toAddr = entry.state.address
@@ -239,12 +266,14 @@ class DwarfAddressDecoder(object):
                     prevstate = entry.state
 
     def _dump_lineprog(self, lineprog):
+        index_base = _line_table_index_base(lineprog)
         for i, e in enumerate(lineprog.get_entries()):
             s = e.state
             if s is None:
                 LOG.debug("%d: cmd=%d ext=%d args=%s", i, e.command, int(e.is_extended), repr(e.args))
             else:
-                LOG.debug("%d: %06x %4d stmt=%1d block=%1d end=%d file=[%d]%s", i, s.address, s.line, s.is_stmt, int(s.basic_block), int(s.end_sequence), s.file, lineprog['file_entry'][s.file-1].name)
+                filename = _line_source_of(lineprog, s.file, index_base)[0]
+                LOG.debug("%d: %06x %4d stmt=%1d block=%1d end=%d file=[%d]%s", i, s.address, s.line, s.is_stmt, int(s.basic_block), int(s.end_sequence), s.file, filename)
 
     def dump_subprograms(self):
         for prog in self.subprograms:

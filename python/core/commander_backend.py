@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 # list: 列出已连接探针; help: 显示帮助; exit/quit: 退出; !: shell 命令
 OFFLINE_COMMANDS = {'list', 'help', 'exit', 'quit', '!'}
 
+# 等待 per-uid 调试协调锁的超时（秒）。
+# 上一条命令若因目标失联/探针挂死永不返回，会一直持有该锁；不设超时的话，
+# 后续所有 halt/step/regs 请求都会永远排队（实机报告 P1-2）。
+COMMAND_LOCK_TIMEOUT = 15.0
+
 
 class CommanderBackend:
     """Commander 命令执行后端
@@ -338,12 +343,16 @@ class CommanderBackend:
             or command.split()[0].lower() in OFFLINE_COMMANDS if command.split() else False
         )
 
-        # 需要连接的命令：获取调试/刷新协调锁（阻塞等待），执行期间周期刷新
+        # 需要连接的命令：获取调试/刷新协调锁（有限等待），执行期间周期刷新
         # （read_memory_direct / 外设寄存器读取等 try-acquire）会跳过，保证用户
         # 调试操作不被周期性刷新并发访问 pyOCD target 影响。
         op_lock = None if is_offline_cmd else backend.get_op_lock(uid)
-        if op_lock is not None:
-            op_lock.acquire()
+        if op_lock is not None and not op_lock.acquire(timeout=COMMAND_LOCK_TIMEOUT):
+            msg = (f"上一个调试操作在 {int(COMMAND_LOCK_TIMEOUT)} 秒内仍未结束（可能已挂起）。"
+                   "请断开并重新连接探针；若后端仍无响应，执行 `omni backend stop` 后重启。")
+            logger.warning(f"Commander lock timeout for {uid[:16]}: {msg}")
+            event_manager.log("warning", f"Commander: {msg}")
+            return {"success": False, "output": "", "error": msg, "command": command}
         try:
             return self._execute_locked(uid, command, is_offline_cmd)
         finally:

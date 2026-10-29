@@ -10,6 +10,7 @@ const FILTER_OPTIONS: { value: LogFilter; label: string }[] = [
   { value: 'commander', label: 'Commander' },
   { value: 'flash', label: 'Flash' },
   { value: 'monitor', label: 'Monitor' },
+  { value: 'omni-tool', label: 'Omni Tool' },
   { value: 'rtt', label: 'RTT' },
   { value: 'zone', label: 'Zone' },
 ]

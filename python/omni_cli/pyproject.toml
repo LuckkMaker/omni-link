@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omni-cli"
+dynamic = ["version"]
+description = "OMNI CLI - 探针/烧录/RTT/设备库/Commander/工程配置命令行"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = ["kconfiglib>=14.1.0", "PyYAML>=6.0"]
+
+[project.scripts]
+omni = "omni_cli.cli:main"
+
+[tool.setuptools]
+packages = ["omni_cli", "omni_cli.boards", "omni_cli.builder", "omni_cli.commands", "omni_cli.config", "omni_cli.modules"]
+package-dir = { "omni_cli" = ".", "omni_cli.boards" = "boards", "omni_cli.builder" = "builder", "omni_cli.commands" = "commands", "omni_cli.config" = "config", "omni_cli.modules" = "modules" }
+include-package-data = false
+
+[tool.setuptools.dynamic]
+version = { attr = "omni_cli.__version__" }

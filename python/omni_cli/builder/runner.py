@@ -1,0 +1,544 @@
+"""omni build 的实现：为一个工程上下文做 CMake 配置 + 构建（本地命令，不经过后端）。
+
+约定与 ``omni/cmake`` 一致：
+
+- 构建目录 ``<project>/build/<board>/<COMPILER>/<buildtype>``
+- 工具链文件 ``<omni_root>/cmake/toolchains/<compiler>.cmake``
+- 产物 ``omni.axf`` / ``omni.hex`` / ``omni.bin`` / ``omni.axf.map`` / ``omni.size.txt``
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from .. import __version__, toolchain as omni_toolchain
+from ..context import ProjectError
+from .report import steps_from_log, summarize_failure
+
+COMPILERS = ("ac6", "gcc", "clang", "ac5")
+DEFAULT_COMPILER = "ac6"
+BUILD_TYPES = ("Debug", "Release")
+DEFAULT_BUILD_TYPE = "Debug"
+
+TOOLCHAIN_FILES = {
+    "ac6": "armclang6.cmake",
+    "gcc": "gcc.cmake",
+    "clang": "clang.cmake",
+    "ac5": "armcc5.cmake",
+}
+
+ARTIFACTS = (
+    "omni.axf",
+    "omni.elf",
+    "omni.hex",
+    "omni.bin",
+    "omni.axf.map",
+    "omni.size.txt",
+)
+SIZE_RE = re.compile(
+    r"Program Size:\s*Code=(\d+)\s+RO-data=(\d+)\s+RW-data=(\d+)\s+ZI-data=(\d+)"
+)
+#: GNU size 默认输出：text data bss dec hex filename
+GNU_SIZE_RE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+[0-9a-fA-F]+\s+\S+", re.MULTILINE
+)
+VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+@dataclass
+class BuildResult:
+    project_dir: str
+    board: str
+    compiler: str
+    build_type: str
+    build_dir: str
+    toolchain: str
+    target: Optional[str] = None
+    runner: Optional[str] = None
+    configured: bool = False
+    built: bool = False
+    success: bool = False
+    exit_code: int = 0
+    artifacts: dict = field(default_factory=dict)
+    size: Optional[dict] = None
+    gnu_size: Optional[dict] = None
+    log: list = field(default_factory=list)
+    #: 展示信息：耗时、日志落盘位置、失败统计（``--json`` 也会带出去）。
+    configure_seconds: float = 0.0
+    build_seconds: float = 0.0
+    log_path: Optional[str] = None
+    steps: int = 0
+    failed_targets: int = 0
+    first_error: Optional[str] = None
+    failed_phase: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "success": self.success,
+            "exit_code": self.exit_code,
+            "project_dir": self.project_dir,
+            "board": self.board,
+            "compiler": self.compiler,
+            "build_type": self.build_type,
+            "build_dir": self.build_dir,
+            "toolchain": self.toolchain,
+            "target": self.target,
+            "runner": self.runner,
+            "configured": self.configured,
+            "built": self.built,
+            "artifacts": self.artifacts,
+            "size": self.size,
+            "gnu_size": self.gnu_size,
+            "configure_seconds": round(self.configure_seconds, 2),
+            "build_seconds": round(self.build_seconds, 2),
+            "log_path": self.log_path,
+            "steps": self.steps,
+            "failed_targets": self.failed_targets,
+            "first_error": self.first_error,
+            "failed_phase": self.failed_phase,
+            "log": self.log,
+        }
+
+
+def _version_tuple(text: str) -> tuple:
+    match = VERSION_RE.search(text or "")
+    return tuple(int(part) for part in match.groups()) if match else (0, 0, 0)
+
+
+#: CMakeCache 里需要核对的上下文变量（构建目录只能服务一个上下文）。
+CACHE_CONTEXT = {
+    "OMNI_BOARD": "board",
+    "OMNI_COMPILER": "compiler",
+    "CMAKE_BUILD_TYPE": "build_type",
+}
+
+
+def read_cache_context(build_dir: str) -> dict:
+    """读取已有构建目录的上下文（board / compiler / build_type）。"""
+
+    path = os.path.join(build_dir, "CMakeCache.txt")
+    if not os.path.isfile(path):
+        return {}
+    values: dict = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("//") or line.startswith("#"):
+                    continue
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key = key.split(":", 1)[0]
+                field_name = CACHE_CONTEXT.get(key)
+                if field_name:
+                    values[field_name] = value
+    except OSError:
+        return {}
+    return values
+
+
+def cache_conflicts(cache: dict, board: str, compiler: str, build_type: str) -> list:
+    """构建目录与当前请求的上下文是否冲突。"""
+
+    wanted = {"board": board, "compiler": compiler, "build_type": build_type}
+    conflicts = []
+    for key, expected in wanted.items():
+        actual = cache.get(key)
+        if actual and actual != expected:
+            conflicts.append(f"{key}: 构建目录里是 '{actual}'，当前是 '{expected}'")
+    return conflicts
+
+
+def toolchain_file(omni_root: str, compiler: str) -> str:
+    name = TOOLCHAIN_FILES.get(compiler)
+    if not name:
+        raise ProjectError(
+            f"未知编译器 '{compiler}'（支持: {', '.join(COMPILERS)}）", code=2
+        )
+    path = os.path.join(omni_root, "cmake", "toolchains", name)
+    if not os.path.isfile(path):
+        raise ProjectError(
+            f"编译器 {compiler} 的工具链文件尚未提供: {path}\n"
+            f"  ac6 / gcc / clang 见 omni/cmake/README.md；ac5 尚未接入。",
+            code=1,
+        )
+    return path
+
+
+def build_directory(project_dir: str, board: str, compiler: str, build_type: str) -> str:
+    return os.path.join(project_dir, "build", board, compiler.upper(), build_type)
+
+
+def parse_size(map_path: str) -> Optional[dict]:
+    if not os.path.isfile(map_path):
+        return None
+    try:
+        with open(map_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = SIZE_RE.search(text)
+    if not match:
+        return None
+    code, ro, rw, zi = (int(value) for value in match.groups())
+    return {"code": code, "ro_data": ro, "rw_data": rw, "zi_data": zi}
+
+
+def collect_artifacts(build_dir: str) -> dict:
+    found = {}
+    for name in ARTIFACTS:
+        path = os.path.join(build_dir, name)
+        if os.path.isfile(path):
+            found[name] = path
+    return found
+
+
+def parse_gnu_size(size_path: str) -> Optional[dict]:
+    """解析 ``arm-none-eabi-size`` 的输出（GCC 侧没有 armlink 的 Program Size）。"""
+
+    if not os.path.isfile(size_path):
+        return None
+    try:
+        with open(size_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = GNU_SIZE_RE.search(text)
+    if not match:
+        return None
+    text_size, data, bss, dec = (int(value) for value in match.groups())
+    return {"text": text_size, "data": data, "bss": bss, "dec": dec}
+
+
+#: ``omni build -t`` 的语义分类（与 west build -t 对应）。
+RUNNER_ACTIONS = ("flash", "run")
+TARGET_CLEAN = "clean"
+TARGET_SIZE = "size"
+
+
+def target_kind(target: Optional[str], project_dir: str) -> tuple:
+    """把 ``-t`` 的值解析成 (kind, cmake_target)。
+
+    kind：
+      ``none``   没有指定目标
+      ``clean``  等价 --clean
+      ``cmake``  直接透传给 ``cmake --build --target``（含 ``size`` 的展开）
+      ``runner`` 先构建，再调用 runner（flash / run）
+    """
+
+    if not target:
+        return "none", ""
+    if target == TARGET_CLEAN:
+        return "clean", ""
+    if target == TARGET_SIZE:
+        name = os.path.basename(os.path.abspath(project_dir))
+        return "cmake", f"omni-size-{name}"
+    if target in RUNNER_ACTIONS:
+        return "runner", ""
+    return "cmake", target
+
+
+def runner_argv(action: str, elf_path: str, extra_args: Optional[list] = None) -> list:
+    """构造 runner 命令：flash / run 都走 ``omni flash program <elf>``。"""
+
+    return _cli_base() + ["flash", "program", elf_path, *(extra_args or [])]
+
+
+def _usable_omni(exe: str) -> bool:
+    """PATH 上的 omni 版本是否不低于当前 CLI。"""
+
+    try:
+        out = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _version_tuple(out.stdout) >= _version_tuple(__version__)
+
+
+def _cli_base() -> list:
+    """用「当前这个 CLI」执行子命令：可执行文件优先，否则 python -m omni_cli。"""
+
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    exe = shutil.which("omni")
+    if exe and _usable_omni(exe):
+        return [exe]
+
+    # 退回源码运行：CMake 会在「构建目录」里起子进程，不能指望继承调用者的
+    # cwd / PYTHONPATH，否则 configure 阶段会报 No module named omni_cli。
+    package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    parts = [part for part in os.environ.get("PYTHONPATH", "").split(os.pathsep) if part]
+    if os.path.normcase(package_root) not in {os.path.normcase(part) for part in parts}:
+        os.environ["PYTHONPATH"] = os.pathsep.join([package_root, *parts])
+    return [sys.executable, "-m", "omni_cli"]
+
+
+def _cli_configure_args() -> list:
+    """让 CMake 用「当前这个 CLI」生成配置，避免 PATH 上的旧版本。
+
+    两种传法互斥，切换时（源码运行 ↔ 已安装 exe）必须清掉另一种，否则会被
+    CMakeCache 里的旧条目抢先命中（``omni-kconfig.cmake`` 优先看 python+module）。
+    """
+
+    base = _cli_base()
+    if len(base) == 1:
+        return [
+            f"-DOMNI_CLI={base[0]}",
+            "-UOMNI_CLI_PYTHON",
+            "-UOMNI_CLI_MODULE",
+        ]
+    return [
+        f"-DOMNI_CLI_PYTHON={base[0]}",
+        "-DOMNI_CLI_MODULE=omni_cli",
+        "-UOMNI_CLI",
+    ]
+
+
+def _require_tool(name: str, hint: str) -> str:
+    path = omni_toolchain.resolve_tool(name)
+    if not path:
+        raise ProjectError(
+            f"未找到 {name}（{hint}）。可把它放进 OMNI Link 安装目录的 tools/，"
+            f"或用 {omni_toolchain.OVERRIDES.get(name, '环境变量')} 指定路径。",
+            code=1,
+        )
+    return path
+
+
+def _run(cmd: list, log: Callable[[str], None], verbose: bool,
+         stream: Optional[Callable[[str], None]] = None,
+         on_start: Optional[Callable[[list], None]] = None,
+         sink=None) -> tuple:
+    """执行命令。
+
+    ``stream``：逐行实时回调（着色后打印）；为 None 时按老行为写 ``log``。
+    ``sink``：  原始日志文件句柄，写入不带 ANSI 的原文。
+    ``on_start``：命令即将执行时回调，用于打印缩写/全量命令行。
+    """
+
+    if on_start is not None:
+        on_start(cmd)
+    else:
+        log("$ " + " ".join(cmd))
+    chunks = []
+    try:
+        # 合并 stderr 到 stdout，保证输出顺序与进度条可用
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise ProjectError(f"执行失败: {cmd[0]}: {exc}", code=1) from exc
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        chunks.append(line)
+        raw = line.rstrip("\r\n")
+        if sink is not None:
+            try:
+                sink.write(raw + "\n")
+            except OSError:
+                sink = None
+        if stream is not None:
+            stream(raw)
+
+    returncode = proc.wait()
+    output = "".join(chunks)
+    if verbose and stream is None and output:
+        log(output.rstrip())
+    return returncode, output
+
+
+def _finalize(result: BuildResult) -> BuildResult:
+    """补齐展示用的统计字段（步数、失败目标数、首个错误）。"""
+
+    text = "\n".join(part for part in result.log if part)
+    summary = summarize_failure(text)
+    result.steps = steps_from_log(text)
+    result.failed_targets = summary["targets"]
+    result.first_error = summary["first_error"]
+    return result
+
+
+def run_build(
+    *,
+    project_dir: str,
+    omni_root: str,
+    board: str,
+    compiler: str = DEFAULT_COMPILER,
+    build_type: str = DEFAULT_BUILD_TYPE,
+    clean: bool = False,
+    force_configure: bool = False,
+    configure_only: bool = False,
+    target: Optional[str] = None,
+    jobs: Optional[int] = None,
+    cmake_args: Optional[list] = None,
+    verbose: bool = False,
+    stream_build: bool = True,
+    stream: Optional[Callable[[str], None]] = None,
+    on_start: Optional[Callable[[str, list], None]] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> BuildResult:
+    log = log or (lambda message: None)
+    compiler = (compiler or DEFAULT_COMPILER).lower()
+    if compiler not in COMPILERS:
+        raise ProjectError(f"未知编译器 '{compiler}'（支持: {', '.join(COMPILERS)}）", code=2)
+    if build_type not in BUILD_TYPES:
+        raise ProjectError(
+            f"未知构建类型 '{build_type}'（支持: {', '.join(BUILD_TYPES)}）", code=2
+        )
+
+    repo_root = os.path.dirname(omni_root)
+    toolchain = toolchain_file(omni_root, compiler)
+    build_dir = build_directory(project_dir, board, compiler, build_type)
+    kind, cmake_target = target_kind(target, project_dir)
+    if kind == TARGET_CLEAN:
+        clean = True
+
+    result = BuildResult(
+        project_dir=project_dir,
+        board=board,
+        compiler=compiler,
+        build_type=build_type,
+        build_dir=build_dir,
+        toolchain=toolchain,
+        target=target,
+        runner=target if kind == "runner" else None,
+    )
+
+    if clean and os.path.isdir(build_dir):
+        # 只允许删工程目录下的构建目录。
+        expected = os.path.abspath(os.path.join(project_dir, "build"))
+        if not os.path.abspath(build_dir).startswith(expected):
+            raise ProjectError(f"拒绝清理非构建目录: {build_dir}", code=1)
+        log(f"clean {build_dir}")
+        shutil.rmtree(build_dir)
+
+    # 一个构建目录只服务一个上下文（与 west 的行为一致）。
+    cache = read_cache_context(build_dir)
+    conflicts = cache_conflicts(cache, board, compiler, build_type)
+    if conflicts:
+        raise ProjectError(
+            "构建目录已配置为其它上下文，请用 --clean 重建:\n  " + "\n  ".join(conflicts),
+            code=1,
+        )
+
+    cmake = _require_tool("cmake", "安装 CMake 或用 vcpkg/Keil 自带的 cmake")
+    _require_tool("ninja", "安装 Ninja（CMake 生成器固定为 Ninja）")
+
+    # 把解析到的编译器绝对路径交给 CMake：这样 OMNI_CLANG / OMNI_GCC 覆盖
+    # 和安装目录 tools/ 都能生效，而不是只依赖 PATH 的第一个同名程序。
+    compiler_args = []
+    if compiler == "clang":
+        cc = omni_toolchain.resolve_tool("clang")
+        if cc:
+            compiler_args.append(f"-DCMAKE_C_COMPILER={cc}")
+    elif compiler == "gcc":
+        cc = omni_toolchain.resolve_tool("arm-none-eabi-gcc")
+        if cc:
+            compiler_args.append(f"-DCMAKE_C_COMPILER={cc}")
+
+    cache_file = os.path.join(build_dir, "CMakeCache.txt")
+    need_configure = (
+        force_configure
+        or configure_only
+        or clean
+        or not os.path.isfile(cache_file)
+    )
+
+    # 全量日志落盘：失败时用户能翻原文，而终端只留结论。
+    os.makedirs(build_dir, exist_ok=True)
+    sink = None
+    try:
+        result.log_path = os.path.join(build_dir, "build.log")
+        sink = open(result.log_path, "w", encoding="utf-8", errors="replace")
+    except OSError:
+        result.log_path = None
+        sink = None
+
+    streaming = stream if stream_build else None
+
+    def phase_start(kind: str):
+        if on_start is None:
+            return None
+        return lambda command: on_start(kind, command)
+
+    try:
+        if need_configure:
+            configure_cmd = [
+                cmake,
+                "-S", project_dir,
+                "-B", build_dir,
+                "-G", "Ninja",
+                f"-DOMNI_WORKSPACE_DIR={repo_root}",
+                f"-DOMNI_BOARD={board}",
+                f"-DOMNI_COMPILER={compiler}",
+                f"-DCMAKE_TOOLCHAIN_FILE={toolchain}",
+                f"-DCMAKE_BUILD_TYPE={build_type}",
+                *compiler_args,
+                *(cmake_args or []),
+                *_cli_configure_args(),
+            ]
+            started = time.monotonic()
+            rc, output = _run(configure_cmd, log, verbose, stream=streaming,
+                              on_start=phase_start("configure"), sink=sink)
+            result.configure_seconds = time.monotonic() - started
+            result.log.append(output)
+            if rc != 0:
+                result.exit_code = rc
+                result.failed_phase = "configure"
+                return _finalize(result)
+            result.configured = True
+        else:
+            _cached = read_cache_context(build_dir)
+            log("(CMake 已配置：board={b} compiler={c} type={t} → 跳过 configure；"
+                "需要强制时加 --cmake)".format(
+                    b=_cached.get("board", board),
+                    c=_cached.get("compiler", compiler),
+                    t=_cached.get("build_type", build_type)))
+
+        if configure_only:
+            result.success = True
+            return _finalize(result)
+
+        build_cmd = [cmake, "--build", build_dir]
+        if cmake_target:
+            build_cmd += ["--target", cmake_target]
+        if jobs:
+            build_cmd += ["--parallel", str(jobs)]
+        started = time.monotonic()
+        rc, output = _run(build_cmd, log, verbose, stream=streaming,
+                          on_start=phase_start("build"), sink=sink)
+        result.build_seconds = time.monotonic() - started
+        result.log.append(output)
+        result.exit_code = rc
+        if rc != 0:
+            result.failed_phase = "build"
+            return _finalize(result)
+
+        result.built = True
+        result.artifacts = collect_artifacts(build_dir)
+        result.size = parse_size(os.path.join(build_dir, "omni.axf.map"))
+        result.gnu_size = parse_gnu_size(os.path.join(build_dir, "omni.size.txt"))
+        result.success = True
+        return _finalize(result)
+    finally:
+        if sink is not None:
+            try:
+                sink.close()
+            except OSError:
+                pass

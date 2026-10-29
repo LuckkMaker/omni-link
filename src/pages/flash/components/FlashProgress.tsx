@@ -89,9 +89,9 @@ export function FlashProgress() {
                   烧录成功
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  写入 {formatSize(result.bytes_written)} · 耗时 {(result.duration_ms / 1000).toFixed(2)}s
-                  {result.bytes_written > 0 && result.duration_ms > 0 && (
-                    ` · 速率 ${(result.bytes_written / 1024 / (result.duration_ms / 1000)).toFixed(1)} KB/s`
+                  写入 {formatSize(result.bytes_written ?? 0)} · 耗时 {(result.duration_ms / 1000).toFixed(2)}s
+                  {(result.bytes_written ?? 0) > 0 && result.duration_ms > 0 && (
+                    ` · 速率 ${((result.bytes_written ?? 0) / 1024 / (result.duration_ms / 1000)).toFixed(1)} KB/s`
                   )}
                 </div>
               </div>

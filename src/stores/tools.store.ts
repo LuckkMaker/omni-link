@@ -29,7 +29,7 @@ export const useToolsStore = create<ToolsState>()(
     (set) => ({
       // Number Converter 默认值
       ncDecimal: '0',
-      ncHex: '0x0',
+      ncHex: '0',
       ncBinary: '0',
 
       // Map Analyzer 默认值

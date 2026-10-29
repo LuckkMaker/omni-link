@@ -28,7 +28,11 @@ coverage.xml
 release/
 python/build/
 python/dist/
-build/
+# build/ 是 electron-builder 的 buildResources 目录；installer.nsh 需要随仓库分发，
+# 否则其他机器/CI 打包会报 "cannot find include file"。用 build/* 而非 build/，
+# 才能对该文件做反向忽略（git 无法从被忽略的目录里再包含文件）。
+build/*
+!build/installer.nsh
 
 # ── Electron 打包产物 ────────────────────
 *.app
@@ -57,9 +61,22 @@ python/data/packs/installed_packs.json
 .env.*
 !.env.example
 
+# ── 代码签名证书（含私钥，切勿提交）──────
+*.pfx
+*.p12
+*.pvk
+*.snk
+certs/
+
 # ── 日志 ─────────────────────────────────
 *.log
 logs/
+
+# ── CLI 运行时状态（omni backend 常驻记录）──
+python/omni_cli/.backend_runtime.json
+python/omni_cli/.backend.handshake.jsonl
+# CLI 持久化配置（wheel 安装后记录后端目录，含本机绝对路径，不提交）
+python/omni_cli/cli.config.json
 
 # ── 临时/备份文件 ────────────────────────
 *.tmp
@@ -82,6 +99,7 @@ coverage/
 .eslintcache
 .parcel-cache/
 .vite/
+.vitest-cache/
 
 # ── electron-vite 临时构建配置 ───────────
 electron.vite.config.*.mjs
@@ -123,3 +141,9 @@ ehthumbs_vista.db
 *.prof
 *.profraw
 /.workbuddy
+
+# ── DSH 内嵌运行时（构建期生成，体积大，不提交）──
+# .dsh-runtime/ 由 scripts/dsh-runtime.ps1 生成：Node 24 + @deepseek-ai/dsh 全树 + 预烘焙 DSH_HOME
+.dsh-runtime/
+# 可行性 spike 的临时安装目录
+.dsh-spike/

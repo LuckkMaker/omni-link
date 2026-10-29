@@ -72,6 +72,33 @@ def _pick_best(root: str, candidates: list[str]) -> str:
     return max(candidates, key=common)
 
 
+# 读取源码文件的编码探测顺序：UTF-8 优先，失败回退 GB18030（兼容 GB2312/GBK，
+# Keil 在中文 Windows 下保存的源码即为此编码）。
+_SOURCE_ENCODINGS = ("utf-8", "gb18030")
+
+
+def detect_source_encoding(raw: bytes) -> str:
+    """探测源码文本编码，返回可直接用于 open() 的编码名。"""
+    for enc in _SOURCE_ENCODINGS:
+        try:
+            raw.decode(enc)
+            return enc
+        except UnicodeDecodeError:
+            continue
+    return "utf-8"
+
+
+def read_source_text(path: str) -> str:
+    """按 UTF-8 → GB18030 自动探测编码读取源码文件，避免中文注释乱码。"""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    enc = detect_source_encoding(raw)
+    try:
+        return raw.decode(enc)
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace")
+
+
 # 悬停可识别的核心寄存器名（小写）。与 zone.py 的 _HOVER_REG_NAMES 对齐，
 # 悬停这些名字时直接返回寄存器当前值（目标需暂停）。
 HOVER_REG_NAMES = {
@@ -189,6 +216,20 @@ class ElfBackend:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    def _is_abs_source_path(path: str) -> bool:
+        """源码路径是否已是绝对路径（POSIX `/`、UNC `//`、Windows 盘符 `X:/`）。
+
+        DWARF 里的路径来自不同编译器：armclang/Keil 通常给绝对路径，gcc/clang 可能给
+        相对文件名 + 目录表。判断绝对路径时不能只看前导 `/`，否则 Windows 的 `C:/...`
+        会被当成相对路径，再拼一次 comp_dir，得到 `…/Debug/D:/…` 这种坏路径。
+        """
+        if not path:
+            return False
+        if path.startswith('/'):
+            return True
+        return len(path) >= 2 and path[1] == ':' and path[0].isalpha()
+
+    @staticmethod
     def _line_full_path(info) -> str:
         """组合 DWARF 行区间信息为完整源码路径（/ 分隔，不带尾斜杠）。
 
@@ -197,13 +238,14 @@ class ElfBackend:
         若只用 basename 会把它们混为一谈。此函数把三者拼成可区分的完整路径，
         供可断点行 / 断点定位等按文件查询时精确匹配。
         """
-        rel = (getattr(info, 'filename', '') or '').replace('\\', '/')
-        comp_dir = (getattr(info, 'comp_dir', '') or '').replace('\\', '/')
-        dirname = (getattr(info, 'dirname', '') or '').replace('\\', '/')
+        rel = (getattr(info, 'filename', '') or '').replace('\\', '/').rstrip('/')
+        comp_dir = (getattr(info, 'comp_dir', '') or '').replace('\\', '/').rstrip('/')
+        dirname = (getattr(info, 'dirname', '') or '').replace('\\', '/').rstrip('/')
         full = rel
-        if dirname and rel and not rel.startswith('/'):
+        if dirname and rel and not ElfBackend._is_abs_source_path(rel):
             full = dirname + '/' + rel
-        if comp_dir and full and not full.startswith('/') and not comp_dir.startswith('/'):
+        if comp_dir and full and not ElfBackend._is_abs_source_path(full) \
+                and not ElfBackend._is_abs_source_path(comp_dir):
             full = comp_dir + '/' + full
         return full.rstrip('/')
 
@@ -617,12 +659,11 @@ class ElfBackend:
             try:
                 if not os.path.isfile(p):
                     continue
-                with open(p, "r", encoding="utf-8", errors="replace") as fh:
-                    for line_no, raw in enumerate(fh, 1):
-                        if lower in raw.lower():
-                            results.append({"file": p, "line": line_no, "text": raw.rstrip("\n")})
-                            if len(results) >= limit:
-                                return {"success": True, "results": results, "truncated": True}
+                for line_no, raw in enumerate(read_source_text(p).split("\n"), 1):
+                    if lower in raw.lower():
+                        results.append({"file": p, "line": line_no, "text": raw.rstrip("\n")})
+                        if len(results) >= limit:
+                            return {"success": True, "results": results, "truncated": True}
             except OSError:
                 continue
         return {"success": True, "results": results}
@@ -1465,8 +1506,7 @@ class ElfBackend:
         lines = cache.get(file)
         if lines is None:
             try:
-                with open(file, 'r', encoding='utf-8', errors='replace') as f:
-                    lines = f.read().split('\n')
+                lines = read_source_text(file).split('\n')
             except Exception:
                 lines = []
             cache[file] = lines

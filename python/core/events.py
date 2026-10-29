@@ -11,7 +11,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 
 def _infer_log_source(message: str) -> str:
-    """根据日志消息内容推断来源页面（monitor/flash/rtt/commander/system）"""
+    """根据日志消息内容推断来源页面（monitor/flash/rtt/commander/zone/omni-tool/system）"""
     msg = message or ""
     if "Monitor" in msg:
         return "monitor"
@@ -19,6 +19,9 @@ def _infer_log_source(message: str) -> str:
         return "rtt"
     if "Commander" in msg:
         return "commander"
+    if "OMNI Tool" in msg or "OmniTool" in msg:
+        # 必须在 flash 之前判定：OMNI Tool 的升级日志含“固件/擦除/校验”等词
+        return "omni-tool"
     if any(k in msg for k in ("Zone", "Debug", "Session", "ELF", "Breakpoint", "Register")):
         return "zone"
     if any(k in msg for k in ("Flash", "烧录", "擦除", "Program", "Erase", "Verify", "Read Back", "Check Blank", "固件")):
@@ -59,9 +62,10 @@ class EventManager:
                         "data": {"timestamp": datetime.now().isoformat()}
                     }))
                 elif action == "refresh_probes":
-                    # 客户端请求立即刷新探针列表
+                    # 客户端请求刷新探针列表：返回监控线程维护的快照，避免在事件循环里
+                    # 直接做 USB 枚举（会话被独占时枚举可能阻塞数秒）。
                     from core.pyocd_backend import backend
-                    probes = backend.get_probe_states()
+                    probes = backend.get_cached_probe_states()
                     await websocket.send_text(json.dumps({
                         "event": "probe.list",
                         "data": {"probes": probes}

@@ -107,6 +107,21 @@ HIDDEN_IMPORTS = [
     "core.database",
     "core.map_parser",
     "core.command_examples",
+    # OMNI Tool（多功能调试工具）后端模块
+    "omni_tools",
+    "omni_tools.router",
+    "omni_tools.session",
+    "omni_tools.device_finder",
+    "omni_tools.protocol.serial_link",
+    "omni_tools.protocol.modbus_rtu",
+    "omni_tools.protocol.boot_iap",
+    "omni_tools.protocol.app_cmd",
+    # pyserial（OMNI Tool 串口底座，serialwin32 为运行时动态导入，需显式声明）
+    "serial",
+    "serial.tools",
+    "serial.tools.list_ports",
+    "serial.tools.list_ports_windows",
+    "serial.serialwin32",
     # ELF 解析依赖
     "elftools.elf.elffile",
     "elftools.elf.sections",
@@ -119,6 +134,108 @@ DATA_DIRS = [
     ("flm", "flm"),         # Flash algorithms
 ]
 
+# ---------------------------------------------------------------------------
+# Source encoding checks
+# ---------------------------------------------------------------------------
+# 目的：防止“中文源码在某个环节被按错误编码处理 → 字符串里留下 U+FFFD”的产物
+# 再次发版（实机报告 P1-4）。替换字符一旦出现在源码中，运行期无论怎么设置
+# stdout 编码都无法恢复原文，必须在构建前拦下。
+#
+# 排除项：pyocd/ 是内置的第三方源码；dist/、build/ 是打包产物；
+# omni_cli/build/ 是旧 setuptools 的 build/lib 副本。
+ENCODING_CHECK_EXCLUDE_PREFIXES = (
+    "pyocd/",
+    "dist/",
+    "build/",
+    "omni_cli/build/",
+)
+ENCODING_CHECK_EXCLUDE_DIR_NAMES = {"__pycache__"}
+REPLACEMENT_CHAR = "\ufffd"
+
+
+def _iter_first_party_sources(root: Path):
+    """遍历第一方 .py 文件（跳过第三方/构建产物目录）。"""
+    root = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in ENCODING_CHECK_EXCLUDE_DIR_NAMES and not d.endswith(".egg-info")
+        )
+        rel_dir = Path(dirpath).resolve().relative_to(root).as_posix()
+        rel_prefix = (rel_dir + "/") if rel_dir != "." else ""
+        if any(rel_prefix.startswith(p) for p in ENCODING_CHECK_EXCLUDE_PREFIXES):
+            dirnames[:] = []
+            continue
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                yield Path(dirpath) / name
+
+
+def check_source_encoding(root: Path = BACKEND_DIR) -> list[str]:
+    """检查第一方 .py：必须是合法 UTF-8 且不含 U+FFFD。返回问题列表。"""
+    root = root.resolve()
+    problems: list[str] = []
+    for path in _iter_first_party_sources(root):
+        rel = path.relative_to(root).as_posix()
+        try:
+            raw = path.read_bytes()
+        except OSError as e:  # noqa: PERF203
+            problems.append(f"{rel}: 无法读取: {e}")
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            problems.append(f"{rel}: 不是合法 UTF-8（{e}）")
+            continue
+        if REPLACEMENT_CHAR in text:
+            line = text[: text.index(REPLACEMENT_CHAR)].count("\n") + 1
+            problems.append(f"{rel}:{line}: 含 U+FFFD 替换字符")
+    return problems
+
+
+def report_source_encoding(root: Path = BACKEND_DIR) -> bool:
+    """执行源码编码检查并打印结果（通过返回 True）。"""
+    problems = check_source_encoding(root)
+    if problems:
+        log(f"ERROR: 源码编码检查失败（{len(problems)} 处）")
+        for item in problems[:20]:
+            log(f"  {item}")
+        if len(problems) > 20:
+            log(f"  ... 其余 {len(problems) - 20} 处省略")
+        return False
+    log("源码编码检查通过（UTF-8，无 U+FFFD）")
+    return True
+
+
+def verify_cli_help_encoding(exe_path: Path) -> bool:
+    """构建后检查：CLI 帮助输出必须可严格按 UTF-8 解码且不含 U+FFFD。"""
+    if not exe_path.exists():
+        log(f"WARNING: 未找到 CLI 产物 {exe_path}，跳过帮助编码检查")
+        return True
+    try:
+        proc = subprocess.run(
+            [str(exe_path), "backend", "-h"],
+            capture_output=True,
+            timeout=120,
+        )
+    except Exception as e:
+        log(f"WARNING: 运行 {exe_path.name} 失败，跳过帮助编码检查: {e}")
+        return True
+    output = proc.stdout + proc.stderr
+    try:
+        text = output.decode("utf-8")
+    except UnicodeDecodeError as e:
+        log(f"ERROR: CLI 帮助输出不是合法 UTF-8: {e}")
+        return False
+    if REPLACEMENT_CHAR in text:
+        log("ERROR: CLI 帮助输出含 U+FFFD（stdout 未固定为 UTF-8）")
+        return False
+    if "后端" not in text:
+        log("ERROR: CLI 帮助输出缺少预期中文（输出为空或编码异常）")
+        return False
+    log("CLI 帮助编码检查通过（UTF-8，无 U+FFFD）")
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -126,6 +243,19 @@ DATA_DIRS = [
 def log(msg: str):
     """Print a build log message."""
     print(f"[build] {msg}")
+
+
+def _configure_stdio() -> None:
+    """构建日志也固定 UTF-8（管道下中文 Windows 默认 cp936，CI 里会变乱码）。"""
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            pass
 
 
 def check_package(python_exe: str, package: str) -> bool:
@@ -145,14 +275,14 @@ def check_package(python_exe: str, package: str) -> bool:
         return False
 
 
-def ensure_python(python_exe: str | None) -> str:
+def ensure_python(python_exe: str | None, require_packages: bool = True) -> str:
     """
     Resolve the Python executable to use.
 
     Priority:
       1. Explicit --python argument
       2. Current interpreter (sys.executable)
-    Then verify required packages are available.
+    Then verify required packages are available (backend build only).
     """
     py = python_exe or sys.executable
 
@@ -166,12 +296,13 @@ def ensure_python(python_exe: str | None) -> str:
         log(f"ERROR: Python not found at '{py}'")
         sys.exit(1)
 
-    # Check required packages
-    missing = [pkg for pkg in REQUIRED_PACKAGES if not check_package(py, pkg)]
-    if missing:
-        log(f"ERROR: Missing packages in {py}: {', '.join(missing)}")
-        log(f"  Install them with:  {py} -m pip install -r requirements.txt")
-        sys.exit(1)
+    # Check required packages（CLI 只依赖标准库，--cli-only 时跳过）
+    if require_packages:
+        missing = [pkg for pkg in REQUIRED_PACKAGES if not check_package(py, pkg)]
+        if missing:
+            log(f"ERROR: Missing packages in {py}: {', '.join(missing)}")
+            log(f"  Install them with:  {py} -m pip install -r requirements.txt")
+            sys.exit(1)
 
     return py
 
@@ -269,9 +400,10 @@ def build(python_exe: str):
 
 
 def build_cli(python_exe: str):
-    """把零依赖的 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
+    """把 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
 
-    单文件便于随安装包分发并直接放进 PATH；CLI 只依赖标准库，产物很小。
+    单文件便于随安装包分发并直接放进 PATH。调试/烧录命令只依赖标准库；
+    ``omni config`` 额外依赖 kconfiglib，PyInstaller 需要显式收集。
     """
     ensure_pyinstaller(python_exe)
 
@@ -284,7 +416,8 @@ def build_cli(python_exe: str):
         f"--distpath={DIST_DIR}",
         f"--workpath={BUILD_DIR}",
         f"--specpath={BACKEND_DIR}",
-        "--collect-submodules", "omnilink_cli",
+        "--collect-submodules", "omni_cli",
+        "--hidden-import", "kconfiglib",
         "--paths", str(BACKEND_DIR),
         str(CLI_ENTRY_SCRIPT),
     ]
@@ -308,6 +441,7 @@ def build_cli(python_exe: str):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    _configure_stdio()
     parser = argparse.ArgumentParser(description="Build OMNI Link backend")
     parser.add_argument(
         "--clean", action="store_true",
@@ -317,14 +451,33 @@ def main():
         "--python", default=None,
         help="Path to Python executable to use (default: current interpreter)",
     )
+    parser.add_argument(
+        "--cli-only", action="store_true",
+        help="Only build the CLI (dist/omni.exe); skip the omni-backend bundle",
+    )
+    parser.add_argument(
+        "--check-sources", action="store_true",
+        help="Only run the source encoding check (UTF-8 / no U+FFFD); do not build",
+    )
     args = parser.parse_args()
 
     if args.clean:
         clean()
 
-    py = ensure_python(args.python)
-    build(py)
+    # 编码检查先于任何打包：含 U+FFFD 的源码无法靠运行期设置修复
+    if not report_source_encoding():
+        sys.exit(1)
+    if args.check_sources:
+        return
+
+    py = ensure_python(args.python, require_packages=not args.cli_only)
+    if not args.cli_only:
+        build(py)
     build_cli(py)
+
+    cli_exe = DIST_DIR / (f"{CLI_APP_NAME}.exe" if sys.platform == "win32" else CLI_APP_NAME)
+    if not verify_cli_help_encoding(cli_exe):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

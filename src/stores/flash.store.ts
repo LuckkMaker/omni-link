@@ -6,6 +6,12 @@ import { useProbeStore } from './probe.store'
 import { useNotificationStore } from './notification.store'
 import { selectedSectorsToRanges } from '@/pages/flash/utils/sectors'
 
+/** 从 FastAPI 错误响应中提取 detail（例如 409 已有 Flash 操作、504 超时）。 */
+function extractApiDetail(err: unknown): string | null {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return typeof detail === 'string' ? detail : null
+}
+
 // ── Tab 数据模型 ──────────────────────────
 export interface FlashTab {
   id: string
@@ -829,7 +835,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     if (activeNotifId) {
       const notif = useNotificationStore.getState()
       if (data.success) {
-        notif.update(activeNotifId, { type: 'success', title: '操作完成', message: `写入 ${formatSize(data.bytes_written)} · 耗时 ${(data.duration_ms / 1000).toFixed(2)}s`, autoClose: true, autoCloseDelay: 3000 })
+        notif.update(activeNotifId, { type: 'success', title: '操作完成', message: `写入 ${formatSize(data.bytes_written ?? 0)} · 耗时 ${(data.duration_ms / 1000).toFixed(2)}s`, autoClose: true, autoCloseDelay: 3000 })
       } else {
         notif.update(activeNotifId, { type: 'error', title: '操作失败', message: data.error ?? '未知错误', autoClose: true, autoCloseDelay: 5000 })
       }
@@ -878,7 +884,8 @@ async function wrapOperation(
       notif.update(notifId, { type: 'error', title: `${title}失败`, message: result.error ?? '未知错误', autoClose: true, autoCloseDelay: 5000 })
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : `${title}失败`
+    // 后端 409/504 等的 detail 比 axios 的 “Request failed with status code 409” 更可执行
+    const msg = extractApiDetail(err) ?? (err instanceof Error ? err.message : `${title}失败`)
     set({ phase: 'error', busy: false, result: { success: false, bytes_written: 0, duration_ms: 0, error: msg }, activeNotifId: null })
     notif.update(notifId, { type: 'error', title: `${title}失败`, message: msg, autoClose: true, autoCloseDelay: 5000 })
   }

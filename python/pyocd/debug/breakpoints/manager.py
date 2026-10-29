@@ -301,6 +301,11 @@ class BreakpointManager:
         for bp in self._breakpoints.values():
             bp.provider.remove_breakpoint(bp)
         self._breakpoints = {}
+        # flush() 用 _updated_breakpoints（期望集合）与 _breakpoints（已下发集合）的差集
+        # 判断要增删哪些断点。只清「已下发」会让紧接着的 flush()（zone 的清除接口、
+        # 以及每次 run/reset 前的 PRE_RUN flush 都会调用）把刚摘掉的断点当成新增重新
+        # 装回目标 —— FPB 比较器继续挂着旧地址，复位后照样停在已删除的断点上。
+        self._updated_breakpoints = {}
         self._flush_all()
 
     def _flush_all(self) -> None:
