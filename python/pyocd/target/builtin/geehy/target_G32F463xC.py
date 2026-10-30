@@ -26,6 +26,18 @@ from ....debug.svd.loader import SVDFile
 CHIP_ERASE_WEIGHT = 15.0
 
 
+class DBGMCU:
+    CFG = 0xE0042004
+    CFG_VALUE = 0x7  # DBG_SLEEP | DBG_STOP | DBG_STANDBY: keep debug clock
+
+    APB1F = 0xE0042008
+    # TMR2-7 | RTC | WWDT | IWDT | I2C1/I2C2 SMBUS timeout | FDCAN freeze when halted
+    APB1F_VALUE = 0x02601c3f
+
+    APB2F = 0xE004200C
+    APB2F_VALUE = 0x00000003  # TMR1 | TMR8 freeze when halted
+
+
 # Generated from G32F463_256.FLM (Geehy G32F463 256KB Flash)
 FLASH_ALGO = {
     'load_address': 0x20000000,
@@ -95,3 +107,8 @@ class G32F463xC(CoreSightTarget):
     def __init__(self, session):
         super().__init__(session, self.MEMORY_MAP)
         self._svd_location = SVDFile.from_builtin("G32F463.svd")
+
+    def post_connect_hook(self):
+        self.write32(DBGMCU.CFG, DBGMCU.CFG_VALUE)
+        self.write32(DBGMCU.APB1F, DBGMCU.APB1F_VALUE)
+        self.write32(DBGMCU.APB2F, DBGMCU.APB2F_VALUE)

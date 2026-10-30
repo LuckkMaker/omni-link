@@ -27,6 +27,17 @@ from .target_APM32F4xx_flash import FLASH_ALGO_1MB
 CHIP_ERASE_WEIGHT = 15.0
 
 
+class DBGMCU:
+    CR = 0xE0042004
+    CR_VALUE = 0x7  # DBG_STANDBY | DBG_STOP | DBG_SLEEP
+
+    APB1_FZ = 0xE0042008
+    APB1_FZ_VALUE = 0x06e01dff
+
+    APB2_FZ = 0xE004200C
+    APB2_FZ_VALUE = 0x00070003
+
+
 class APM32F415xG(CoreSightTarget):
     """APM32F415: 1MB Flash, 128KB SRAM + 64KB CCM."""
 
@@ -49,3 +60,8 @@ class APM32F415xG(CoreSightTarget):
     def __init__(self, session):
         super().__init__(session, self.MEMORY_MAP)
         self._svd_location = SVDFile.from_builtin("APM32F41x.svd")
+
+    def post_connect_hook(self):
+        self.write32(DBGMCU.CR, DBGMCU.CR_VALUE)
+        self.write32(DBGMCU.APB1_FZ, DBGMCU.APB1_FZ_VALUE)
+        self.write32(DBGMCU.APB2_FZ, DBGMCU.APB2_FZ_VALUE)
