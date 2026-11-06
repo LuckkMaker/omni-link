@@ -12,18 +12,20 @@ Keil 工程同步不再维护一张手写规则表：omni 的每个目录在自�
 * 注释和跨行都在解析前处理掉，一条声明可以跨多行；
 * 参数里出现 ``${...}`` 变量直接报错，不做猜测；
 * 声明了但磁盘上不存在的文件也报错——规则错了要在同步时立刻发现；
-* 无法用这个宏表达的目录（arch 的 ``list(APPEND)``、第三方 ``modules/``）
-  仍放在 :data:`uvproj_rules.EXTRA_RULE_SETS` 里。
+* 第三方 ``modules/*`` 走 :mod:`module_sources`（读模块 layer），无法用上面
+  两种方式表达的目录（arch 的 ``list(APPEND)``、还没有 CMakeLists.txt 的
+  ``CONFIG_IAP``）仍放在 :data:`uvproj_rules.EXTRA_RULE_SETS` 里。
 """
 
 from __future__ import annotations
 
 import copy
 import os
-import re
 from typing import Callable, Iterable, Optional
 
 from ..context import ProjectError
+from .cmake_text import iter_calls, strip_comments
+from .module_sources import load_module_rule_sets
 from .uvproj_rules import EXTRA_RULE_SETS, LEGACY_RULE_SETS
 
 SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".s", ".S", ".asm")
@@ -32,46 +34,12 @@ SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".s", ".S", ".asm")
 SKIP_DIRS = {"build", "RTE", "__pycache__", ".git", "node_modules", ".venv"}
 
 _MACRO = "omni_sources_ifdef"
-_COMMENT_RE = re.compile(r"#[^\n]*")
-
-
-def _strip_comments(text: str) -> str:
-    """把注释替换成等长空白，保持字符偏移与行号不变。"""
-
-    return _COMMENT_RE.sub(lambda match: " " * len(match.group(0)), text)
 
 
 def iter_macro_calls(text: str) -> Iterable[tuple[int, list[str]]]:
     """遍历文本里所有 ``omni_sources_ifdef(...)`` 调用，产出 (行号, 参数列表)。"""
 
-    position = 0
-    while True:
-        start = text.find(_MACRO, position)
-        if start < 0:
-            return
-
-        opening = text.find("(", start + len(_MACRO))
-        if opening < 0:
-            raise ProjectError(f"{_MACRO} 缺少括号", code=1)
-
-        depth = 0
-        cursor = opening
-        while cursor < len(text):
-            char = text[cursor]
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            cursor += 1
-
-        if depth != 0:
-            raise ProjectError(f"{_MACRO} 括号不匹配", code=1)
-
-        line_no = text.count("\n", 0, start) + 1
-        yield line_no, text[opening + 1 : cursor].split()
-        position = cursor + 1
+    return iter_calls(text, _MACRO)
 
 
 def group_for_path(rel_dir: str) -> str:
@@ -109,7 +77,7 @@ def parse_cmakelists(path: str, repo_root: str) -> list[dict]:
 
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            text = _strip_comments(handle.read())
+            text = strip_comments(handle.read())
     except OSError as exc:
         raise ProjectError(f"无法读取 {path}: {exc}", code=1) from exc
 
@@ -185,7 +153,7 @@ def load_rule_sets(
 
     ``mode``：
 
-    * ``auto``（默认）——解析 ``omni/**/CMakeLists.txt``，再补上
+    * ``auto``（默认）——解析 ``omni/**/CMakeLists.txt`` 与各模块的 layer，再补上
       :data:`uvproj_rules.EXTRA_RULE_SETS` 里无法解析的目录；
     * ``table``——退回手写规则表，解析器出问题时可以临时用。
     """
@@ -199,16 +167,22 @@ def load_rule_sets(
     for path in sorted(_iter_cmakelists(repo_root)):
         rules.extend(parse_cmakelists(path, repo_root))
 
+    module_rules = load_module_rule_sets(repo_root, log=log)
+
     if log is not None:
-        log(f"Parsed {len(rules)} CMakeLists rule(s) from {repo_root}")
-        if not rules:
+        log(
+            f"Parsed {len(rules)} CMakeLists rule(s), "
+            f"{len(module_rules)} module layer rule(s) from {repo_root}"
+        )
+        if not rules and not module_rules:
             # 空规则集会让同步静默地「什么都不做」，这里明确提示
             log(
-                "Warning: 没有解析到 omni_sources_ifdef() 声明，Keil 同步不会增删任何源文件；"
-                "旧布局可用 --rules table 退回手写规则表"
+                "Warning: 没有解析到 omni_sources_ifdef() 声明或模块 layer，"
+                "Keil 同步不会增删任何源文件；旧布局可用 --rules table 退回手写规则表"
             )
 
     rules = _merge_rules(rules)
+    rules.extend(module_rules)
     rules.extend(copy.deepcopy(EXTRA_RULE_SETS))
 
     return rules

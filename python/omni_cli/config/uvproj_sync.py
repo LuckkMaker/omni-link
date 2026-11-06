@@ -14,11 +14,25 @@ from typing import Callable, Iterable, Optional
 
 from ..context import ProjectError
 from .cmake_sources import load_rule_sets
+from .project_sources import load_project_rule_sets
+
+#: kconfiglib 对没打开的符号写的那行：``# CONFIG_X is not set``
+_NOT_SET_RE = re.compile(r"^#\s*([A-Za-z0-9_]+) is not set$")
 
 
 def _rel_path(repo_root: str, relative: str, start_dir: str) -> str:
+    """仓库相对路径 → 相对 ``.uvprojx`` 的路径，按 Keil 自己的写法。
+
+    Keil 对工程目录内的文件写 ``.\\src\\app.c``，对工程外的写
+    ``..\\..\\..\\omni\\app.c``；这里保持一致，免得同步新增的条目和原件只差一个
+    ``.\\`` 前缀。
+    """
+
     absolute = os.path.join(repo_root, relative.replace("/", os.sep))
-    return os.path.relpath(absolute, start_dir).replace("/", "\\")
+    path = os.path.relpath(absolute, start_dir).replace("/", "\\")
+    if not path.startswith(".."):
+        path = ".\\" + path
+    return path
 
 
 def build_source_rules(rule_sets, repo_root: str, uvprojx_dir: str) -> list[dict]:
@@ -66,25 +80,40 @@ def build_define_rules(rule_sets) -> list[dict]:
 
 
 def load_symbols(dot_config_path: str) -> dict[str, str]:
+    """读 ``.config``。
+
+    除了 ``CONFIG_X=y``，还把 ``# CONFIG_X is not set`` 记成 ``"n"``——同步只在
+    「明确关掉」时才删文件。``.config`` 里根本没有的符号说明这份配置是旧的
+    （或符号已经改名），这时保持原状，不拿「没写」当「关掉」。
+    """
+
     symbols: dict[str, str] = {}
     if not os.path.exists(dot_config_path):
         return symbols
     with open(dot_config_path, "r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+            if not line:
+                continue
+            match = _NOT_SET_RE.match(line)
+            if match:
+                symbols[match.group(1)] = "n"
+                continue
+            if line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
             symbols[key.strip()] = value.strip().strip('"')
     return symbols
 
 
-def find_group_node(root, group_name: str):
+def find_group_node(root, group_name: str, *, create: bool = True):
+    """按组名找 ``<Files>``；``create=False`` 时不新建（只读查找）。"""
+
     for group in root.findall(".//Group"):
         node = group.find("GroupName")
         if node is not None and node.text == group_name:
             files = group.find("Files")
-            if files is None:
+            if files is None and create:
                 files, _indent = _append_block(group, "Files")
             return files
     return None
@@ -104,8 +133,15 @@ def _sub_indent(container) -> str:
 
 
 def _close_indent(container) -> str:
-    """容器结束标签前的空白（``</Files>`` 的缩进）。"""
+    """容器结束标签前的空白（``</Files>`` 的缩进）。
 
+    容器自己的内容缩进退一级就是它的结束标签缩进；这样对刚创建、子元素还没
+    补齐 tail 的容器也成立（只看最后一个子元素的 tail 会少退一级）。
+    """
+
+    text = container.text
+    if text and "\n" in text and not text.strip() and text.endswith(INDENT_STEP):
+        return text[: -len(INDENT_STEP)]
     children = list(container)
     if children:
         tail = children[-1].tail
@@ -185,6 +221,26 @@ def remove_file_node(files_node, file_name: str, file_path: str) -> bool:
     return changed
 
 
+def _normalize_path(path: str) -> str:
+    """去掉 ``.\\`` 前缀、统一反斜杠，只用于比较。"""
+
+    path = path.replace("/", "\\")
+    while path.startswith(".\\"):
+        path = path[2:]
+    return path
+
+
+def project_file_paths(root) -> set[str]:
+    """工程里已经引用过的 FilePath 集合（已归一化）。
+
+    组名是按目录/模块推导出来的，历史工程常把同一个文件放在别的组里（例如
+    ``modules/u8g2`` 与 ``module/u8g2``）。同一个 FilePath 只允许出现一次，
+    否则会被编译两遍、链接时符号重复，所以加文件前先按路径查重。
+    """
+
+    return {_normalize_path(node.text) for node in root.iter("FilePath") if node.text}
+
+
 def split_include_paths(include_text: Optional[str]) -> list[str]:
     if not include_text:
         return []
@@ -195,28 +251,40 @@ def join_include_paths(include_paths: list[str]) -> str:
     return ";".join(include_paths)
 
 
+def _managed_state(entries: list[tuple[str, Optional[str]]], symbols: dict[str, str]) -> dict[str, Optional[str]]:
+    """受管条目 → 它在 .config 里的状态（``"y"``/``"n"``/``None``=没写）。"""
+
+    state: dict[str, Optional[str]] = {}
+    for value, symbol in entries:
+        state.setdefault(value, symbols.get(symbol) if symbol is not None else "y")
+    return state
+
+
+def _apply_managed(current: list[str], state: dict[str, Optional[str]]) -> list[str]:
+    """保留原有顺序：只删「明确关掉」的，只补「明确打开」的。"""
+
+    kept = [value for value in current if state.get(value) != "n"]
+    appended = [
+        value
+        for value, symbol_state in state.items()
+        if symbol_state == "y" and value not in kept
+    ]
+    return kept + appended
+
+
 def sync_include_paths(root, symbols: dict[str, str], include_rules: list[dict]) -> bool:
     include_nodes = root.findall(".//Cads/VariousControls/IncludePath")
     if not include_nodes:
         return False
 
-    managed_paths: list[str] = []
-    managed_path_set: set[str] = set()
-    for rule in include_rules:
-        path = rule["include_path"]
-        if path in managed_path_set:
-            continue
-        managed_path_set.add(path)
-        if symbols.get(rule["symbol"], "n") == "y":
-            managed_paths.append(path)
+    state = _managed_state(
+        [(rule["include_path"], rule["symbol"]) for rule in include_rules],
+        symbols,
+    )
 
     changed = False
     for include_node in include_nodes:
-        current_paths = split_include_paths(include_node.text)
-        unmanaged_paths = [path for path in current_paths if path not in managed_path_set]
-        next_paths = unmanaged_paths + [
-            path for path in managed_paths if path not in unmanaged_paths
-        ]
+        next_paths = _apply_managed(split_include_paths(include_node.text), state)
         next_text = join_include_paths(next_paths)
         if (include_node.text or "") != next_text:
             include_node.text = next_text
@@ -235,25 +303,14 @@ def sync_defines(root, symbols: dict[str, str], define_rules: list[dict]) -> boo
     if not define_nodes:
         return False
 
-    managed_defines: list[str] = []
-    managed_define_set: set[str] = set()
-    for rule in define_rules:
-        define = rule["define"]
-        if define in managed_define_set:
-            continue
-        managed_define_set.add(define)
-        if symbols.get(rule["symbol"], "n") == "y":
-            managed_defines.append(define)
+    state = _managed_state(
+        [(rule["define"], rule["symbol"]) for rule in define_rules],
+        symbols,
+    )
 
     changed = False
     for define_node in define_nodes:
-        current_defines = split_defines(define_node.text)
-        unmanaged_defines = [
-            define for define in current_defines if define not in managed_define_set
-        ]
-        next_defines = unmanaged_defines + [
-            define for define in managed_defines if define not in unmanaged_defines
-        ]
+        next_defines = _apply_managed(split_defines(define_node.text), state)
         next_text = ",".join(next_defines)
         if (define_node.text or "") != next_text:
             define_node.text = next_text
@@ -283,26 +340,51 @@ def sync_sources_for_uvprojx(
 
     root = tree.getroot()
     changed = False
+    known_paths = project_file_paths(root)
+    kept_unknown: set[str] = set()
 
     for rule in source_rules:
-        enabled = symbols.get(rule["symbol"], "n") == "y"
-        if enabled:
-            files_node, group_created = ensure_group_node(root, rule["group"])
+        symbol = rule["symbol"]
+        if symbol is None:
+            # 工程/板级源码：不跟 Kconfig 走，永远算启用
+            state = "y"
+        else:
+            state = symbols.get(symbol)
+
+        if state == "y":
+            # 该文件已经在其它组里了：不再重复加，也不为了它新建组。
+            if _normalize_path(rule["file_path"]) in known_paths:
+                continue
+            files_node, _created = ensure_group_node(root, rule["group"])
             if files_node is None:
                 log(f"Warning: <Groups> not found in {uvprojx_path}")
                 continue
-            changed |= group_created
-            changed |= ensure_file_node(
+            if ensure_file_node(
                 files_node,
                 rule["file_name"],
                 rule["file_type"],
                 rule["file_path"],
-            )
-        else:
-            files_node = find_group_node(root, rule["group"])
+            ):
+                known_paths.add(_normalize_path(rule["file_path"]))
+                changed = True
+        elif state == "n":
+            # 只读查找：组不存在就跳过，不要为了删除顺手补一个空 <Files>
+            files_node = find_group_node(root, rule["group"], create=False)
             if files_node is None:
                 continue
             changed |= remove_file_node(files_node, rule["file_name"], rule["file_path"])
+        else:
+            # .config 里没有这个符号：不猜，保持原状；工程里真有这个文件时提示一次
+            if _normalize_path(rule["file_path"]) in known_paths:
+                kept_unknown.add(symbol)
+
+    if kept_unknown:
+        preview = ", ".join(sorted(kept_unknown)[:6])
+        more = "" if len(kept_unknown) <= 6 else f" …（共 {len(kept_unknown)} 个）"
+        log(
+            f"Warning: {os.path.basename(uvprojx_path)} 里编了 {preview}{more} 的源文件，"
+            "但 .config 里没有这些符号，已保持原状；配置可能过期，建议重新 omni config generate"
+        )
 
     changed |= sync_include_paths(root, symbols, include_rules)
     changed |= sync_defines(root, symbols, define_rules)
@@ -373,12 +455,15 @@ def sync_uvprojx_project(
     repo_root: Optional[str] = None,
     rule_sets: Optional[Iterable[dict]] = None,
     rules_mode: str = "auto",
+    board: Optional[str] = None,
     log: Callable[[str], None] = print,
 ) -> tuple[bool, list[str]]:
     """同步工程目录下的 Keil 工程；默认全部，``uvprojx_paths`` 可选过滤。
 
     ``rule_sets`` 由调用方直接给出时优先使用；否则按 ``rules_mode`` 从
-    ``omni/**/CMakeLists.txt`` 解析（``auto``）或退回手写规则表（``table``）。
+    ``omni/**/CMakeLists.txt`` + 模块 layer 解析（``auto``）或退回手写规则表
+    （``table``）。工程自己的 ``CMakeLists.txt`` / ``boards/<board>/board.cmake``
+    始终参与同步（只增不删），``board`` 不给时按 ``boards/`` 目录推断。
     """
 
     files = _resolve_uvprojx_files(project_dir, uvprojx_paths)
@@ -399,10 +484,13 @@ def sync_uvprojx_project(
     if rule_sets is None:
         rule_sets = load_rule_sets(repo_root, mode=rules_mode, log=log)
 
+    rules = list(rule_sets)
+    rules.extend(load_project_rule_sets(project_dir, repo_root, board=board, log=log))
+
     changed = False
     for uvprojx in files:
         changed |= sync_sources_for_uvprojx(
-            uvprojx, symbols, repo_root, rule_sets=rule_sets, log=log
+            uvprojx, symbols, repo_root, rule_sets=rules, log=log
         )
 
     if not changed:

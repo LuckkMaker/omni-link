@@ -173,23 +173,19 @@ LEGACY_RULE_SETS = [
 
 #: 解析器覆盖不到的目录：
 #:
-#: * ``modules/*`` —— 第三方布局，``modules/<name>/omni/CMakeLists.txt`` 里用
-#:   ``add_library()`` + ``${VAR}`` 拼路径，不是 omni 的 ``omni_sources_ifdef()`` DSL；
 #: * ``CONFIG_ARCH_CORTEX_M`` —— ``omni/arch/CMakeLists.txt`` 用
 #:   ``list(APPEND)`` 在 ``if()`` 里收集，同样解析不了；
 #: * ``CONFIG_IAP`` —— ``omni/subsys/iap`` 目前只有 ``Kconfig`` + ``iap.c``，
 #:   框架还没给它 ``CMakeLists.txt``（CMake 构建未接入），只有 Keil 工程直接编译。
 #:
-#: 这几类目录的文件几年不动一次，所以留在这张表里；其余 (omni/subsys、omni/drivers)
-#: 由 :mod:`cmake_sources` 从 CMakeLists.txt 解析，不再需要手写。
-EXTRA_RULE_PREFIXES = ("modules/",)
+#: ``modules/*`` 不在这里：模块的 ``omni/module.yml`` 已经声明了 ``enable`` 符号和
+#: ``settings.layer``，:mod:`module_sources` 直接按 layer 的 ``groups``/``add-path``
+#: 生成规则，新增模块或模块内新增文件都不用再改这张表。
+#: 其余 (omni/subsys、omni/drivers) 由 :mod:`cmake_sources` 从 CMakeLists.txt 解析。
 EXTRA_RULE_SYMBOLS = ("CONFIG_ARCH_CORTEX_M", "CONFIG_IAP")
 
 EXTRA_RULE_SETS = [
-    rule
-    for rule in LEGACY_RULE_SETS
-    if rule["base_path"].startswith(EXTRA_RULE_PREFIXES)
-    or rule["symbol"] in EXTRA_RULE_SYMBOLS
+    rule for rule in LEGACY_RULE_SETS if rule["symbol"] in EXTRA_RULE_SYMBOLS
 ]
 
 #: 兼容旧调用点；新代码用 :func:`cmake_sources.load_rule_sets`

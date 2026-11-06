@@ -241,6 +241,7 @@ def generate_project_config(
             uvprojx_paths=uvprojx_paths,
             repo_root=os.path.dirname(omni_root),
             rules_mode=rules_mode,
+            board=target,
             log=emit,
         )
         result.uvprojx_changed = changed

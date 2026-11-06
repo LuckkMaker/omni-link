@@ -268,6 +268,7 @@ def _sync_keil(args) -> int:
         uvprojx_paths=_uvprojx_args(ctx.project_dir, args.uvprojx),
         repo_root=ctx.repo_root,
         rules_mode=getattr(args, "rules", "auto"),
+        board=ctx.target,
         log=log,
     )
     exit_code = 2 if (args.stop_on_change and changed) else 0
