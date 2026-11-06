@@ -46,6 +46,35 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def make_omni_cmakelists(root: Path) -> None:
+    """造出 ``omni/**/CMakeLists.txt``——Keil 同步现在从这些文件解析源文件规则。"""
+
+    modules = {
+        "subsys/log": [
+            "omni_sources_ifdef(omni_subsys CONFIG_LOG log.c)",
+            "omni_sources_ifdef(omni_subsys CONFIG_LOG_BACKEND_RTT log_backend_rtt.c)",
+        ],
+        "subsys/rtt": [
+            "# 注释行不应被解析",
+            "omni_sources_ifdef(omni_subsys CONFIG_SEGGER_RTT rtt.c)",
+        ],
+        "subsys/timing": ["omni_sources_ifdef(omni_subsys CONFIG_TIMING timing.c)"],
+        "subsys/fs": [
+            "omni_sources_ifdef(omni_subsys CONFIG_FILE_SYSTEM fs.c)",
+            "omni_sources_ifdef(omni_subsys CONFIG_FS_FATFS fatfs_arch.c)",
+            "omni_sources_ifdef(omni_subsys CONFIG_FS_LITTLEFS littlefs_arch.c)",
+        ],
+    }
+    for rel_dir, lines in modules.items():
+        directory = root / "omni" / rel_dir
+        write(directory / "CMakeLists.txt", "\n".join(lines) + "\n")
+        for line in lines:
+            if "omni_sources_ifdef" not in line:
+                continue
+            for name in line.split()[2:]:
+                write(directory / name.rstrip(")"), "/* stub */\n")
+
+
 def make_tree(root: Path) -> Path:
     """创建最小 OMNI 工程：repo/omni + repo/app。"""
 
@@ -64,6 +93,7 @@ def make_tree(root: Path) -> Path:
     write(app / "boards" / "board1" / "board.conf", "CONFIG_TEST_BOOL=y\n")
     write(app / "boards" / "board2" / "board.conf", "CONFIG_TEST_INT=5\n")
     write(app / "src" / "app.c", "GPIO_DEVICE_DEFINE(demo, NULL);\n")
+    make_omni_cmakelists(root)
     return app
 
 
@@ -308,6 +338,78 @@ def test_bsp_no_omni(root: Path) -> None:
     check("只凭工程目录即可生成", os.path.exists(path), path)
 
 
+def test_cmake_sources(root: Path) -> None:
+    print("== 3b. CMakeLists 规则解析 ==")
+    from omni_cli.config.cmake_sources import load_rule_sets, parse_cmakelists
+    from omni_cli.context import ProjectError
+
+    repo = root / "cmake-repo"
+    (repo / "omni" / "subsys" / "demo").mkdir(parents=True, exist_ok=True)
+    for name in ("a.c", "b.c", "multi.c"):
+        write(repo / "omni" / "subsys" / "demo" / name, "/* stub */\n")
+
+    cmake = repo / "omni" / "subsys" / "demo" / "CMakeLists.txt"
+    write(
+        cmake,
+        "# 注释里的 omni_sources_ifdef(omni_subsys CONFIG_FAKE fake.c) 不应被解析\n"
+        "omni_sources_ifdef(omni_subsys CONFIG_DEMO a.c)\n"
+        "omni_sources_ifdef(omni_subsys CONFIG_DEMO\n"
+        "    b.c\n"
+        "    multi.c)\n",
+    )
+
+    rules = parse_cmakelists(str(cmake), str(repo))
+    merged = {rule["symbol"]: rule for rule in rules}
+    check("跨行声明被合并", list(merged["CONFIG_DEMO"]["files"]) == ["a.c", "b.c", "multi.c"], str(rules))
+    check("注释被忽略", "CONFIG_FAKE" not in merged, str(list(merged)))
+    check("group 由目录推导", merged["CONFIG_DEMO"]["group"] == "omni/subsys", str(rules))
+
+    from omni_cli.config.cmake_sources import group_for_path
+
+    check("omni/drivers 目录映射", group_for_path("omni/drivers/disk") == "omni/driver")
+    check("omni/arch 目录映射", group_for_path("omni/arch/arm/core/cortex_m/src") == "omni/arch/arm")
+    check("modules 目录映射", group_for_path("modules/coremark") == "module/coremark")
+
+    # 变量参数必须报错，而不是猜
+    write(cmake, "omni_sources_ifdef(omni_subsys CONFIG_DEMO ${SOME_LIST})\n")
+    try:
+        parse_cmakelists(str(cmake), str(repo))
+    except ProjectError as exc:
+        check("变量参数报错", "变量" in str(exc), str(exc))
+    else:
+        check("变量参数报错", False)
+
+    # 声明了不存在的文件也必须报错
+    write(cmake, "omni_sources_ifdef(omni_subsys CONFIG_DEMO missing.c)\n")
+    try:
+        parse_cmakelists(str(cmake), str(repo))
+    except ProjectError as exc:
+        check("缺失文件报错", "不存在" in str(exc), str(exc))
+    else:
+        check("缺失文件报错", False)
+
+    write(cmake, "omni_sources_ifdef(omni_subsys CONFIG_DEMO a.c)\n")
+
+    # --rules table 退回手写规则表
+    table_rules = load_rule_sets(str(repo), mode="table", log=lambda _m: None)
+    check("table 模式返回手写规则表", len(table_rules) > 10, str(len(table_rules)))
+    auto_rules = load_rule_sets(str(repo), mode="auto", log=lambda _m: None)
+    check("auto 模式解析 CMakeLists", any(r["symbol"] == "CONFIG_DEMO" for r in auto_rules), str(auto_rules))
+
+    # 解析器看不到的目录必须留在手写表里，否则 auto 模式会静默丢规则
+    from omni_cli.config.uvproj_rules import EXTRA_RULE_SETS
+
+    extra_symbols = {rule["symbol"] for rule in EXTRA_RULE_SETS}
+    check("CONFIG_IAP 留在手写表", "CONFIG_IAP" in extra_symbols, str(sorted(extra_symbols)))
+    check(
+        "modules 规则留在手写表",
+        any(r["base_path"].startswith("modules/") for r in EXTRA_RULE_SETS),
+        str(sorted(extra_symbols)),
+    )
+    auto_symbols = {r["symbol"] for r in auto_rules}
+    check("auto 模式保留 CONFIG_IAP", "CONFIG_IAP" in auto_symbols, str(sorted(auto_symbols)))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="omni-project-test-") as tmp:
         root = Path(tmp)
@@ -315,6 +417,7 @@ def main() -> int:
         test_context(root)
         test_generate(root)
         test_uvproj(root)
+        test_cmake_sources(root)
         test_removed_names()
         test_menuconfig_cleanup(root)
         test_cli(root)

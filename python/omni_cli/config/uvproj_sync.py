@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import xml.etree.ElementTree as ET
 from typing import Callable, Iterable, Optional
 
 from ..context import ProjectError
-from .uvproj_rules import SOURCE_RULE_SETS
+from .cmake_sources import load_rule_sets
 
 
 def _rel_path(repo_root: str, relative: str, start_dir: str) -> str:
@@ -29,7 +30,9 @@ def build_source_rules(rule_sets, repo_root: str, uvprojx_dir: str) -> list[dict
                 {
                     "symbol": rule_set["symbol"],
                     "group": rule_set["group"],
-                    "file_name": file_name,
+                    # Keil 里 FileName 只用于显示，FilePath 才是真实路径；用 basename
+                    # 与手写规则表保持一致，避免解析器上线时改写整份工程。
+                    "file_name": os.path.basename(file_name),
                     "file_type": file_type,
                     "file_path": _rel_path(
                         repo_root,
@@ -82,9 +85,62 @@ def find_group_node(root, group_name: str):
         if node is not None and node.text == group_name:
             files = group.find("Files")
             if files is None:
-                files = ET.SubElement(group, "Files")
+                files, _indent = _append_block(group, "Files")
             return files
     return None
+
+
+INDENT_STEP = "  "
+
+
+def _sub_indent(container) -> str:
+    """容器里子元素前的空白（``<Files>`` 中 ``<File>`` 的缩进）。"""
+
+    text = container.text
+    if text and "\n" in text and not text.strip():
+        return text
+    # 空容器：结束标签缩进再进一级
+    return (container.tail or "") + INDENT_STEP
+
+
+def _close_indent(container) -> str:
+    """容器结束标签前的空白（``</Files>`` 的缩进）。"""
+
+    children = list(container)
+    if children:
+        tail = children[-1].tail
+        if tail and "\n" in tail and not tail.strip():
+            return tail
+    return container.tail or ""
+
+
+def _append_block(container, tag: str):
+    """在容器末尾追加一个块元素，并补齐 Keil 风格的换行/缩进。
+
+    ElementTree 新建的元素没有 ``text``/``tail`` 空白，序列化时会与前一个
+    兄弟挤在同一行；uvprojx 是逐行缩进的 XML，这里按容器既有格式补上，
+    使同步后的 diff 只包含真正新增/删除的源文件。
+
+    返回 (新元素, 元素内容缩进)。
+    """
+
+    child_indent = _sub_indent(container)
+    close_indent = _close_indent(container)
+    children = list(container)
+    if children:
+        children[-1].tail = child_indent
+    node = ET.SubElement(container, tag)
+    node.text = child_indent + INDENT_STEP
+    node.tail = close_indent
+    return node, child_indent
+
+
+def _append_leaf(parent, tag: str, value: str, indent: str) -> None:
+    """追加一个文本叶子元素，``indent`` 是它结束标签前的空白。"""
+
+    node = ET.SubElement(parent, tag)
+    node.text = value
+    node.tail = indent
 
 
 def ensure_group_node(root, group_name: str):
@@ -94,9 +150,9 @@ def ensure_group_node(root, group_name: str):
     groups = root.find(".//Groups")
     if groups is None:
         return None, False
-    group = ET.SubElement(groups, "Group")
-    ET.SubElement(group, "GroupName").text = group_name
-    files = ET.SubElement(group, "Files")
+    group, group_indent = _append_block(groups, "Group")
+    _append_leaf(group, "GroupName", group_name, group_indent)
+    files, _files_indent = _append_block(group, "Files")
     return files, True
 
 
@@ -112,10 +168,11 @@ def ensure_file_node(files_node, file_name: str, file_type: str, file_path: str)
     for file_node in files_node.findall("File"):
         if file_matches(file_node, file_name, file_path):
             return False
-    file_node = ET.SubElement(files_node, "File")
-    ET.SubElement(file_node, "FileName").text = file_name
-    ET.SubElement(file_node, "FileType").text = str(file_type)
-    ET.SubElement(file_node, "FilePath").text = file_path
+    file_node, file_indent = _append_block(files_node, "File")
+    inner_indent = file_node.text or file_indent
+    _append_leaf(file_node, "FileName", file_name, inner_indent)
+    _append_leaf(file_node, "FileType", str(file_type), inner_indent)
+    _append_leaf(file_node, "FilePath", file_path, file_indent)
     return True
 
 
@@ -209,12 +266,15 @@ def sync_sources_for_uvprojx(
     symbols: dict[str, str],
     repo_root: str,
     *,
+    rule_sets: Optional[Iterable[dict]] = None,
     log: Callable[[str], None] = print,
 ) -> bool:
     uvprojx_dir = os.path.dirname(os.path.abspath(uvprojx_path))
-    source_rules = build_source_rules(SOURCE_RULE_SETS, repo_root, uvprojx_dir)
-    include_rules = build_include_rules(SOURCE_RULE_SETS, repo_root, uvprojx_dir)
-    define_rules = build_define_rules(SOURCE_RULE_SETS)
+    if rule_sets is None:
+        rule_sets = load_rule_sets(repo_root)
+    source_rules = build_source_rules(rule_sets, repo_root, uvprojx_dir)
+    include_rules = build_include_rules(rule_sets, repo_root, uvprojx_dir)
+    define_rules = build_define_rules(rule_sets)
 
     try:
         tree = ET.parse(uvprojx_path)
@@ -249,11 +309,45 @@ def sync_sources_for_uvprojx(
 
     if changed:
         try:
-            tree.write(uvprojx_path, encoding="utf-8", xml_declaration=True)
+            write_uvprojx(uvprojx_path, tree)
         except OSError as exc:
             raise ProjectError(f"无法写入 Keil 工程 {uvprojx_path}: {exc}", code=1) from exc
         log(f"Synced source rules to: {uvprojx_path}")
     return changed
+
+
+#: Keil 工程的固定 XML 头。ElementTree 默认会写成 ``<?xml version='1.0' ...?>``，
+#: 空元素写成 ``<Cmp />``，与 Keil 自己写出的文件不同——每次同步都会把整份工程
+#: 重排一遍。这里保持 Keil 的写法，让 diff 只包含真正的源文件变化。
+UVPROJX_XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n'
+
+
+def write_uvprojx(path: str, tree) -> None:
+    """按 Keil 的格式写回 .uvprojx：固定 XML 头、LF 换行、保留空元素写法。
+
+    ElementTree 会把空元素统一写成 ``<Cmp />``（或统一写成成对标签），而 Keil
+    自己写出的文件两种写法都有。这里读出原文件里“自闭合”的标签集合，序列化后
+    把它们改回自闭合，避免一次同步顺手重排整份工程。
+    """
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            original = handle.read()
+    except OSError:
+        original = ""
+
+    body = ET.tostring(tree.getroot(), encoding="unicode", short_empty_elements=False)
+    for tag in set(re.findall(r"<([A-Za-z_][\w.-]*)(?:\s[^>]*)?/>", original)):
+        body = re.sub(
+            rf"<{tag}(\s[^>]*)?></{tag}>",
+            lambda match, name=tag: f"<{name}{match.group(1) or ''}/>",
+            body,
+        )
+
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(UVPROJX_XML_DECLARATION)
+        handle.write(body)
+        handle.write("\n")
 
 
 def _resolve_uvprojx_files(
@@ -277,9 +371,15 @@ def sync_uvprojx_project(
     *,
     uvprojx_paths: Optional[Iterable[str]] = None,
     repo_root: Optional[str] = None,
+    rule_sets: Optional[Iterable[dict]] = None,
+    rules_mode: str = "auto",
     log: Callable[[str], None] = print,
 ) -> tuple[bool, list[str]]:
-    """同步工程目录下的 Keil 工程；默认全部，``uvprojx_paths`` 可选过滤。"""
+    """同步工程目录下的 Keil 工程；默认全部，``uvprojx_paths`` 可选过滤。
+
+    ``rule_sets`` 由调用方直接给出时优先使用；否则按 ``rules_mode`` 从
+    ``omni/**/CMakeLists.txt`` 解析（``auto``）或退回手写规则表（``table``）。
+    """
 
     files = _resolve_uvprojx_files(project_dir, uvprojx_paths)
     if not files:
@@ -296,9 +396,14 @@ def sync_uvprojx_project(
         repo_root = candidate
     repo_root = os.path.abspath(repo_root)
 
+    if rule_sets is None:
+        rule_sets = load_rule_sets(repo_root, mode=rules_mode, log=log)
+
     changed = False
     for uvprojx in files:
-        changed |= sync_sources_for_uvprojx(uvprojx, symbols, repo_root, log=log)
+        changed |= sync_sources_for_uvprojx(
+            uvprojx, symbols, repo_root, rule_sets=rule_sets, log=log
+        )
 
     if not changed:
         log("UVPROJX sync finished: no changes.")

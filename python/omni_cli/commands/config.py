@@ -37,6 +37,9 @@ def add_parser(sub):
                    help="只同步指定 Keil 工程（可重复；默认全部）")
     s.add_argument("--stop-on-change", action="store_true", default=False,
                    help="Keil 工程有变化时返回退出码 2")
+    s.add_argument("--rules", choices=("auto", "table"), default="auto",
+                   help="源文件规则来源：auto=解析 omni/**/CMakeLists.txt（默认），"
+                        "table=退回手写规则表")
     s.set_defaults(func=_run_local(_generate))
 
     s = ps.add_parser("menuconfig", parents=[config_parser()],
@@ -55,6 +58,9 @@ def add_parser(sub):
                    help="只同步指定 Keil 工程（可重复；默认全部）")
     s.add_argument("--stop-on-change", action="store_true", default=False,
                    help="Keil 工程有变化时返回退出码 2")
+    s.add_argument("--rules", choices=("auto", "table"), default="auto",
+                   help="源文件规则来源：auto=解析 omni/**/CMakeLists.txt（默认），"
+                        "table=退回手写规则表")
     s.set_defaults(func=_run_local(_sync_keil))
 
     # `omni config`（不带子命令）= `omni config generate`
@@ -147,6 +153,7 @@ def _generate(args) -> int:
         msp=bool(_opt(args, "msp", False)),
         no_bsp=bool(_opt(args, "no_bsp", False)),
         sync_keil=bool(_opt(args, "sync_keil", False)),
+        rules_mode=_opt(args, "rules", "auto"),
         uvprojx_paths=_uvprojx_args(ctx.project_dir, _opt(args, "uvprojx")),
         clean_config=True,
         log=_log_for(args),
@@ -260,6 +267,7 @@ def _sync_keil(args) -> int:
         dot_config,
         uvprojx_paths=_uvprojx_args(ctx.project_dir, args.uvprojx),
         repo_root=ctx.repo_root,
+        rules_mode=getattr(args, "rules", "auto"),
         log=log,
     )
     exit_code = 2 if (args.stop_on_change and changed) else 0

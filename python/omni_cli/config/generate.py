@@ -127,6 +127,7 @@ def generate_project_config(
     msp: bool = False,
     no_bsp: bool = False,
     sync_keil: bool = False,
+    rules_mode: str = "auto",
     uvprojx_paths: Optional[Iterable[str]] = None,
     clean_config: bool = True,
     log: Optional[Callable[[str], None]] = None,
@@ -239,6 +240,7 @@ def generate_project_config(
             dot_config,
             uvprojx_paths=uvprojx_paths,
             repo_root=os.path.dirname(omni_root),
+            rules_mode=rules_mode,
             log=emit,
         )
         result.uvprojx_changed = changed
