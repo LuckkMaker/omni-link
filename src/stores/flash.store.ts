@@ -5,6 +5,7 @@ import { parseFile, readFile, statFile } from '@/services/file.service'
 import { useProbeStore } from './probe.store'
 import { useNotificationStore } from './notification.store'
 import { selectedSectorsToRanges } from '@/pages/flash/utils/sectors'
+import { base64ToBytes, buildCompareWindow, describeCompare } from '@/pages/flash/utils/compare'
 
 /** 从 FastAPI 错误响应中提取 detail（例如 409 已有 Flash 操作、504 超时）。 */
 function extractApiDetail(err: unknown): string | null {
@@ -40,6 +41,12 @@ export interface FlashTab {
   rightBaseAddress?: number
   rightTitle?: string
   leftTitle?: string
+  /** 比较窗口起始地址（默认左侧数据基地址；对话框里指定的地址） */
+  windowStart?: number
+  /** 比较窗口长度 */
+  windowSize?: number
+  /** 窗口内首个差异的绝对地址（视图跳转用） */
+  firstDiff?: number | null
 }
 
 type FlashPhase = 'idle' | 'erasing' | 'programming' | 'verifying' | 'reading' | 'done' | 'error'
@@ -175,7 +182,8 @@ interface FlashStore {
   doReset: () => Promise<void>
   doFillMemory: (address: number, size: number, value: number) => Promise<void>
   cancelOperation: () => Promise<void>
-  doCompare: (filePath: string) => Promise<void>
+  /** 与参考文件比较；startAddress 为比较起始地址（.bin 按该地址加载），size 限定比较长度 */
+  doCompare: (filePath: string, options?: { startAddress?: number; size?: number }) => Promise<void>
 
   setTabOption: (tabId: string, key: 'eraseBefore' | 'verifyAfter' | 'resetAfter', value: boolean) => void
 
@@ -716,7 +724,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     }
   },
 
-  doCompare: async (filePath) => {
+  doCompare: async (filePath, options) => {
     const tab = get().getActiveTab()
     if (!tab?.data) return
     set({ showCompareDialog: false })
@@ -726,18 +734,29 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
 
     try {
       const isBin = filePath.toLowerCase().endsWith('.bin')
-      let refBaseAddr = tab.baseAddress
+      // 比较窗口从「指定地址」开始；未指定时以当前 Tab 的起始地址为准
+      const windowStart = options?.startAddress ?? tab.baseAddress
+      let refBaseAddr: number
       let refData: string
 
       if (isBin) {
-        const data = await readFile(filePath, tab.baseAddress)
+        // .bin 没有自带地址：必须按窗口起始地址加载，才能与左侧按地址对齐
+        const data = await readFile(filePath, windowStart)
         refData = data.data
-        refBaseAddr = data.base_address
+        refBaseAddr = data.base_address ?? windowStart
       } else {
+        // .hex / .elf / .axf 自带地址，按文件里的地址对齐
         const data = await readFile(filePath)
         refData = data.data
         refBaseAddr = data.base_address
       }
+
+      // 按地址对齐后再统计差异（不同基地址的文件不能按偏移 0 直接比较）
+      const compareWindow = buildCompareWindow(
+        { bytes: base64ToBytes(tab.data), base: tab.baseAddress },
+        { bytes: base64ToBytes(refData), base: refBaseAddr },
+        { start: windowStart, size: options?.size },
+      )
 
       // 创建新 compare tab
       const id = genId()
@@ -762,26 +781,19 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
           rightBaseAddress: refBaseAddr,
           leftTitle,
           rightTitle,
+          windowStart: compareWindow.start,
+          windowSize: compareWindow.size,
+          firstDiff: compareWindow.firstDiff,
         }],
         activeTabId: id,
       }))
 
-      // 统计差异
-      const tabBytes = atob(tab.data)
-      const refBytes = atob(refData)
-      const minLen = Math.min(tabBytes.length, refBytes.length)
-      let diffCount = 0
-      for (let i = 0; i < minLen; i++) {
-        if (tabBytes.charCodeAt(i) !== refBytes.charCodeAt(i)) diffCount++
-      }
-      diffCount += Math.abs(tabBytes.length - refBytes.length)
-
+      const hasDiff = compareWindow.diffCount > 0 || compareWindow.onlyLeft > 0 || compareWindow.onlyRight > 0
+      const diffAddr = compareWindow.firstDiff != null ? ` · 首个差异 ${formatHex(compareWindow.firstDiff)}` : ''
       notif.update(notifId, {
-        type: diffCount === 0 ? 'success' : 'warning',
+        type: hasDiff ? 'warning' : 'success',
         title: '比较完成',
-        message: diffCount === 0
-          ? `完全匹配 (${formatSize(minLen)})`
-          : `${diffCount} 字节不同 (共 ${formatSize(minLen)})`,
+        message: `${describeCompare(compareWindow)}${diffAddr}`,
         autoClose: true,
         autoCloseDelay: 5000,
       })

@@ -13,6 +13,7 @@ import { parseHex } from '../utils/sectors'
 
 export function CompareDialog() {
   const { showCompareDialog, setShowCompareDialog, doCompare } = useFlashStore()
+  const activeTab = useFlashStore((s) => s.tabs.find((t) => t.id === s.activeTabId) ?? null)
 
   const [startAddr, setStartAddr] = useState('0x08000000')
   const [compareSize, setCompareSize] = useState('')
@@ -20,11 +21,14 @@ export function CompareDialog() {
 
   useEffect(() => {
     if (showCompareDialog) {
-      // 默认起始地址为 Flash 常用基地址
-      setStartAddr('0x08000000')
+      // 默认起始地址取当前 tab 的基地址：.axf/.hex 自带地址，.bin 由用户指定
+      const base = activeTab?.baseAddress ?? 0x08000000
+      setStartAddr(`0x${base.toString(16).toUpperCase().padStart(8, '0')}`)
       setCompareSize('')
       setError('')
     }
+    // 只在打开对话框时重置，避免用户输入被下拉刷新覆盖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showCompareDialog])
 
   const handleSelectFile = async () => {
@@ -34,22 +38,23 @@ export function CompareDialog() {
       setError('请输入有效的起始地址（十六进制）')
       return
     }
-    // 比较大小可选，留空则比较到较短数据末尾
+    // 比较大小可选，留空则比较到两侧数据覆盖范围的末尾
+    let size: number | undefined
     if (compareSize.trim()) {
-      const size = parseHex(compareSize)
-      if (size == null || size <= 0) {
+      const parsed = parseHex(compareSize)
+      if (parsed == null || parsed <= 0) {
         setError('请输入有效的比较大小（十六进制）')
         return
       }
+      size = parsed
     }
 
     const path = await window.electron?.openFileDialog?.()
     if (!path) return
 
     // 先关闭对话框再执行比较
-    // 注意：doCompare 当前只接受 filePath，地址/大小参数仅用于前端显示配置（后续可扩展）
     setShowCompareDialog(false)
-    void doCompare(path)
+    void doCompare(path, { startAddress: start, size })
   }
 
   /** 输入框组件：带 0x 前缀（参照 ReadBackRangeDialog 设计） */
@@ -89,8 +94,10 @@ export function CompareDialog() {
 
           {/* 说明 */}
           <div className="rounded-md bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-0.5">
-            <div>起始地址：比较的基准地址（当前仅用于配置显示，后续可扩展）</div>
-            <div>比较大小：留空则比较到两份数据中较短者的末尾</div>
+            <div>起始地址：比较窗口的起点。.bin 按该地址加载；.hex/.axf 用文件自带地址</div>
+            <div>两侧按地址一一对齐，窗口外的字节标为「仅左侧 / 仅右侧」</div>
+            <div>比较后视图会自动跳到首个差异的地址</div>
+            <div>比较大小：留空则覆盖两侧数据范围的并集</div>
           </div>
 
           {error && <p className="text-sm text-destructive">{error}</p>}

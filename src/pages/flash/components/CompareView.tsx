@@ -1,5 +1,6 @@
 import { useMemo, useState, useRef, useCallback } from 'react'
 import { HexViewer, HexToolbar, type ByteWidth } from './HexViewer'
+import { base64ToBytes, buildCompareWindow } from '../utils/compare'
 
 interface CompareViewProps {
   leftBase64: string
@@ -8,6 +9,12 @@ interface CompareViewProps {
   rightBase64: string
   rightBaseAddress: number
   rightTitle: string
+  /** 比较窗口起始地址（默认左侧基地址；即「指定地址比较」的地址） */
+  windowStart?: number
+  /** 比较窗口长度（默认覆盖两侧数据的并集） */
+  windowSize?: number
+  /** 初始跳转地址（首个差异）；不传则用窗口内首个差异 */
+  initialAddress?: number | null
 }
 
 function formatSize(bytes: number): string {
@@ -26,6 +33,9 @@ export function CompareView({
   rightBase64,
   rightBaseAddress,
   rightTitle,
+  windowStart,
+  windowSize,
+  initialAddress,
 }: CompareViewProps) {
   const [byteWidth, setByteWidth] = useState<ByteWidth>(1)
 
@@ -34,31 +44,21 @@ export function CompareView({
   const [rightSyncScroll, setRightSyncScroll] = useState<number | null>(null)
   const isSyncing = useRef(false)
 
-  const leftBytes = useMemo(() => {
-    const bin = atob(leftBase64)
-    const arr = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
-    return arr
-  }, [leftBase64])
+  const leftBytes = useMemo(() => base64ToBytes(leftBase64), [leftBase64])
+  const rightBytes = useMemo(() => base64ToBytes(rightBase64), [rightBase64])
 
-  const rightBytes = useMemo(() => {
-    const bin = atob(rightBase64)
-    const arr = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
-    return arr
-  }, [rightBase64])
+  // 按地址对齐：两侧都裁剪/补齐到同一个地址窗口，行号与地址一一对应
+  const compareWindow = useMemo(
+    () =>
+      buildCompareWindow(
+        { bytes: leftBytes, base: leftBaseAddress },
+        { bytes: rightBytes, base: rightBaseAddress },
+        { start: windowStart, size: windowSize },
+      ),
+    [leftBytes, leftBaseAddress, rightBytes, rightBaseAddress, windowStart, windowSize],
+  )
 
-  const diffCount = useMemo(() => {
-    const minLen = Math.min(leftBytes.length, rightBytes.length)
-    let count = 0
-    for (let i = 0; i < minLen; i++) {
-      if (leftBytes[i] !== rightBytes[i]) count++
-    }
-    count += Math.abs(leftBytes.length - rightBytes.length)
-    return count
-  }, [leftBytes, rightBytes])
-
-  const matchCount = Math.min(leftBytes.length, rightBytes.length) - (diffCount - Math.abs(leftBytes.length - rightBytes.length))
+  const jumpAddress = initialAddress ?? compareWindow.firstDiff ?? compareWindow.start
 
   // 左侧滚动 → 同步右侧
   const handleLeftScroll = useCallback((scrollTop: number) => {
@@ -83,13 +83,28 @@ export function CompareView({
         <HexToolbar
           byteWidth={byteWidth}
           onByteWidthChange={setByteWidth}
-          baseAddress={leftBaseAddress}
-          dataLength={leftBytes.length}
+          baseAddress={compareWindow.start}
+          dataLength={compareWindow.size}
         />
+        <span className="text-[11px] text-muted-foreground font-mono">
+          {formatHex(compareWindow.start)} ~ {formatHex(compareWindow.end > compareWindow.start ? compareWindow.end - 1 : compareWindow.start)}
+        </span>
         <div className="ml-auto text-[11px] text-muted-foreground flex items-center gap-2">
-          <span className="text-green-600 dark:text-green-400">匹配 {formatSize(Math.max(0, matchCount))}</span>
+          <span className="text-red-600 dark:text-red-400">差异 {compareWindow.diffCount} bytes</span>
           <span>·</span>
-          <span className="text-red-600 dark:text-red-400">差异 {diffCount} bytes</span>
+          <span className="text-green-600 dark:text-green-400">匹配 {formatSize(compareWindow.matchCount)}</span>
+          {compareWindow.onlyLeft > 0 && (
+            <>
+              <span>·</span>
+              <span className="text-amber-600 dark:text-amber-400">仅左侧 {formatSize(compareWindow.onlyLeft)}</span>
+            </>
+          )}
+          {compareWindow.onlyRight > 0 && (
+            <>
+              <span>·</span>
+              <span className="text-amber-600 dark:text-amber-400">仅右侧 {formatSize(compareWindow.onlyRight)}</span>
+            </>
+          )}
         </div>
       </div>
 
@@ -104,11 +119,12 @@ export function CompareView({
           </div>
           <div className="flex-1 min-h-0 overflow-hidden">
             <HexViewer
-              base64Data={leftBase64}
-              baseAddress={leftBaseAddress}
+              bytes={compareWindow.left}
+              baseAddress={compareWindow.start}
               byteWidth={byteWidth}
-              diffBase64={rightBase64}
-              diffBaseAddress={rightBaseAddress}
+              presentMask={compareWindow.leftPresent}
+              diffMask={compareWindow.diffMask}
+              initialAddress={jumpAddress}
               onScrollSync={handleLeftScroll}
               syncScrollTop={leftSyncScroll}
             />
@@ -124,11 +140,12 @@ export function CompareView({
           </div>
           <div className="flex-1 min-h-0 overflow-hidden">
             <HexViewer
-              base64Data={rightBase64}
-              baseAddress={rightBaseAddress}
+              bytes={compareWindow.right}
+              baseAddress={compareWindow.start}
               byteWidth={byteWidth}
-              diffBase64={leftBase64}
-              diffBaseAddress={leftBaseAddress}
+              presentMask={compareWindow.rightPresent}
+              diffMask={compareWindow.diffMask}
+              initialAddress={jumpAddress}
               onScrollSync={handleRightScroll}
               syncScrollTop={rightSyncScroll}
             />
