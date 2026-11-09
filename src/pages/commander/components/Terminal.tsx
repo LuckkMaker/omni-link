@@ -160,11 +160,20 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
   }, [])
 
   // ── 终端输出辅助 ──────────────────────
-  /** 把输入区起始行记到当前光标所在行（每个新 prompt 行开始时应调用） */
+  /**
+   * 把输入区起始行记到当前光标所在行（每个新 prompt 行开始时应调用）。
+   * xterm 的 write 是异步排队解析的，紧跟 write(PROMPT) 后直接读 cursorY 会得到写入前的
+   * 旧行号，输入区起始行因此偏上；多行输出后按 ↑ 重绘输入行时会连带清掉输出内容。
+   * 借助一次空写入的回调，等已排队数据解析完成后再记录光标行。
+   */
   const markInputStart = useCallback(() => {
     const t = termRef.current
     if (!t) return
-    inputStartYRef.current = t.buffer.active.cursorY
+    t.write('', () => {
+      const term = termRef.current
+      if (!term) return
+      inputStartYRef.current = term.buffer.active.cursorY
+    })
   }, [])
 
   /**
