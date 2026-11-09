@@ -170,7 +170,7 @@ def load_module_rule_sets(
 
     if log is not None and without_layer:
         log(
-            "Modules without layer (Keil 走 pack 组件，不做源码同步): "
+            "Modules without layer (Keil uses pack components; source sync skipped): "
             + ", ".join(without_layer)
         )
 

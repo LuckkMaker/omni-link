@@ -380,10 +380,11 @@ def sync_sources_for_uvprojx(
 
     if kept_unknown:
         preview = ", ".join(sorted(kept_unknown)[:6])
-        more = "" if len(kept_unknown) <= 6 else f" …（共 {len(kept_unknown)} 个）"
+        more = "" if len(kept_unknown) <= 6 else f" ... ({len(kept_unknown)} total)"
         log(
-            f"Warning: {os.path.basename(uvprojx_path)} 里编了 {preview}{more} 的源文件，"
-            "但 .config 里没有这些符号，已保持原状；配置可能过期，建议重新 omni config generate"
+            f"Warning: {os.path.basename(uvprojx_path)} still compiles {preview}{more} "
+            "but their symbols are missing from .config; left unchanged. "
+            "The configuration may be stale; run omni config generate."
         )
 
     changed |= sync_include_paths(root, symbols, include_rules)

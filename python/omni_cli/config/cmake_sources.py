@@ -177,8 +177,9 @@ def load_rule_sets(
         if not rules and not module_rules:
             # 空规则集会让同步静默地「什么都不做」，这里明确提示
             log(
-                "Warning: 没有解析到 omni_sources_ifdef() 声明或模块 layer，"
-                "Keil 同步不会增删任何源文件；旧布局可用 --rules table 退回手写规则表"
+                "Warning: no omni_sources_ifdef() declarations or module layers found; "
+                "Keil sync will not add or remove any source files. "
+                "Use --rules table to fall back to the legacy rule table."
             )
 
     rules = _merge_rules(rules)
