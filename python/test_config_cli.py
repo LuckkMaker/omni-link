@@ -709,6 +709,83 @@ def test_project_sources(root: Path) -> None:
         check("工程变量参数报错", False)
 
 
+def test_multi_board_sync(root: Path) -> None:
+    print("== 3f. 多板工程按 uvprojx 分板同步 ==")
+    from omni_cli.config.project_sources import detect_board_from_uvprojx
+    from omni_cli.config.uvproj_sync import sync_uvprojx_project
+
+    repo = root / "multi-repo"
+    app = repo / "app"
+    write(app / "CMakeLists.txt", "target_sources(app PRIVATE src/app.c)\n")
+    write(app / "src" / "app.c", "/* stub */\n")
+    for board in ("b1", "b2"):
+        write(
+            app / "boards" / board / "board.cmake",
+            f"omni_board_sources(\n    bsp_{board}.c\n)\n"
+            f"omni_board_startup(startup/startup_{board}.s)\n",
+        )
+        write(app / "boards" / board / f"bsp_{board}.c", "/* stub */\n")
+        write(app / "boards" / board / "startup" / f"startup_{board}.s", "; stub\n")
+
+    def make_uvprojx(path: Path, board: str) -> None:
+        write(
+            path,
+            '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+            "<Project>\n"
+            "  <Groups>\n"
+            f"    <Group><GroupName>{board}</GroupName><Files>\n"
+            "      <File><FileName>app.c</FileName><FileType>1</FileType>"
+            "<FilePath>.\\src\\app.c</FilePath></File>\n"
+            f"      <File><FileName>bsp_{board}.c</FileName><FileType>1</FileType>"
+            f"<FilePath>.\\boards\\{board}\\bsp_{board}.c</FilePath></File>\n"
+            "    </Files></Group>\n"
+            "  </Groups>\n"
+            "  <Cads><VariousControls><IncludePath></IncludePath><Define></Define></VariousControls></Cads>\n"
+            "</Project>\n",
+        )
+
+    one, two = app / "one.uvprojx", app / "two.uvprojx"
+    make_uvprojx(one, "b1")
+    make_uvprojx(two, "b2")
+    check("按工程内路径认出板", detect_board_from_uvprojx(str(one)) == "b1", str(detect_board_from_uvprojx(str(one))))
+
+    write(app / ".config", "CONFIG_X=y\n")
+    # 显式给 b1 也不能把 b1 的文件塞进 b2 的工程
+    sync_uvprojx_project(
+        str(app),
+        str(app / ".config"),
+        repo_root=str(repo),
+        board="b1",
+        log=lambda _message: None,
+    )
+    text_one = one.read_text(encoding="utf-8")
+    text_two = two.read_text(encoding="utf-8")
+    check("b1 工程加 b1 的启动文件", "startup_b1.s" in text_one, text_one)
+    check("b1 工程没有 b2 的文件", "boards\\b2" not in text_one, text_one)
+    check("b2 工程加 b2 的启动文件", "startup_b2.s" in text_two, text_two)
+    check("b2 工程没有 b1 的文件", "boards\\b1" not in text_two, text_two)
+
+    # 已经混进来的其它板文件要被清掉
+    poisoned = app / "three.uvprojx"
+    make_uvprojx(poisoned, "b2")
+    text = poisoned.read_text(encoding="utf-8").replace(
+        "</Files></Group>",
+        '<File><FileName>bsp_b1.c</FileName><FileType>1</FileType>'
+        "<FilePath>.\\boards\\b1\\bsp_b1.c</FilePath></File></Files></Group>",
+    )
+    poisoned.write_text(text, encoding="utf-8")
+    check("预置混入 b1 文件", "boards\\b1" in text)
+    sync_uvprojx_project(
+        str(app),
+        str(app / ".config"),
+        repo_root=str(repo),
+        uvprojx_paths=[str(poisoned)],
+        log=lambda _message: None,
+    )
+    text = poisoned.read_text(encoding="utf-8")
+    check("同步清掉其它板的文件", "boards\\b1" not in text, text)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="omni-project-test-") as tmp:
         root = Path(tmp)
@@ -719,6 +796,7 @@ def main() -> int:
         test_cmake_sources(root)
         test_module_sources(root)
         test_project_sources(root)
+        test_multi_board_sync(root)
         test_uvproj_dedupe(root)
         test_removed_names()
         test_menuconfig_cleanup(root)

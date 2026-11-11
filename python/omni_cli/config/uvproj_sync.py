@@ -14,7 +14,13 @@ from typing import Callable, Iterable, Optional
 
 from ..context import ProjectError
 from .cmake_sources import load_rule_sets
-from .project_sources import load_project_rule_sets
+from .project_sources import (
+    board_from_path,
+    detect_board_from_uvprojx,
+    discover_board,
+    load_board_rules,
+    load_project_rules,
+)
 
 #: kconfiglib 对没打开的符号写的那行：``# CONFIG_X is not set``
 _NOT_SET_RE = re.compile(r"^#\s*([A-Za-z0-9_]+) is not set$")
@@ -318,12 +324,35 @@ def sync_defines(root, symbols: dict[str, str], define_rules: list[dict]) -> boo
     return changed
 
 
+def prune_foreign_board_files(root, board: str) -> int:
+    """删掉指向**其它板**的源文件，返回删除条数。
+
+    同一工程目录下有多份 ``*.uvprojx`` 时，板级文件只该出现在自己那份里。历史
+    同步按目录里挑一块板，把 ``.\\boards\\stm32f407ig\\bsp.c`` 塞进了 g32/1xx/7xx
+    的工程，这里按板名清掉；同一块板下手工加的其它文件（vendor/…）不动。
+    """
+
+    removed = 0
+    for group in root.findall(".//Group"):
+        files = group.find("Files")
+        if files is None:
+            continue
+        for file_node in list(files.findall("File")):
+            path_node = file_node.find("FilePath")
+            owner = board_from_path(path_node.text if path_node is not None else None)
+            if owner and owner != board:
+                files.remove(file_node)
+                removed += 1
+    return removed
+
+
 def sync_sources_for_uvprojx(
     uvprojx_path: str,
     symbols: dict[str, str],
     repo_root: str,
     *,
     rule_sets: Optional[Iterable[dict]] = None,
+    board: Optional[str] = None,
     log: Callable[[str], None] = print,
 ) -> bool:
     uvprojx_dir = os.path.dirname(os.path.abspath(uvprojx_path))
@@ -342,6 +371,16 @@ def sync_sources_for_uvprojx(
     changed = False
     known_paths = project_file_paths(root)
     kept_unknown: set[str] = set()
+
+    if board:
+        removed_foreign = prune_foreign_board_files(root, board)
+        if removed_foreign:
+            known_paths = project_file_paths(root)
+            changed = True
+            log(
+                f"Removed {removed_foreign} file(s) of other boards from "
+                f"{os.path.basename(uvprojx_path)} (this project is {board})"
+            )
 
     for rule in source_rules:
         symbol = rule["symbol"]
@@ -463,8 +502,13 @@ def sync_uvprojx_project(
 
     ``rule_sets`` 由调用方直接给出时优先使用；否则按 ``rules_mode`` 从
     ``omni/**/CMakeLists.txt`` + 模块 layer 解析（``auto``）或退回手写规则表
-    （``table``）。工程自己的 ``CMakeLists.txt`` / ``boards/<board>/board.cmake``
-    始终参与同步（只增不删），``board`` 不给时按 ``boards/`` 目录推断。
+    （``table``）。工程自己的 ``CMakeLists.txt`` 与 ``boards/<board>/board.cmake``
+    始终参与同步（只增不删）。
+
+    一个工程目录可能有多份 ``*.uvprojx``（stm32f4xx / stm32h7xx / g32f463xx ...）：
+    板级源码按**每份工程文件自己**的 ``.\\boards\\<board>\\`` 路径判断归属，判断
+    不出来时才用 ``board`` 参数或目录里唯一的板；都不行就跳过 board.cmake，
+    免得把一块板的 bsp/startup 塞进另一块板的工程。
     """
 
     files = _resolve_uvprojx_files(project_dir, uvprojx_paths)
@@ -486,12 +530,43 @@ def sync_uvprojx_project(
         rule_sets = load_rule_sets(repo_root, mode=rules_mode, log=log)
 
     rules = list(rule_sets)
-    rules.extend(load_project_rule_sets(project_dir, repo_root, board=board, log=log))
+    rules.extend(load_project_rules(project_dir, repo_root))
+
+    # 一个工程目录可能有多份 uvprojx（不同板/不同系列），板级源文件只能进它自己那份
+    fallback_board = board or discover_board(project_dir)
+    board_rules_cache: dict[str, list[dict]] = {}
 
     changed = False
     for uvprojx in files:
+        uvprojx_board = detect_board_from_uvprojx(uvprojx)
+        if uvprojx_board is None:
+            uvprojx_board = fallback_board
+        elif board and uvprojx_board != board:
+            log(
+                f"Note: {os.path.basename(uvprojx)} belongs to {uvprojx_board}; "
+                f"syncing board sources from its own paths (ignoring -b {board})"
+            )
+        if uvprojx_board is None:
+            log(
+                f"Warning: cannot tell which board {os.path.basename(uvprojx)} belongs to "
+                "(project has several boards/ and no -b given); skipping board.cmake"
+            )
+
+        per_file = list(rules)
+        if uvprojx_board:
+            if uvprojx_board not in board_rules_cache:
+                board_rules_cache[uvprojx_board] = load_board_rules(
+                    project_dir, repo_root, uvprojx_board
+                )
+            per_file.extend(board_rules_cache[uvprojx_board])
+
         changed |= sync_sources_for_uvprojx(
-            uvprojx, symbols, repo_root, rule_sets=rules, log=log
+            uvprojx,
+            symbols,
+            repo_root,
+            rule_sets=per_file,
+            board=uvprojx_board,
+            log=log,
         )
 
     if not changed:

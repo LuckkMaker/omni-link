@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import os
+import re
+import xml.etree.ElementTree as ET
 from typing import Callable, Optional
 
 from ..context import ProjectError
@@ -35,6 +37,9 @@ BOARD_SOURCE_CALLS = {
 
 SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".s", ".S", ".asm")
 ASM_EXTENSIONS = (".s", ".asm")
+
+#: 工程里指向板目录的路径：``.\boards\stm32f407ig\bsp.c``
+_BOARD_PATH_RE = re.compile(r"[\\/]boards[\\/]([^\\/\"]+)[\\/]")
 
 
 def _read(path: str) -> str:
@@ -155,6 +160,93 @@ def discover_board(project_dir: str) -> Optional[str]:
     return boards[0] if len(boards) == 1 else None
 
 
+def load_project_rules(project_dir: str, repo_root: str) -> list[dict]:
+    """工程自身 ``CMakeLists.txt`` 的规则（与板无关）。"""
+
+    project_dir = os.path.abspath(project_dir)
+    cmake = os.path.join(project_dir, "CMakeLists.txt")
+    if not os.path.isfile(cmake):
+        return []
+    entries = [(name, None) for name in parse_project_cmakelists(cmake)]
+    return _rule_sets(repo_root, project_dir, entries)
+
+
+def load_board_rules(project_dir: str, repo_root: str, board: str) -> list[dict]:
+    """某块板的 ``boards/<board>/board.cmake`` 规则。"""
+
+    board_dir = os.path.join(os.path.abspath(project_dir), "boards", board)
+    board_cmake = os.path.join(board_dir, "board.cmake")
+    if not os.path.isfile(board_cmake):
+        return []
+    return _rule_sets(repo_root, board_dir, parse_board_cmake(board_cmake))
+
+
+def board_from_path(path: Optional[str]) -> Optional[str]:
+    """从 ``.\\boards\\<board>\\...`` 这样的路径里取出板名。"""
+
+    match = _BOARD_PATH_RE.search(path or "")
+    return match.group(1) if match else None
+
+
+def _board_names(project_dir: str) -> list[str]:
+    boards_dir = os.path.join(project_dir, "boards")
+    if not os.path.isdir(boards_dir):
+        return []
+    return sorted(
+        (name for name in os.listdir(boards_dir)
+         if os.path.isdir(os.path.join(boards_dir, name))),
+        key=len,
+        reverse=True,
+    )
+
+
+def detect_board_from_uvprojx(uvprojx_path: str) -> Optional[str]:
+    """判断一份 ``*.uvprojx`` 属于哪块板。
+
+    一个工程目录下常常有好几份工程文件（stm32f4xx / stm32h7xx / g32f463xx ...），
+    板级源文件只能进它自己那份，否则 g32 工程里会混进 stm32f407 的 bsp.c。
+
+    先在工程文件自己的 ``.\\boards\\<board>\\`` 路径上数票——板与板之间是同一颗芯片
+    的不同变体时（``stm32f407ig`` / ``stm32f407ig_vendor``），器件名区分不出来，
+    路径才是真凭据。票数并列或没有板级路径时，才用 ``<Device>`` 兜底：
+    板目录按器件命名，``STM32F407IGTx`` 对应 ``boards/stm32f407ig``。
+    """
+
+    try:
+        tree = ET.parse(uvprojx_path)
+    except (OSError, ET.ParseError):
+        return None
+
+    project_dir = os.path.dirname(os.path.abspath(uvprojx_path))
+    boards = _board_names(project_dir)
+
+    counts: dict[str, int] = {}
+    for node in tree.getroot().iter("FilePath"):
+        name = board_from_path(node.text)
+        if name in boards:
+            counts[name] = counts.get(name, 0) + 1
+
+    if counts:
+        top = max(counts.values())
+        winners = [name for name, count in counts.items() if count == top]
+        if len(winners) == 1:
+            return winners[0]
+
+    device = next(
+        (node.text for node in tree.getroot().iter("Device") if node.text),
+        None,
+    )
+    if device:
+        lower = device.strip().lower()
+        for name in boards:  # 已按长度倒序，最长匹配优先
+            if lower.startswith(name.lower()):
+                return name
+
+    if counts:
+        return max(counts.items(), key=lambda item: item[1])[0]
+    return None
+
+
 def load_project_rule_sets(
     project_dir: str,
     repo_root: str,
@@ -162,15 +254,14 @@ def load_project_rule_sets(
     board: Optional[str] = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> list[dict]:
-    """工程自身源码的同步规则（``symbol=None``，只增不删）。"""
+    """工程自身源码 + 指定板源码的同步规则（``symbol=None``，只增不删）。
+
+    同步多份 ``*.uvprojx`` 时不要用它一次算出全部规则，按工程文件各自的板分别调用
+    :func:`load_board_rules`（见 :func:`uvproj_sync.sync_uvprojx_project`）。
+    """
 
     project_dir = os.path.abspath(project_dir)
-    rules: list[dict] = []
-
-    cmake = os.path.join(project_dir, "CMakeLists.txt")
-    if os.path.isfile(cmake):
-        entries = [(name, None) for name in parse_project_cmakelists(cmake)]
-        rules.extend(_rule_sets(repo_root, project_dir, entries))
+    rules = load_project_rules(project_dir, repo_root)
 
     board = board or discover_board(project_dir)
     if not board:
@@ -178,12 +269,9 @@ def load_project_rule_sets(
             log("No board selected, skip board.cmake source sync.")
         return rules
 
-    board_dir = os.path.join(project_dir, "boards", board)
-    board_cmake = os.path.join(board_dir, "board.cmake")
-    if not os.path.isfile(board_cmake):
+    if not os.path.isfile(os.path.join(project_dir, "boards", board, "board.cmake")):
         if log is not None:
             log(f"No {board}/board.cmake, skip board source sync.")
         return rules
 
-    rules.extend(_rule_sets(repo_root, board_dir, parse_board_cmake(board_cmake)))
-    return rules
+    return rules + load_board_rules(project_dir, repo_root, board)
