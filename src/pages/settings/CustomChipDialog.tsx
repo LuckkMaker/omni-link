@@ -46,8 +46,6 @@ interface FormState {
   core: string
   flash_base_address: string
   flash_size: string
-  sector_size: string
-  page_size: string
   ram_rows: RamRow[]
 }
 
@@ -57,10 +55,8 @@ const EMPTY_FORM: FormState = {
   display_name: '',
   vendor: 'Custom',
   core: 'Cortex-M4',
-  flash_base_address: '0x08000000',
-  flash_size: '256',
-  sector_size: '0x400',
-  page_size: '0x400',
+  flash_base_address: '',
+  flash_size: '',
   ram_rows: [{ start: '0x20000000', length_kb: '64', is_default: true }],
 }
 
@@ -116,9 +112,12 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
       const info = await extractFlmInfo(path)
       if (info.flash_base) update('flash_base_address', info.flash_base as string)
       if (info.flash_size) update('flash_size', String(info.flash_size))
-      if (info.page_size) update('page_size', info.page_size as string)
     } catch {
-      // 提取失败不致命
+      notify({
+        type: 'warning',
+        title: 'FLM 参数提取失败',
+        message: '请手动填写 Flash 基地址与大小，留空则使用 FLM 定义的范围',
+      })
     } finally {
       setExtracting(false)
     }
@@ -211,7 +210,7 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 max-h-[70vh] overflow-y-auto pr-1">
+        <div className="-mx-1.5 px-1.5 space-y-4 py-2 max-h-[70vh] overflow-y-auto">
           {/* FLM 文件选择 */}
           <div className="space-y-1.5">
             <Label>FLM Flash 算法文件</Label>
@@ -280,6 +279,7 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
                 <Input
                   value={form.flash_base_address}
                   onChange={(e) => update('flash_base_address', e.target.value)}
+                  placeholder="自动从 FLM 提取"
                   className="font-mono text-xs"
                 />
               </div>
@@ -289,26 +289,14 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
                   type="number"
                   value={form.flash_size}
                   onChange={(e) => update('flash_size', e.target.value)}
+                  placeholder="自动从 FLM 提取"
                   className="text-xs tabular-nums"
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">扇区大小 (hex)</Label>
-                <Input
-                  value={form.sector_size}
-                  onChange={(e) => update('sector_size', e.target.value)}
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">页大小 (hex)</Label>
-                <Input
-                  value={form.page_size}
-                  onChange={(e) => update('page_size', e.target.value)}
-                  className="font-mono text-xs"
-                />
-              </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              留空则使用 FLM 文件定义的 Flash 范围，页/扇区大小也由 FLM 决定
+            </p>
           </div>
 
           {/* RAM 区域分组（支持多个） */}

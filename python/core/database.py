@@ -193,6 +193,8 @@ def _device_dict_to_element(device: dict, parent: ET.Element) -> ET.Element:
         ET.SubElement(dev_elem, "jlink_device").text = device["jlink_device"]
     if device.get("jlink_search"):
         ET.SubElement(dev_elem, "jlink_search").text = device["jlink_search"]
+    if device.get("flm_path"):
+        ET.SubElement(dev_elem, "flm_path").text = device["flm_path"]
 
     regions_elem = ET.SubElement(dev_elem, "flash_regions")
     for r in device.get("flash_regions", []):
@@ -254,6 +256,9 @@ def _element_to_device_dict(elem: ET.Element) -> dict:
     jlink_search = _get_text(elem, "jlink_search", "")
     if jlink_search:
         device["jlink_search"] = jlink_search
+    flm_path = _get_text(elem, "flm_path", "")
+    if flm_path:
+        device["flm_path"] = flm_path
 
     if elem.get("pack"):
         device["pack"] = elem.get("pack")
@@ -511,9 +516,15 @@ def is_target_registered(part_number: str) -> bool:
             return False
 
     if source == "flm":
-        # FLM 自定义芯片：检查 FLM 文件是否存在
+        # FLM 自定义芯片：FLM 文件存在且已注册到 pyOCD 的 TARGET 才算可烧录
         flm_path = device.get("flm_path", "")
-        return bool(flm_path) and os.path.exists(flm_path)
+        if not flm_path or not os.path.exists(flm_path):
+            return False
+        try:
+            from pyocd.target import TARGET, normalise_target_type_name
+            return normalise_target_type_name(device["part_number"]) in TARGET
+        except Exception:
+            return False
 
     return False
 
