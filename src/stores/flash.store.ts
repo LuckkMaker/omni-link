@@ -606,7 +606,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     const uid = useProbeStore.getState().selectedUid
     if (!uid) return
     await wrapOperation(set, get, '启动应用', '正在启动...', async () => {
-      const result = await flashService.resetTarget(uid, 'hw', true)
+      const result = await flashService.resetTarget(uid, 'sw', true)
       return { success: result.success }
     }, () => '目标已复位并运行')
   },
@@ -615,7 +615,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     const uid = useProbeStore.getState().selectedUid
     if (!uid) return
     await wrapOperation(set, get, '复位', '正在复位...', async () => {
-      const result = await flashService.resetTarget(uid, 'hw', false)
+      const result = await flashService.resetTarget(uid, 'sw', false)
       return { success: result.success }
     }, () => '目标已复位')
   },
