@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Download, SquareTerminal, Logs, Settings, SquareActivity, Wrench, ChevronDown, AlertOctagon, FileBarChart, Binary, FileCheck2, Bug, PanelLeftClose, PanelLeftOpen, Box, Upload, Flame } from 'lucide-react'
 import appIcon from '../../assets/images/icon.png'
 import { cn } from '@/lib/utils'
@@ -70,7 +70,6 @@ const toolsSubItems = [
 
 export default function MainLayout() {
   const { status, port } = useBackendStatus()
-  const navigate = useNavigate()
   useProbeWs(port)
   useRttSession()  // 全局 RTT 会话管理（切换页面不停止）
 
@@ -243,14 +242,7 @@ export default function MainLayout() {
                     ) : (
                       <>
                         <SidebarMenuButton
-                          onClick={() => {
-                            // 点父项：未展开时先展开，再点才跳默认子页
-                            if (!omniExpanded) {
-                              setOmniExpanded(true)
-                            } else {
-                              navigate(omniToolItem.to)
-                            }
-                          }}
+                          onClick={() => setOmniExpanded(!omniExpanded)}
                           isActive={isOmniActive}
                         >
                           <Box className="size-4" />
