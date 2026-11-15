@@ -224,7 +224,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
 
   // ── Tab 操作 ──────────────────────────
   openFileTab: async () => {
-    const path = await window.electron.openFileDialog()
+    const path = await window.electron.openFileDialog({ pathKey: 'firmware' })
     if (!path) return
 
     const isBin = path.toLowerCase().endsWith('.bin')

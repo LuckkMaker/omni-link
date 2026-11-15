@@ -102,7 +102,7 @@ export function CustomChipDialog({ open, onOpenChange, onSuccess }: CustomChipDi
   }
 
   const handleSelectFlm = async () => {
-    const path = await window.electron.openFileDialog({ extensions: ['FLM'], title: '选择 FLM Flash 算法文件' })
+    const path = await window.electron.openFileDialog({ extensions: ['FLM'], title: '选择 FLM Flash 算法文件', pathKey: 'flm' })
     if (!path) return
     update('flm_path', path)
 

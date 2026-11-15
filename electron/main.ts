@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 import { app, BrowserWindow, ipcMain, shell, dialog, clipboard } from 'electron'
-import { existsSync } from 'fs'
-import { join } from 'path'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { dirname, join } from 'path'
 import { PythonBridge } from './python-bridge'
 
 let mainWindow: BrowserWindow | null = null
@@ -66,6 +66,50 @@ function resolveToolsDir(): string | null {
   return candidates.find((path) => existsSync(path)) ?? null
 }
 
+interface DialogOptions {
+  extensions?: string[]
+  title?: string
+  /** 路径记忆分组键：同一 key 的对话框共享上次打开目录 */
+  pathKey?: string
+}
+
+// 文件选择对话框的路径记忆（存于 userData/dialog-paths.json，按 pathKey 分组）
+let dialogDirs: Record<string, string> | null = null
+
+function dialogDirsFile(): string {
+  return join(app.getPath('userData'), 'dialog-paths.json')
+}
+
+function loadDialogDirs(): Record<string, string> {
+  if (dialogDirs) return dialogDirs
+  try {
+    const raw = JSON.parse(readFileSync(dialogDirsFile(), 'utf-8')) as Record<string, string>
+    dialogDirs = raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    dialogDirs = {}
+  }
+  return dialogDirs
+}
+
+/** 返回可用的上次目录，目录已不存在时回落到系统默认位置 */
+function getRememberedDir(key: string): string | undefined {
+  const dir = loadDialogDirs()[key]
+  return dir && existsSync(dir) ? dir : undefined
+}
+
+function rememberDir(key: string, filePath: string): void {
+  const dir = dirname(filePath)
+  if (!dir || !existsSync(dir)) return
+  const dirs = loadDialogDirs()
+  if (dirs[key] === dir) return
+  dirs[key] = dir
+  try {
+    writeFileSync(dialogDirsFile(), JSON.stringify(dirs, null, 2), 'utf-8')
+  } catch (err) {
+    console.error('[Dialog] 保存路径记忆失败:', err)
+  }
+}
+
 app.whenReady().then(async () => {
   const toolsDir = resolveToolsDir()
   if (toolsDir) {
@@ -101,7 +145,8 @@ app.whenReady().then(async () => {
   // IPC: 打开文件选择对话框
   //   opts.extensions：指定过滤后缀（如 ['elf','axf']），不传时默认 bin/hex/elf/axf + 所有文件（兼容 Flash 页）
   //   opts.title：对话框标题
-  ipcMain.handle('dialog:open-file', async (_event, opts?: { extensions?: string[]; title?: string }) => {
+  //   opts.pathKey：路径记忆分组键，相同 key 的对话框共享上次打开目录
+  ipcMain.handle('dialog:open-file', async (_event, opts?: DialogOptions) => {
     // 根据是否指定 extensions 动态构造 filters，未指定时保留原有 bin/hex/elf/axf + 所有文件
     const filters = opts?.extensions?.length
       ? [
@@ -116,9 +161,11 @@ app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title,
       filters,
+      defaultPath: getRememberedDir(opts?.pathKey ?? title),
       properties: ['openFile'],
     })
     if (result.canceled || result.filePaths.length === 0) return null
+    rememberDir(opts?.pathKey ?? title, result.filePaths[0])
     return result.filePaths[0]
   })
 
@@ -126,14 +173,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('dialog:save-file', async (_event, defaultName: string) => {
     const result = await dialog.showSaveDialog(mainWindow!, {
       title: '保存文件',
-      defaultPath: defaultName || 'flash_dump.bin',
+      defaultPath: defaultName || getRememberedDir('save') || 'flash_dump.bin',
       filters: [
         { name: '二进制文件', extensions: ['bin'] },
         { name: 'Intel HEX', extensions: ['hex'] },
         { name: '所有文件', extensions: ['*'] },
       ],
     })
-    if (result.canceled) return null
+    if (result.canceled || !result.filePath) return null
+    rememberDir('save', result.filePath)
     return result.filePath
   })
 

@@ -227,6 +227,7 @@ export const useFlasherStore = create<FlasherStore>((set, get) => ({
     const path = await window.electron?.openFileDialog?.({
       extensions: ['flm'],
       title: '选择目标的 FLM 编程算法文件',
+      pathKey: 'flm',
     })
     if (!path) return
     const name = path.split(/[\\/]/).pop() ?? path
@@ -264,6 +265,7 @@ export const useFlasherStore = create<FlasherStore>((set, get) => ({
     const path = await window.electron?.openFileDialog?.({
       extensions: ['bin', 'hex'],
       title: '选择要烧录到目标芯片的固件 (.bin / .hex)',
+      pathKey: 'omni-tool-firmware',
     })
     if (!path) return
 

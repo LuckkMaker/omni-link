@@ -268,11 +268,12 @@ export function ConnectionConfigDialog({
     }
   }, [isJlink, pendingTarget, jlinkDevices, loadingJlinkDevices])
 
-  // 选择 ELF 文件（仅 start 模式；每次启动会话都须重新选择，不复用/不记住上次路径）
+  // 选择 ELF 文件（仅 start 模式；每次启动会话都须重新选择文件，但对话框会记住上次目录）
   const handlePickElf = async () => {
     const path = await window.electron?.openFileDialog?.({
       extensions: ['elf', 'axf'],
       title: '选择 ELF 文件',
+      pathKey: 'elf',
     })
     if (path) {
       setElfPath(path)

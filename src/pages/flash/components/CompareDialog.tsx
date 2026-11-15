@@ -49,7 +49,7 @@ export function CompareDialog() {
       size = parsed
     }
 
-    const path = await window.electron?.openFileDialog?.()
+    const path = await window.electron?.openFileDialog?.({ pathKey: 'firmware' })
     if (!path) return
 
     // 先关闭对话框再执行比较

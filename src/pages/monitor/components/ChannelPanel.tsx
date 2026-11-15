@@ -265,6 +265,7 @@ export function ChannelPanel({ uid, isConnected, onStartPause, onStop, onToggleD
     const filePath = await window.electron?.openFileDialog?.({
       extensions: ['elf', 'axf'],
       title: '选择 ELF/AXF 文件',
+      pathKey: 'elf',
     })
     if (!filePath) return
     setLoading(true)
