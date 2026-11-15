@@ -57,6 +57,9 @@ const THEME_COLOR = { r: 37, g: 99, b: 235 }
 const PROMPT = `\x1b[38;2;${THEME_COLOR.r};${THEME_COLOR.g};${THEME_COLOR.b}momni link\x1b[0m> `
 const PROMPT_VISIBLE_LEN = 11 // "omni link> " 可见长度
 
+// 命令执行中的等待指示：经典命令行 ASCII 旋转字符
+const SPINNER_FRAMES = ['-', '\\', '|', '/']
+
 // localStorage key
 const HISTORY_KEY = 'commander:history'
 
@@ -308,13 +311,30 @@ export function Terminal({ uid, connected, commands, apiRef, onBeforeCommand, ba
         }
       }
 
-      // 显示运行指示（在命令行内新行）
-      term.write(`${COLOR.yellow}\u23F3 ${cmd}${COLOR.reset}\r\n`)
+      // 显示运行指示（在命令行内新行）：CLI 风格 ASCII 旋转字符
+      let frame = 0
+      const drawRunning = () => {
+        term.write(`${COLOR.yellow}[${SPINNER_FRAMES[frame]}] ${cmd}${COLOR.reset}\r\n`)
+        frame = (frame + 1) % SPINNER_FRAMES.length
+      }
+      drawRunning()
+      const spinnerTimer = window.setInterval(() => {
+        // 有外部日志注入（writeLog 已重绘 prompt）时停止动画，避免覆盖日志行
+        if (promptDrawnRef.current) {
+          window.clearInterval(spinnerTimer)
+          return
+        }
+        term.write('\x1b[A\r\x1b[2K')
+        drawRunning()
+      }, 120)
 
       const result = await execute(uidRef.current, cmd)
 
-      // 清除运行指示行（回到上一行行首并清除）
-      term.write('\x1b[A\r\x1b[2K')
+      window.clearInterval(spinnerTimer)
+      // 清除运行指示行（回到上一行行首并清除）；若期间已注入日志则不再回退
+      if (!promptDrawnRef.current) {
+        term.write('\x1b[A\r\x1b[2K')
+      }
 
       if (result.output) {
         term.write(result.output)
