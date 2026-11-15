@@ -7,12 +7,20 @@ import { useNotificationStore } from '@/stores/notification.store'
 export type ByteWidth = 1 | 2 | 4
 
 interface HexViewerProps {
-  base64Data: string
+  base64Data?: string
+  /** 可选：直接给字节数组（优先于 base64Data，避免重复解码） */
+  bytes?: Uint8Array | null
   baseAddress: number
   byteWidth: ByteWidth
   /** 可选：比较参考数据（base64），存在时高亮差异字节 */
   diffBase64?: string | null
   diffBaseAddress?: number
+  /** 可选：预先算好的差异掩码（1=差异），优先于 diffBase64 的按地址比较 */
+  diffMask?: Uint8Array | null
+  /** 可选：每个字节是否有数据（1=有）；为 0 的地址显示空白（两侧地址范围不一致时） */
+  presentMask?: Uint8Array | null
+  /** 可选：加载后自动滚动并高亮到该绝对地址（比较结果跳到首个差异） */
+  initialAddress?: number | null
   /** 可选：滚动同步回调，当本组件滚动时通知另一个组件 */
   onScrollSync?: (scrollTop: number) => void
   /** 可选：外部控制的 scrollTop，用于同步滚动 */
@@ -178,7 +186,7 @@ interface VirtualRow {
   ascii: { ch: string; diff: boolean }[]
 }
 
-export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diffBaseAddress, onScrollSync, syncScrollTop, highlightOffset: extHighlightOffset, onHighlightChange, persistedScrollTop, onScrollPersist }: HexViewerProps) {
+export function HexViewer({ base64Data, bytes, baseAddress, byteWidth, diffBase64, diffBaseAddress, diffMask, presentMask, initialAddress, onScrollSync, syncScrollTop, highlightOffset: extHighlightOffset, onHighlightChange, persistedScrollTop, onScrollPersist }: HexViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
@@ -194,7 +202,10 @@ export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diff
   // 每行固定 16 字节（标准十六进制编辑器宽度），byteWidth 控制字分组方式
   const bytesPerRow = 16
 
-  const data = useMemo(() => decodeBase64(base64Data), [base64Data])
+  const data = useMemo(() => {
+    if (bytes) return bytes
+    return base64Data ? decodeBase64(base64Data) : new Uint8Array(0)
+  }, [bytes, base64Data])
   const diffData = useMemo(() => diffBase64 ? decodeBase64(diffBase64) : null, [diffBase64])
 
   // 总行数（廉价计算，不需要遍历数据）
@@ -223,8 +234,15 @@ export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diff
     if (data.length === 0) return []
     const result: VirtualRow[] = []
 
+    // 辅助函数：该地址是否有数据（presentMask 为比较窗口对齐后的「无数据」标记）
+    const hasByte = (pos: number): boolean => !presentMask || presentMask[pos] === 1
+
     // 辅助函数：检查指定字节范围内是否有 diff
     const checkDiff = (pos: number, width: number): boolean => {
+      if (diffMask) {
+        for (let j = 0; j < width; j++) if (diffMask[pos + j]) return true
+        return false
+      }
       if (!diffData) return false
       for (let j = 0; j < width; j++) {
         const refOffset = (baseAddress + pos + j) - (diffBaseAddress ?? baseAddress)
@@ -240,7 +258,9 @@ export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diff
       const cells: HexCell[] = []
       for (let i = 0; i < cellCount; i++) {
         const pos = offset + i * width
-        if (pos + width <= data.length) {
+        let present = pos + width <= data.length
+        for (let j = 0; present && j < width; j++) present = hasByte(pos + j)
+        if (present) {
           let hex: string
           if (width === 1) {
             hex = byteToHex(data[pos])
@@ -264,7 +284,7 @@ export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diff
       const ascii: { ch: string; diff: boolean }[] = []
       for (let i = 0; i < bytesPerRow; i++) {
         const pos = offset + i
-        if (pos < data.length) {
+        if (pos < data.length && hasByte(pos)) {
           ascii.push({ ch: byteToAscii(data[pos]), diff: checkDiff(pos, 1) })
         } else {
           ascii.push({ ch: ' ', diff: false })
@@ -285,7 +305,7 @@ export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diff
       })
     }
     return result
-  }, [data, diffData, baseAddress, diffBaseAddress, byteWidth, bytesPerRow, visibleStart, visibleEnd])
+  }, [data, diffData, diffMask, presentMask, baseAddress, diffBaseAddress, byteWidth, bytesPerRow, visibleStart, visibleEnd])
 
   // 数据或字节宽度变化时恢复滚动位置（切换 tab 时从持久化值恢复）
   useEffect(() => {
@@ -299,7 +319,26 @@ export function HexViewer({ base64Data, baseAddress, byteWidth, diffBase64, diff
       setLocalHighlightOffset(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base64Data, byteWidth])
+  }, [base64Data, bytes, byteWidth])
+
+  // 初始跳转：数据就绪后滚动/高亮到指定地址（比较结果直接跳到首个差异）
+  useEffect(() => {
+    const el = containerRef.current
+    if (initialAddress == null || !el || data.length === 0) return
+    const offset = Math.max(0, Math.min(initialAddress - baseAddress, data.length - 1))
+    const rowIndex = Math.floor(offset / bytesPerRow)
+    const targetTop = rowIndex * ROW_HEIGHT
+    // 居中显示
+    const centerOffset = Math.max(0, targetTop - el.clientHeight / 2 + ROW_HEIGHT / 2)
+    el.scrollTop = centerOffset
+    setScrollTop(centerOffset)
+    if (onHighlightChangeRef.current) {
+      onHighlightChangeRef.current(rowIndex * bytesPerRow)
+    } else {
+      setLocalHighlightOffset(rowIndex * bytesPerRow)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAddress, base64Data, bytes, baseAddress, bytesPerRow])
 
   // 地址跳转：直接设置 scrollTop
   useEffect(() => {

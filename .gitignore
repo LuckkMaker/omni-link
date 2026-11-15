@@ -33,6 +33,7 @@ python/dist/
 # 才能对该文件做反向忽略（git 无法从被忽略的目录里再包含文件）。
 build/*
 !build/installer.nsh
+python/**/build/
 
 # ── Electron 打包产物 ────────────────────
 *.app

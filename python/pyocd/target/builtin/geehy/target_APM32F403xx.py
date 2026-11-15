@@ -24,6 +24,15 @@ from ....core.memory_map import (FlashRegion, RamRegion, MemoryMap)
 from ....debug.svd.loader import SVDFile
 from .target_APM32F4xx_flash import FLASH_ALGO_128K
 
+CHIP_ERASE_WEIGHT = 15.0
+
+
+class DBGMCU:
+    CFG = 0xE0042004
+    # sleep/stop/standby clock keep | IWDT/WWDT | TMR1-4 | CAN1 | I2C1_SMBUS timeout
+    # | TMR5 | TMR8 | CAN2 freeze when core is halted
+    CFG_VALUE = 0x32FF07
+
 
 class APM32F403xB(CoreSightTarget):
     """APM32F403: 128KB Flash, 32KB RAM."""
@@ -32,10 +41,14 @@ class APM32F403xB(CoreSightTarget):
 
     MEMORY_MAP = MemoryMap(
         FlashRegion(start=0x08000000, length=0x20000, sector_size=0x400,
-                    page_size=0x400, is_boot_memory=True, algo=FLASH_ALGO_128K),
+                    page_size=0x400, is_boot_memory=True,
+                    erase_all_weight=CHIP_ERASE_WEIGHT, algo=FLASH_ALGO_128K),
         RamRegion(start=0x20000000, length=0x8000),
     )
 
     def __init__(self, session):
         super().__init__(session, self.MEMORY_MAP)
         self._svd_location = SVDFile.from_builtin("APM32F403.svd")
+
+    def post_connect_hook(self):
+        self.write32(DBGMCU.CFG, DBGMCU.CFG_VALUE)

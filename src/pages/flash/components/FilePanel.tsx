@@ -50,6 +50,9 @@ export function FilePanel() {
             rightBase64={activeTab.rightData}
             rightBaseAddress={activeTab.rightBaseAddress ?? activeTab.baseAddress}
             rightTitle={activeTab.rightTitle ?? 'Right'}
+            windowStart={activeTab.windowStart}
+            windowSize={activeTab.windowSize}
+            initialAddress={activeTab.firstDiff ?? activeTab.windowStart}
           />
         </div>
       </div>

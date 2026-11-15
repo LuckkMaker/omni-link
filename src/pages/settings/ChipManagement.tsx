@@ -66,7 +66,7 @@ export function ChipManagement() {
   useEffect(() => { refreshPacks() }, [refreshPacks])
 
   const handleImportPack = async () => {
-    const path = await window.electron.openFileDialog({ extensions: ['pack'], title: '选择 CMSIS-Pack 文件' })
+    const path = await window.electron.openFileDialog({ extensions: ['pack'], title: '选择 CMSIS-Pack 文件', pathKey: 'pack' })
     if (!path) return
     // 打开设备选择对话框
     setPackDialogMode('import')

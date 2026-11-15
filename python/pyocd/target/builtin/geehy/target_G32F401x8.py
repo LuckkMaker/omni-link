@@ -26,6 +26,14 @@ from ....debug.svd.loader import SVDFile
 CHIP_ERASE_WEIGHT = 20.0
 
 
+class DBGMCU:
+    # SYSCFG.DBGMCU2: debug control register at 0x40012400 + 0x24.
+    DBGMCU2 = 0x40012424
+    # sleep/stop/standby clock keep | IWDT/WWDT | GTMR0-3 | CAN | I2C0/I2C1 SMBUS timeout
+    # | BTMR0/BTMR1 | ATMR freeze when core is halted
+    DBGMCU2_VALUE = 0x000FFF07
+
+
 # Generated from G32F401_64_MFlash.FLM (Geehy G32F401 64KB Flash)
 FLASH_ALGO = {
     'load_address': 0x20000000,
@@ -101,3 +109,6 @@ class G32F401x8(CoreSightTarget):
     def __init__(self, session):
         super().__init__(session, self.MEMORY_MAP)
         self._svd_location = SVDFile.from_builtin("G32F401.svd")
+
+    def post_connect_hook(self):
+        self.write32(DBGMCU.DBGMCU2, DBGMCU.DBGMCU2_VALUE)

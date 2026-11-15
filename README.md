@@ -281,6 +281,11 @@ npm run package:clean
 
 ## 文档
 
+- [`.agents/skills/omni-cli/`](.agents/skills/omni-cli/SKILL.md) — 让 AI 编码助手（Codex / Claude Code / Trae 等）用 `omni` 做烧录、RTT、源码级调试与实机冒烟测试的技能说明
+- [docs/tech/architecture.md](docs/tech/architecture.md) — 架构与目录结构
+- [docs/tech/modules.md](docs/tech/modules.md) — 功能模块详解
+- [docs/tech/api.md](docs/tech/api.md) — 后端 REST / WebSocket API
+
 ## 许可证
 
 OMNI Link 采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 LuckkMaker。

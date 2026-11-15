@@ -5,7 +5,7 @@
 ``.uvprojx`` 所在目录计算相对路径，避免旧脚本硬编码 ``..\\..\\..\\omni`` 的深度假设。
 """
 
-SOURCE_RULE_SETS = [
+LEGACY_RULE_SETS = [
     {
         "symbol": "CONFIG_ARCH_CORTEX_M",
         "group": "omni/arch/arm",
@@ -169,3 +169,24 @@ SOURCE_RULE_SETS = [
         "files": ["vfs.c"],
     },
 ]
+
+
+#: 解析器覆盖不到的目录：
+#:
+#: * ``CONFIG_ARCH_CORTEX_M`` —— ``omni/arch/CMakeLists.txt`` 用
+#:   ``list(APPEND)`` 在 ``if()`` 里收集，同样解析不了；
+#: * ``CONFIG_IAP`` —— ``omni/subsys/iap`` 目前只有 ``Kconfig`` + ``iap.c``，
+#:   框架还没给它 ``CMakeLists.txt``（CMake 构建未接入），只有 Keil 工程直接编译。
+#:
+#: ``modules/*`` 不在这里：模块的 ``omni/module.yml`` 已经声明了 ``enable`` 符号和
+#: ``settings.layer``，:mod:`module_sources` 直接按 layer 的 ``groups``/``add-path``
+#: 生成规则，新增模块或模块内新增文件都不用再改这张表。
+#: 其余 (omni/subsys、omni/drivers) 由 :mod:`cmake_sources` 从 CMakeLists.txt 解析。
+EXTRA_RULE_SYMBOLS = ("CONFIG_ARCH_CORTEX_M", "CONFIG_IAP")
+
+EXTRA_RULE_SETS = [
+    rule for rule in LEGACY_RULE_SETS if rule["symbol"] in EXTRA_RULE_SYMBOLS
+]
+
+#: 兼容旧调用点；新代码用 :func:`cmake_sources.load_rule_sets`
+SOURCE_RULE_SETS = LEGACY_RULE_SETS
