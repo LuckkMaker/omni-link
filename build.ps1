@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     OMNI Link 一键打包脚本（Windows）
 .DESCRIPTION
@@ -376,7 +376,11 @@ if (-not $SkipBackend) {
     # CLI exe 来自子模块（独立仓库维护）：构建后落到 python\dist\omni.exe，
     # package.json 的 extraResources 与 NSIS 的 PATH 逻辑因此无需改动。
     Write-Host "--- Step 1b/3: OMNI CLI exe (vendor/omni-cli) ---" -ForegroundColor Yellow
-    & $CliBuildScript -Python $pyExe -OutputDir "$ProjectRoot\python\dist"
+    # 单文件（onefile）exe 在仓库工作区内可能无法解包：运行时 PyInstaller 报
+    # "[PYI-xxxxx:ERROR] Could not create temporary directory!"（工作区/杀软对 onefile
+    # 解包目录的限制，同字节 exe 在工作区外可正常运行）。子脚本的原地自检会因此误判失败，
+    # 故这里用 -NoVerify 跳过，再由本脚本把 exe 复制到 %TEMP% 验证。
+    & $CliBuildScript -Python $pyExe -OutputDir "$ProjectRoot\python\dist" -NoVerify
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: CLI build failed." -ForegroundColor Red
         exit 1
@@ -390,6 +394,21 @@ if (-not $SkipBackend) {
     }
     $cliSizeMB = [math]::Round((Get-Item $cliExe).Length / 1MB, 1)
     Write-Host "[build] CLI exe: $cliExe ($cliSizeMB MB)" -ForegroundColor Green
+
+    # 在 %TEMP% 里验证（绕开 onefile 在工作区内的解包限制）
+    $cliVerify = Join-Path $env:TEMP ("omni-verify-{0}.exe" -f [guid]::NewGuid().ToString("N"))
+    try {
+        Copy-Item -LiteralPath $cliExe -Destination $cliVerify -Force
+        $cliVerOut = (& $cliVerify --version 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: omni.exe 无法运行: $cliVerOut" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "[build] CLI exe 自检通过: $cliVerOut" -ForegroundColor Green
+    }
+    finally {
+        Remove-Item -LiteralPath $cliVerify -Force -ErrorAction SilentlyContinue
+    }
 } else {
     Write-Host "[build] Skipping backend build." -ForegroundColor DarkGray
 }
