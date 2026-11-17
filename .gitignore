@@ -46,6 +46,8 @@ python/**/build/
 
 # ── PyInstaller 临时文件 ─────────────────
 *.spec.bak
+# build.py 每次打包都会在源码目录重写 spec；它是产物不是源码（build.py 自己会生成）
+python/*.spec
 
 # ── 运行时数据（用户生成，不纳入版本控制）──
 # devices.xml 是种子数据，需要追踪
@@ -74,10 +76,8 @@ certs/
 logs/
 
 # ── CLI 运行时状态（omni backend 常驻记录）──
-python/omni_cli/.backend_runtime.json
-python/omni_cli/.backend.handshake.jsonl
-# CLI 持久化配置（wheel 安装后记录后端目录，含本机绝对路径，不提交）
-python/omni_cli/cli.config.json
+# CLI 已拆到 vendor/omni-cli 子模块，运行时状态一律写用户级目录
+# （%LOCALAPPDATA%\omni-link\），不再落在仓库里；这里只保留历史路径的忽略规则。
 
 # ── 临时/备份文件 ────────────────────────
 *.tmp

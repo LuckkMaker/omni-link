@@ -193,16 +193,40 @@ async def health():
     }
 
 
+def dev_config_candidates() -> list[str]:
+    """开发态端口配置文件的候选路径（按优先级）。
+
+    1. ``OMNI_DEV_CONFIG`` 显式指定的文件；
+    2. 后端目录自身的 ``backend.config.json``（后端独立成仓后的布局：
+       ``link/backend.config.json``）；
+    3. 上一级目录的 ``backend.config.json``（旧布局：后端在 ``<应用仓库>/python``，
+       配置放在应用仓库根）。
+    """
+    explicit = os.environ.get("OMNI_DEV_CONFIG")
+    if explicit:
+        return [explicit]
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(backend_dir, "backend.config.json"),
+        os.path.normpath(os.path.join(backend_dir, "..", "backend.config.json")),
+    ]
+
+
 def load_config_port():
-    """从项目根目录的 backend.config.json 读取后端端口，未配置则返回 None。"""
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend.config.json")
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        port = cfg.get("backendPort")
-        return int(port) if port else None
-    except Exception:
-        return None
+    """读取开发态后端端口，未配置则返回 None（由调用方自动分配）。
+
+    后端不再假设“当前目录是应用仓库根”，配置一律按 ``__file__`` 定位；
+    全部候选都不存在/非法时返回 None，即自动分配端口。
+    """
+    for config_path in dev_config_candidates():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            port = cfg.get("backendPort")
+            return int(port) if port else None
+        except Exception:
+            continue
+    return None
 
 
 def _configure_stdio() -> None:
