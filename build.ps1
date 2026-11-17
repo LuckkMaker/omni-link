@@ -3,7 +3,7 @@
     OMNI Link 一键打包脚本（Windows）
 .DESCRIPTION
     自动完成三步构建：
-      1. 调用 vendor/omni-backend 子模块构建 link 后端 -> python/dist/omni-backend/
+      1. 调用 vendor/omni-backend 子模块构建 link 后端 -> python/dist/omni-link-backend/
          并从 vendor/omni-cli 子模块构建 OMNI CLI -> python/dist/omni.exe
       2. electron-vite 构建前端       -> out/
       3. electron-builder 生成安装包   -> release/
@@ -127,7 +127,7 @@ function Test-ReleaseArtifacts {
         $appExe = Join-Path $unpackedDir "$ProductName.exe"
         if (Test-Path -LiteralPath $appExe) { $targets += $appExe }
     }
-    foreach ($relative in @("resources\python\omni.exe", "resources\python\omni-backend.exe")) {
+    foreach ($relative in @("resources\python\omni.exe", "resources\python\omni-link-backend.exe")) {
         $candidate = Join-Path $unpackedDir $relative
         if (Test-Path -LiteralPath $candidate) { $targets += $candidate }
     }
@@ -353,7 +353,7 @@ $pyExe = Find-Python
 if (-not $SkipBackend) {
     Write-Host ""
     Write-Host "--- Step 1/3: PyInstaller backend ---" -ForegroundColor Yellow
-    # 后端构建委托给子模块：--out 保证产物仍是 python\dist\omni-backend\
+    # 后端构建委托给子模块：--out 保证产物仍是 python\dist\omni-link-backend\
     # （package.json 的 extraResources 与 NSIS 的 PATH 逻辑因此无需改动）。
     $buildArgs = @($BackendBuildScript, "--out", "$ProjectRoot\python\dist")
     if ($Clean) { $buildArgs += "--clean" }
@@ -365,7 +365,7 @@ if (-not $SkipBackend) {
     Write-Host "[build] Backend packaged successfully." -ForegroundColor Green
 
     # Verify backend exe exists
-    $backendExe = "$ProjectRoot\python\dist\omni-backend\omni-backend.exe"
+    $backendExe = "$ProjectRoot\python\dist\omni-link-backend\omni-link-backend.exe"
     if (-not (Test-Path $backendExe)) {
         Write-Host "ERROR: Backend executable not found at '$backendExe'" -ForegroundColor Red
         exit 1
@@ -514,7 +514,7 @@ if (-not $SkipFrontend) {
 if (-not $SkipBackend) {
     Write-Host ""
     Write-Host "Backend:" -ForegroundColor White
-    $backendExe = "$ProjectRoot\python\dist\omni-backend"
+    $backendExe = "$ProjectRoot\python\dist\omni-link-backend"
     if (Test-Path $backendExe) {
         $totalSize = (Get-ChildItem $backendExe -Recurse | Measure-Object -Property Length -Sum).Sum
         $totalSizeMB = [math]::Round($totalSize / 1MB, 1)

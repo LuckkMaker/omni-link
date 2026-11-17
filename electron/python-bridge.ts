@@ -60,7 +60,7 @@ export class PythonBridge {
         args.push(scriptPath, '--port', portArg)
         cwd = join(scriptPath, '..')
       } else {
-        // 生产模式：omni-backend.exe --port 0
+        // 生产模式：omni-link-backend.exe --port 0
         args.push('--port', portArg)
         cwd = join(pythonExe, '..')
       }
@@ -183,7 +183,7 @@ export class PythonBridge {
    * 2. 后端仓库子模块：`<repo>/vendor/omni-backend/link/server.py`；
    * 3. 旧布局兜底：`<repo>/python/server.py`（迁移过渡期保留）。
    *
-   * 生产态不走这里：直接用 extraResources 里的 `resources/python/omni-backend.exe`。
+   * 生产态不走这里：直接用 extraResources 里的 `resources/python/omni-link-backend.exe`。
    */
   private devBackendCandidates(root: string): string[] {
     const candidates: string[] = []
@@ -215,8 +215,8 @@ export class PythonBridge {
     }
 
     // 生产环境：PyInstaller 打包的后端 exe
-    // extraResources 将 python/dist/omni-backend/ 复制到 resources/python/
-    const bundledExe = join(process.resourcesPath ?? '', 'python', 'omni-backend.exe')
+    // extraResources 将 python/dist/omni-link-backend/ 复制到 resources/python/
+    const bundledExe = join(process.resourcesPath ?? '', 'python', 'omni-link-backend.exe')
     if (existsSync(bundledExe)) {
       console.log(`[PythonBridge] Using bundled backend: ${bundledExe}`)
       return bundledExe
@@ -236,7 +236,7 @@ export class PythonBridge {
 
     // 生产环境：PyInstaller exe 不需要 script 参数，但 spawn 时需要占位
     // 实际上 exe 本身就是入口，这里返回 null 让调用方处理
-    const bundledExe = join(process.resourcesPath ?? '', 'python', 'omni-backend.exe')
+    const bundledExe = join(process.resourcesPath ?? '', 'python', 'omni-link-backend.exe')
     if (existsSync(bundledExe)) {
       return null  // exe 自包含，不需要额外脚本
     }

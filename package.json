@@ -32,7 +32,7 @@
     ],
     "extraResources": [
       {
-        "from": "python/dist/omni-backend",
+        "from": "python/dist/omni-link-backend",
         "to": "python",
         "filter": [
           "**/*"
