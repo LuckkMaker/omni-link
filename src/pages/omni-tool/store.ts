@@ -391,6 +391,7 @@ export const useOmniToolStore = create<OmniToolStore>((set, get) => ({
     const path = await window.electron?.openFileDialog?.({
       extensions: ['bin', 'hex'],
       title: '选择 OMNI Tool 固件 (.bin / .hex)',
+      pathKey: 'omni-tool-firmware',
     })
     if (!path) return
 

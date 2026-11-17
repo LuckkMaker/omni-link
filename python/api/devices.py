@@ -127,9 +127,13 @@ async def delete_device(part_number: str):
     """删除设备（内置型号只读，不允许删除）"""
     if database.is_builtin(part_number):
         raise HTTPException(status_code=409, detail=f"内置型号只读: {part_number}")
+    device = database.get_device(part_number)
     success = database.delete_device(part_number)
     if not success:
         raise HTTPException(status_code=404, detail=f"Unknown device: {part_number}")
+    if device is not None and device.get("source") == "flm":
+        from core import custom_target
+        custom_target.remove_custom_target(device["part_number"], device.get("flm_path", ""))
     return {"success": True, "part_number": part_number}
 
 
@@ -169,6 +173,8 @@ async def create_custom_device(req: CustomDeviceCreate):
             ram_regions=[r.model_dump() for r in req.ram_regions] if req.ram_regions else None,
         )
         return _enrich_device(device)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"创建自定义芯片失败: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"创建自定义芯片失败: {str(e)}")
 

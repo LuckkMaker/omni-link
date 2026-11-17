@@ -25,6 +25,7 @@ export function CompareDialog({
     const path = await window.electron?.openFileDialog?.({
       extensions: ['bin', 'hex'],
       title: '选择参考固件文件',
+      pathKey: 'omni-tool-firmware',
     })
     if (!path) return
     onOpenChange(false)
