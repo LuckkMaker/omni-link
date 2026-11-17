@@ -16,7 +16,7 @@ OMNI Link 采用 Electron + Python 前后端分离架构。前端负责 UI 渲�
 | 通信 | Axios、WebSocket（ws 8） | HTTP 请求 + 实时数据推送 |
 | 布局 | react-resizable-panels | 面板可拖拽调整 |
 | 后端 | Python + FastAPI 0.115 + uvicorn 0.34 | 硬件交互层，REST + WebSocket |
-| 硬件库 | pyOCD（源码内置 `python/pyocd/`） | DAPLink 通信与 Flash 操作 |
+| 硬件库 | pyOCD（源码内置 `vendor/omni-backend/link/pyocd/`） | DAPLink 通信与 Flash 操作 |
 | 解析库 | pyelftools、capstone | ELF/DWARF 解析、ARM 反汇编 |
 | USB 后端 | libusb / hidapi（pyOCD 依赖） | CMSIS-DAP v1/v2 通信 |
 | 打包 | PyInstaller（后端）+ electron-builder + NSIS（前端安装包） | 前后端一体化打包 |
@@ -56,7 +56,7 @@ OMNI Link 采用 Electron + Python 前后端分离架构。前端负责 UI 渲�
 └─────────────────────────────────────────────────┘
 ```
 
-Electron 主进程启动时 spawn Python 子进程运行 FastAPI 服务，通过 stdout 首行 JSON `{"port": 12345}` 传递动态分配的端口号。前端通过 preload 暴露的 IPC API 获取端口后，使用 HTTP（Axios）与 WebSocket（ws 8）双通道与 Python 后端通信：HTTP 用于命令请求，WebSocket 用于实时事件推送（探针状态、Flash 进度、Monitor 采样数据、RTT 数据等）。pyOCD 源码内置在 `python/pyocd/`，随项目分发，不通过 pip 安装，保证版本一致与离线可用。
+Electron 主进程启动时 spawn Python 子进程运行 FastAPI 服务，通过 stdout 首行 JSON `{"port": 12345}` 传递动态分配的端口号。前端通过 preload 暴露的 IPC API 获取端口后，使用 HTTP（Axios）与 WebSocket（ws 8）双通道与 Python 后端通信：HTTP 用于命令请求，WebSocket 用于实时事件推送（探针状态、Flash 进度、Monitor 采样数据、RTT 数据等）。pyOCD 源码内置在 `vendor/omni-backend/link/pyocd/`，随项目分发，不通过 pip 安装，保证版本一致与离线可用。
 
 ## 项目结构
 
@@ -128,35 +128,14 @@ omni-link/
 │   ├── shared/                  # 共享类型定义
 │   └── styles/                  # 全局样式（globals.css）
 │
-├── python/                      # Python 后端
-│   ├── server.py                # FastAPI 入口（版本 0.3.3）
-│   ├── api/                     # REST 路由
-│   │   ├── probes.py            # 探针管理
-│   │   ├── targets.py           # 目标芯片
-│   │   ├── devices.py           # 设备目录
-│   │   ├── flash.py             # Flash 操作
-│   │   ├── files.py             # 文件解析
-│   │   ├── commander.py         # Commander REPL
-│   │   ├── rtt.py               # RTT 会话
-│   │   ├── monitor.py           # Monitor 采样
-│   │   ├── tools.py             # Fault/Map 分析
-│   │   └── system.py            # 系统信息
-│   ├── core/                    # 核心抽象层
-│   │   ├── interface.py         # BackendInterface 抽象基类
-│   │   ├── pyocd_backend.py     # pyOCD 实现
-│   │   ├── commander_backend.py # Commander 会话管理
-│   │   ├── rtt_backend.py       # RTT 会话管理
-│   │   ├── monitor_backend.py   # Monitor 采样管理
-│   │   ├── map_parser.py        # .map 文件解析
-│   │   ├── database.py          # 设备数据库
-│   │   ├── events.py            # WebSocket 事件系统
-│   │   ├── probe_monitor.py     # 探针热插拔监控
-│   │   └── command_examples.py  # Commander 示例命令
-│   ├── pyocd/                   # pyOCD 源码（内置，不通过 pip 安装）
-│   ├── data/                    # 设备信息（device_info.json / devices.db）
-│   ├── flm/                     # Flash 算法文件（.FLM）
-│   ├── build.py                 # PyInstaller 打包脚本
-│   └── requirements.txt
+├── vendor/                      # git submodule（后端与 CLI 都是独立仓库）
+│   ├── omni-backend/            # 后端仓库
+│   │   ├── common/              # 共享：登记表 / health / 优雅关停
+│   │   ├── link/                # 本应用使用的服务（server.py / api/ / core/ / pyocd/ / data/ / flm/）
+│   │   └── bus/                 # 串口/网络/Modbus/USB 服务（OMNI Bus 用）
+│   └── omni-cli/                # OMNI CLI 仓库
+│
+├── python/dist/                 # 后端/CLI 打包产物输出目录（构建生成，不入库）
 │
 ├── samples/                     # 测试固件
 │   ├── GPIO_Toggle.bin

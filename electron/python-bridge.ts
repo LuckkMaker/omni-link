@@ -165,14 +165,43 @@ export class PythonBridge {
     const isDev = !!process.env.ELECTRON_RENDERER_URL
     if (isDev) {
       // __dirname = <project>/out/main or <project>/electron
-      // 向上查找直到找到 python/server.py
+      // 向上查找直到找到后端入口（vendor/omni-backend 子模块优先，兼容旧 python/ 布局）
       let dir = __dirname
       for (let i = 0; i < 5; i++) {
-        if (existsSync(join(dir, 'python', 'server.py'))) return dir
+        if (this.findDevBackendScript(dir) || existsSync(join(dir, 'package.json'))) return dir
         dir = join(dir, '..')
       }
     }
     return process.resourcesPath ?? __dirname
+  }
+
+  /**
+   * 开发态后端入口候选路径（按优先级）：
+   *
+   * 1. `OMNI_BACKEND_DIR`（显式指定后端目录；既接受服务目录 `<dir>/server.py`，
+   *    也接受后端仓库根 `<dir>/link/server.py`）；
+   * 2. 后端仓库子模块：`<repo>/vendor/omni-backend/link/server.py`；
+   * 3. 旧布局兜底：`<repo>/python/server.py`（迁移过渡期保留）。
+   *
+   * 生产态不走这里：直接用 extraResources 里的 `resources/python/omni-backend.exe`。
+   */
+  private devBackendCandidates(root: string): string[] {
+    const candidates: string[] = []
+    const explicit = process.env.OMNI_BACKEND_DIR
+    if (explicit) {
+      candidates.push(join(explicit, 'server.py'))
+      candidates.push(join(explicit, 'link', 'server.py'))
+    }
+    candidates.push(join(root, 'vendor', 'omni-backend', 'link', 'server.py'))
+    candidates.push(join(root, 'python', 'server.py'))
+    return candidates
+  }
+
+  private findDevBackendScript(root: string): string | null {
+    for (const candidate of this.devBackendCandidates(root)) {
+      if (existsSync(candidate)) return candidate
+    }
+    return null
   }
 
   private findPython(): string | null {
@@ -200,8 +229,10 @@ export class PythonBridge {
 
   private findScript(): string | null {
     const root = this.getProjectRoot()
-    const devPath = join(root, 'python', 'server.py')
-    if (existsSync(devPath)) return devPath
+
+    // 开发模式：vendor/omni-backend 子模块里的后端入口（兼容旧 python/ 布局）
+    const devPath = this.findDevBackendScript(root)
+    if (devPath) return devPath
 
     // 生产环境：PyInstaller exe 不需要 script 参数，但 spawn 时需要占位
     // 实际上 exe 本身就是入口，这里返回 null 让调用方处理

@@ -190,16 +190,19 @@ Number Converter 支持十进制、十六进制、二进制实时联动转换，
 ### 安装
 
 ```bash
+# 克隆后先初始化子模块（后端在 vendor/omni-backend，CLI 在 vendor/omni-cli）
+git submodule update --init --recursive
+
 # 安装前端依赖
 npm install
 
 # 创建 Python 虚拟环境并安装依赖
 # Windows
 python -m venv .venv
-.venv\Scripts\pip.exe install -r python/requirements.txt
+.venv\Scripts\pip.exe install -r vendor/omni-backend/link/requirements.txt
 # macOS / Linux
 python3 -m venv .venv
-.venv/bin/pip install -r python/requirements.txt
+.venv/bin/pip install -r vendor/omni-backend/link/requirements.txt
 ```
 
 或使用 npm 脚本一键创建虚拟环境：
@@ -215,7 +218,8 @@ npm run python:install
 npm run dev
 ```
 
-开发模式下 Python 后端使用固定端口 `8765`，Electron 通过 IPC 获取端口后前端自动连接。
+开发模式下 Python 后端端口取 `backend.config.json` 的 `backendPort`（当前 `9001`），
+可用环境变量 `OMNI_BACKEND_PORT` 覆盖；Electron 通过 IPC 获取端口后前端自动连接。
 
 ### 单独运行 Python 后端（调试用）
 
@@ -223,8 +227,8 @@ npm run dev
 # 使用 npm 脚本
 npm run python:dev
 
-# 或直接调用
-.venv\Scripts\python.exe python/server.py --port 8765
+# 或直接调用（不传 --port 时读 link/backend.config.json，当前 9001）
+.venv\Scripts\python.exe vendor/omni-backend/link/server.py --port 8765
 ```
 
 ### 类型检查
@@ -235,11 +239,11 @@ npm run typecheck
 
 ### 端口占用与进程清理
 
-开发模式下 Python 后端固定监听 `8765` 端口。若上次后端进程未正常退出，重新启动会遇到绑定失败（`[Errno 10048]`）。使用以下命令查看并清理占用端口的进程：
+开发模式下 Python 后端监听 `backend.config.json` 里的 `backendPort`（当前 `9001`）。若上次后端进程未正常退出，重新启动会遇到绑定失败（`[Errno 10048]`）。使用以下命令查看并清理占用端口的进程：
 
 ```powershell
-# 1. 查看 8765 端口被哪个进程占用（记录 OwningProcess 列返回的 PID）
-Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue |
+# 1. 查看 9001 端口被哪个进程占用（记录 OwningProcess 列返回的 PID）
+Get-NetTCPConnection -LocalPort 9001 -ErrorAction SilentlyContinue |
     Select-Object State, LocalAddress, LocalPort, OwningProcess
 
 # 2. 查看占用进程的详细信息（确认是否为本项目遗留的 Python 进程）
@@ -250,7 +254,7 @@ Get-Process -Id <PID> -ErrorAction SilentlyContinue |
 Stop-Process -Id <PID> -Force
 
 # 4. 确认端口已释放（无输出即说明已释放）
-Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue
+Get-NetTCPConnection -LocalPort 9001 -ErrorAction SilentlyContinue
 ```
 
 > 提示：`Stop-Process` 后端口可能因 `TIME_WAIT` 状态短暂占用，稍等 1-2 秒再启动即可。若存在多个遗留进程，可重复步骤 1-3 直到步骤 4 无输出。
@@ -290,7 +294,7 @@ npm run package:clean
 
 OMNI Link 采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 LuckkMaker。
 
-内置的 pyOCD 源码采用 [Apache 2.0 许可证](python/pyocd/LICENSE)，Copyright (c) 2006-2026 pyOCD Authors。
+内置的 pyOCD 源码采用 [Apache 2.0 许可证](vendor/omni-backend/link/pyocd/LICENSE)，Copyright (c) 2006-2026 pyOCD Authors。
 
 ## 赞赏
 

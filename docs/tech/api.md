@@ -6,16 +6,16 @@
 
 | 模块 | 前缀 | 文件 | 说明 |
 |------|------|------|------|
-| probes | `/api/probes` | `python/api/probes.py` | 探针管理（列表/连接/断开/刷新） |
-| targets | `/api/targets` | `python/api/targets.py` | 支持的 MCU 型号查询 |
-| devices | `/api/devices` | `python/api/devices.py` | 设备目录（设备数据库） |
-| flash | `/api` | `python/api/flash.py` | Flash 擦除/烧录/校验/回读/复位 |
-| files | `/api/files` | `python/api/files.py` | 固件文件解析/读取/保存 |
-| commander | `/api` | `python/api/commander.py` | Commander REPL 会话与命令执行 |
-| rtt | `/api` | `python/api/rtt.py` | RTT 会话启动/停止/收发 |
-| monitor | `/api` | `python/api/monitor.py` | Monitor 采样启动/停止/变量解析 |
-| system | `/api/system` | `python/api/system.py` | 系统信息（版本、平台） |
-| tools | `/api/tools` | `python/api/tools.py` | 工具集（fault/map 分析） |
+| probes | `/api/probes` | `vendor/omni-backend/link/api/probes.py` | 探针管理（列表/连接/断开/刷新） |
+| targets | `/api/targets` | `vendor/omni-backend/link/api/targets.py` | 支持的 MCU 型号查询 |
+| devices | `/api/devices` | `vendor/omni-backend/link/api/devices.py` | 设备目录（设备数据库） |
+| flash | `/api` | `vendor/omni-backend/link/api/flash.py` | Flash 擦除/烧录/校验/回读/复位 |
+| files | `/api/files` | `vendor/omni-backend/link/api/files.py` | 固件文件解析/读取/保存 |
+| commander | `/api` | `vendor/omni-backend/link/api/commander.py` | Commander REPL 会话与命令执行 |
+| rtt | `/api` | `vendor/omni-backend/link/api/rtt.py` | RTT 会话启动/停止/收发 |
+| monitor | `/api` | `vendor/omni-backend/link/api/monitor.py` | Monitor 采样启动/停止/变量解析 |
+| system | `/api/system` | `vendor/omni-backend/link/api/system.py` | 系统信息（版本、平台） |
+| tools | `/api/tools` | `vendor/omni-backend/link/api/tools.py` | 工具集（fault/map 分析） |
 
 ## REST API
 

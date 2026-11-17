@@ -3,7 +3,7 @@
     OMNI Link 一键打包脚本（Windows）
 .DESCRIPTION
     自动完成三步构建：
-      1. PyInstaller 打包 Python 后端 -> python/dist/omni-backend/
+      1. 调用 vendor/omni-backend 子模块构建 link 后端 -> python/dist/omni-backend/
          并从 vendor/omni-cli 子模块构建 OMNI CLI -> python/dist/omni.exe
       2. electron-vite 构建前端       -> out/
       3. electron-builder 生成安装包   -> release/
@@ -63,6 +63,8 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $CliSubmodule = Join-Path $ProjectRoot "vendor\omni-cli"
 $CliBuildScript = Join-Path $CliSubmodule "scripts\build-exe.ps1"
 $CliReleaseScript = Join-Path $CliSubmodule "scripts\cli-release.ps1"
+$BackendSubmodule = Join-Path $ProjectRoot "vendor\omni-backend"
+$BackendBuildScript = Join-Path $BackendSubmodule "link\build.py"
 
 # CLI 已拆到独立仓库（git submodule）。未初始化时打包会缺 omni.exe，提前拦下。
 if (-not (Test-Path -LiteralPath $CliBuildScript)) {
@@ -83,6 +85,13 @@ if ($CliOnly) {
     if ($RequireSigned) { $cliArgs["RequireSigned"] = $true }
     & $CliReleaseScript @cliArgs
     exit $LASTEXITCODE
+}
+
+# 后端已拆到独立仓库（git submodule vendor/omni-backend）。未初始化时 Step 1 无从构建。
+if (-not $SkipBackend -and -not (Test-Path -LiteralPath $BackendBuildScript)) {
+    Write-Host "ERROR: 未初始化 vendor/omni-backend 子模块（找不到 link/build.py）。" -ForegroundColor Red
+    Write-Host "  请执行: git submodule update --init --recursive" -ForegroundColor Yellow
+    exit 1
 }
 
 # package.json 是 UTF-8 且没有 BOM；Windows PowerShell 5.1 默认按系统 ANSI 码页
@@ -304,10 +313,11 @@ function Find-Python {
     ) | Where-Object { $_ -and (Test-Path $_) }
 
     # 必需的运行时依赖。
-    # 注意：pyocd 是内置源码（python/pyocd/），必须在 python/ 目录下才能 import；
-    # pyusb / hidapi 是 pyOCD 可选 USB 后端，项目实际用 libusb_package，不强制检测。
+    # 注意：pyocd 是内置源码（vendor/omni-backend/link/pyocd/），必须把 link/ 加入
+    # sys.path 才能 import；pyusb / hidapi 是 pyOCD 可选 USB 后端，项目实际用
+    # libusb_package，不强制检测。
     $required = @("fastapi", "uvicorn", "pyocd", "libusb_package", "capstone", "intelhex", "jinja2", "yaml")
-    $pythonDir = (Join-Path $ProjectRoot "python").Replace('\', '\\')
+    $pythonDir = (Join-Path $BackendSubmodule "link").Replace('\', '\\')
 
     foreach ($py in $candidates) {
         $allOk = $true
@@ -331,7 +341,7 @@ function Find-Python {
 
     Write-Host "ERROR: No Python with required dependencies found." -ForegroundColor Red
     Write-Host "  Install dependencies with:" -ForegroundColor Yellow
-    Write-Host "  .\.venv\Scripts\pip.exe install -r python\requirements.txt" -ForegroundColor Yellow
+    Write-Host "  .\.venv\Scripts\pip.exe install -r vendor\omni-backend\link\requirements.txt" -ForegroundColor Yellow
     exit 1
 }
 
@@ -343,7 +353,9 @@ $pyExe = Find-Python
 if (-not $SkipBackend) {
     Write-Host ""
     Write-Host "--- Step 1/3: PyInstaller backend ---" -ForegroundColor Yellow
-    $buildArgs = @("python\build.py")
+    # 后端构建委托给子模块：--out 保证产物仍是 python\dist\omni-backend\
+    # （package.json 的 extraResources 与 NSIS 的 PATH 逻辑因此无需改动）。
+    $buildArgs = @($BackendBuildScript, "--out", "$ProjectRoot\python\dist")
     if ($Clean) { $buildArgs += "--clean" }
     & $pyExe $buildArgs
     if ($LASTEXITCODE -ne 0) {

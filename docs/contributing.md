@@ -34,7 +34,8 @@ npm run dev
 
 - `electron/` — Electron 主进程（窗口管理、Python 子进程）
 - `src/` — React 渲染进程（页面、组件、状态管理）
-- `python/` — Python 后端（FastAPI + pyOCD）
+- `vendor/omni-backend/` — Python 后端（git submodule；本应用用 `link/`，FastAPI + pyOCD）
+- `vendor/omni-cli/` — OMNI CLI（git submodule）
 - `docs/` — 文档（MkDocs 站点）
 
 详细结构见 [技术栈与系统架构](tech/architecture.md)。

@@ -30,7 +30,7 @@ Monitor 页面通过 pyOCD 直连 DAPLink/STLink/JLink 探针，非侵入式（�
 
 ## 优化方案
 
-改动集中在 `python/core/monitor_backend.py` 的**私有实现**（`_read_variables` / `_build_read_groups` / `_pipelined_read`），公开接口签名不变，不影响 Flash / Commander / RTT 等其他页面（详见 [影响面](#影响面)）。
+改动集中在 `vendor/omni-backend/link/core/monitor_backend.py` 的**私有实现**（`_read_variables` / `_build_read_groups` / `_pipelined_read`），公开接口签名不变，不影响 Flash / Commander / RTT 等其他页面（详见 [影响面](#影响面)）。
 
 ### 1. 跨 Block 流水线读取（`_pipelined_read`）
 
@@ -139,8 +139,8 @@ while addr < end:
 
 离线测试（无需硬件，mock AP/DP 层）：
 
-- `python/test_read_groups.py` — 合并/对齐/载荷比/max_bytes 分组算法，全 PASS
-- `python/test_pipelined_read.py` — 流水线成功、异常回退、HID 走串行、失败降级、跨页拆子页、CoreSightTarget（`first_ap`）兼容、缓存复用，全 PASS
+- `vendor/omni-backend/link/tests/test_read_groups.py` — 合并/对齐/载荷比/max_bytes 分组算法，全 PASS
+- `vendor/omni-backend/link/tests/test_pipelined_read.py` — 流水线成功、异常回退、HID 走串行、失败降级、跨页拆子页、CoreSightTarget（`first_ap`）兼容、缓存复用，全 PASS
 
 线上验证要点：
 

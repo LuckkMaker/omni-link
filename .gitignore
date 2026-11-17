@@ -26,14 +26,14 @@ coverage.xml
 
 # ── 构建产物 ─────────────────────────────
 release/
-python/build/
+# 后端/CLI 的 PyInstaller 产物统一输出到这里（python/dist/omni-backend、python/dist/omni.exe），
+# 由 build.ps1 调 vendor/omni-backend/link/build.py --out 生成；源码已不在本仓库。
 python/dist/
 # build/ 是 electron-builder 的 buildResources 目录；installer.nsh 需要随仓库分发，
 # 否则其他机器/CI 打包会报 "cannot find include file"。用 build/* 而非 build/，
 # 才能对该文件做反向忽略（git 无法从被忽略的目录里再包含文件）。
 build/*
 !build/installer.nsh
-python/**/build/
 
 # ── Electron 打包产物 ────────────────────
 *.app
@@ -46,15 +46,11 @@ python/**/build/
 
 # ── PyInstaller 临时文件 ─────────────────
 *.spec.bak
-# build.py 每次打包都会在源码目录重写 spec；它是产物不是源码（build.py 自己会生成）
-python/*.spec
+*.spec
 
-# ── 运行时数据（用户生成，不纳入版本控制）──
-# devices.xml 是种子数据，需要追踪
-python/data/devices.db
-python/data/devices.db-wal
-python/data/devices.db-shm
-python/data/packs/installed_packs.json
+# ── 运行时数据 ───────────────────────────
+# 后端运行时数据（devices.db / 已装 Pack / user-devices.xml）现在落在
+# vendor/omni-backend/link/data/ 或 OMNI_DATA_DIR，由后端仓库自己的 .gitignore 负责。
 
 # ── CMSIS-Pack 文件 ──────────────────────
 *.pack
@@ -74,10 +70,6 @@ certs/
 # ── 日志 ─────────────────────────────────
 *.log
 logs/
-
-# ── CLI 运行时状态（omni backend 常驻记录）──
-# CLI 已拆到 vendor/omni-cli 子模块，运行时状态一律写用户级目录
-# （%LOCALAPPDATA%\omni-link\），不再落在仓库里；这里只保留历史路径的忽略规则。
 
 # ── 临时/备份文件 ────────────────────────
 *.tmp

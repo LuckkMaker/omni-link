@@ -1,3 +1,6 @@
 [submodule "vendor/omni-cli"]
 	path = vendor/omni-cli
 	url = ../omni-cli.git
+[submodule "vendor/omni-backend"]
+	path = vendor/omni-backend
+	url = ../omni-backend.git

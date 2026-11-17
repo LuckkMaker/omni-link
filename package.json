@@ -13,8 +13,8 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest run",
-    "python:dev": "cd python && ..\\.venv\\Scripts\\python.exe server.py",
-    "python:install": "python -m venv .venv && .venv\\Scripts\\pip.exe install -r python/requirements.txt",
+    "python:dev": "cd vendor/omni-backend/link && ..\\..\\..\\.venv\\Scripts\\python.exe server.py",
+    "python:install": "python -m venv .venv && .venv\\Scripts\\pip.exe install -r vendor/omni-backend/link/requirements.txt",
     "package": "powershell -ExecutionPolicy Bypass -File build.ps1",
     "package:clean": "powershell -ExecutionPolicy Bypass -File build.ps1 -Clean"
   },

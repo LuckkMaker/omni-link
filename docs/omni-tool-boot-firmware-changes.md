@@ -57,7 +57,7 @@
 
 #### 问题
 
-上位机的"校验"是 **回读后逐字节比对**（[python/omni_tools/session.py](../python/omni_tools/session.py)），属于**外部验证**。存在两个盲区：
+上位机的"校验"是 **回读后逐字节比对**（[vendor/omni-backend/link/omni_tools/session.py](../vendor/omni-backend/link/omni_tools/session.py)），属于**外部验证**。存在两个盲区：
 
 1. 用串口工具等第三方工具裸刷时，boot 不会做任何检查，`FC103 LEAVE` 直接跳转。
 2. 逐字节比对只能证明"和上位机手里那份一致"，无法证明"这是一份能启动的固件"。
@@ -114,7 +114,7 @@ FC103 LEAVE:
 
 #### 问题
 
-`FC103 ERASE` / `FC101 DOWNLOAD` 目前**不校验地址范围**。上位机侧虽有范围检查（[python/omni_tools/session.py](../python/omni_tools/session.py) 的 `_validate_range`），但：
+`FC103 ERASE` / `FC101 DOWNLOAD` 目前**不校验地址范围**。上位机侧虽有范围检查（[vendor/omni-backend/link/omni_tools/session.py](../vendor/omni-backend/link/omni_tools/session.py) 的 `_validate_range`），但：
 
 - 那只是**上位机的自律**，不构成防护
 - 绕过上位机直接发 Modbus 帧（串口工具 / 脚本）即可擦掉 boot 自己
@@ -305,4 +305,4 @@ G2、G4 工作量小、收益直接，先行合入；G1 涉及镜像格式变更
 | 上位机开发计划 | `omni-tool-plan.md` |
 | app 上位机指令文档 | `omni_tool_app/docs/HOST_COMMANDS.md` |
 | boot IAP 参考实现 | `omni_tool_boot/boot_iap_test.py`、`src/iap_app.c` |
-| 上位机 boot 协议实现 | `python/omni_tools/protocol/boot_iap.py`、`python/omni_tools/session.py` |
+| 上位机 boot 协议实现 | `vendor/omni-backend/link/omni_tools/protocol/boot_iap.py`、`vendor/omni-backend/link/omni_tools/session.py` |

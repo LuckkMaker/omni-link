@@ -43,13 +43,16 @@ OMNI Link 内置了常见的主流 Arm Cortex-M 系列（STM32、GD32、APM32、
 ### 安装依赖
 
 ```bash
+# 克隆后先初始化子模块（后端与 CLI 都是独立仓库）
+git submodule update --init --recursive
+
 # 安装前端依赖
 npm install
 
 # 创建 Python 虚拟环境并安装依赖
 # Windows（使用系统 Python，非 TRAE 内置版本）
 python -m venv .venv
-.venv\Scripts\pip.exe install -r python/requirements.txt
+.venv\Scripts\pip.exe install -r vendor/omni-backend/link/requirements.txt
 ```
 
 或使用 npm 脚本一键创建虚拟环境：
@@ -65,7 +68,8 @@ npm run python:install
 npm run dev
 ```
 
-开发模式下 Python 后端使用固定端口 `8765`，Electron 通过 IPC 获取端口后前端自动连接。
+开发模式下 Python 后端端口取 `backend.config.json` 的 `backendPort`（当前 `9001`），
+可用环境变量 `OMNI_BACKEND_PORT` 覆盖；Electron 通过 IPC 获取端口后前端自动连接。
 
 ### 单独运行 Python 后端（调试用）
 
@@ -74,7 +78,7 @@ npm run dev
 npm run python:dev
 
 # 或直接调用
-.venv\Scripts\python.exe python/server.py --port 8765
+.venv\Scripts\python.exe vendor/omni-backend/link/server.py --port 8765
 ```
 
 ### 类型检查
