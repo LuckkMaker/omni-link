@@ -4,6 +4,7 @@
 .DESCRIPTION
     自动完成三步构建：
       1. PyInstaller 打包 Python 后端 -> python/dist/omni-backend/
+         并从 vendor/omni-cli 子模块构建 OMNI CLI -> python/dist/omni.exe
       2. electron-vite 构建前端       -> out/
       3. electron-builder 生成安装包   -> release/
 
@@ -17,7 +18,8 @@
 .PARAMETER SkipFrontend
     跳过前端构建 + 安装包生成
 .PARAMETER CliOnly
-    只构建并打包 OMNI CLI（portable zip + wheel），不构建后端、前端和完整安装包
+    只构建并打包 OMNI CLI（portable zip + wheel + exe），不构建后端、前端和完整安装包；
+    实际执行 vendor/omni-cli/scripts/cli-release.ps1
 .PARAMETER PfxPath
     代码签名证书（.pfx / .p12）。不填时读取 WIN_CSC_LINK / CSC_LINK 环境变量
 .PARAMETER PfxPassword
@@ -36,8 +38,8 @@
     .\build.ps1
     .\build.ps1 -Python "C:\Python312\python.exe"
     .\build.ps1 -SkipBackend
-    .\build.ps1 -CliOnly
-    .\build.ps1 -CliOnly -PfxPath .\certs\omni.pfx -PfxPassword "******"
+    .\build.ps1 -CliOnly            # 只构建 CLI（委托 vendor/omni-cli 的发布脚本）
+    .\build.ps1 -CliOnly            # 只构建 CLI（委托 vendor/omni-cli 的发布脚本） -PfxPath .\certs\omni.pfx -PfxPassword "******"
     .\build.ps1 -PfxPath .\certs\omni.pfx -PfxPassword "******"
     .\build.ps1 -CertSha1 8F1A2B... -RequireSigned
 #>
@@ -58,8 +60,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$CliSubmodule = Join-Path $ProjectRoot "vendor\omni-cli"
+$CliBuildScript = Join-Path $CliSubmodule "scripts\build-exe.ps1"
+$CliReleaseScript = Join-Path $CliSubmodule "scripts\cli-release.ps1"
 
-# CLI-only：不进入后端/前端/electron-builder 流程，直接交给 cli-release.ps1。
+# CLI 已拆到独立仓库（git submodule）。未初始化时打包会缺 omni.exe，提前拦下。
+if (-not (Test-Path -LiteralPath $CliBuildScript)) {
+    Write-Host "ERROR: 未初始化 vendor/omni-cli 子模块（找不到 scripts/build-exe.ps1）。" -ForegroundColor Red
+    Write-Host "  请执行: git submodule update --init --recursive" -ForegroundColor Yellow
+    exit 1
+}
+
+# CLI-only：不进入后端/前端/electron-builder 流程，直接交给子模块的 cli-release.ps1。
 if ($CliOnly) {
     $cliArgs = @{}
     if ($Clean) { $cliArgs["Clean"] = $true }
@@ -69,7 +81,7 @@ if ($CliOnly) {
     if ($CertSubject) { $cliArgs["CertSubject"] = $CertSubject }
     if ($TimestampServer) { $cliArgs["TimestampServer"] = $TimestampServer }
     if ($RequireSigned) { $cliArgs["RequireSigned"] = $true }
-    & (Join-Path $ProjectRoot "python\scripts\cli-release.ps1") @cliArgs
+    & $CliReleaseScript @cliArgs
     exit $LASTEXITCODE
 }
 
@@ -348,6 +360,15 @@ if (-not $SkipBackend) {
     }
     $backendSizeMB = [math]::Round((Get-Item $backendExe).Length / 1MB, 1)
     Write-Host "[build] Backend exe: $backendExe ($backendSizeMB MB)" -ForegroundColor Green
+
+    # CLI exe 来自子模块（独立仓库维护）：构建后落到 python\dist\omni.exe，
+    # package.json 的 extraResources 与 NSIS 的 PATH 逻辑因此无需改动。
+    Write-Host "--- Step 1b/3: OMNI CLI exe (vendor/omni-cli) ---" -ForegroundColor Yellow
+    & $CliBuildScript -Python $pyExe -OutputDir "$ProjectRoot\python\dist"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: CLI build failed." -ForegroundColor Red
+        exit 1
+    }
 
     # Verify CLI exe exists (随安装包分发，安装后可直接在终端使用 omni)
     $cliExe = "$ProjectRoot\python\dist\omni.exe"

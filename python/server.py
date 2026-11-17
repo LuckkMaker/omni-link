@@ -26,14 +26,16 @@ from core.events import event_manager
 from core.probe_monitor import probe_monitor
 from core.pyocd_backend import backend
 
-# 应用托管的 tools/ 与 CLI 共用同一套解析；源码态缺包时不影响后端启动。
-try:
-    from omni_cli import toolchain
-except Exception:  # pragma: no cover - 仅防御旧打包产物
-    toolchain = None
+# 应用托管的 tools/ 与独立仓库的 OMNI CLI 共用同一套解析逻辑。
+# CLI 已拆到 vendor/omni-cli 子模块，后端不再 import omni_cli（core/toolchain.py 是同源副本）。
+from core import toolchain
 
 # 后端版本号（与前端 package.json 保持一致）
 BACKEND_VERSION = "0.3.1"
+
+# CLI ↔ 后端协议版本（只增不改语义；见 omni-cli/docs/backend-protocol.md）
+PROTOCOL_VERSION = 1
+SERVICE_NAME = "link"
 
 logger = logging.getLogger("omni-link")
 
@@ -71,6 +73,8 @@ def publish_runtime(host: str, port: int) -> None:
             "host": host,
             "port": port,
             "version": BACKEND_VERSION,
+            "service": SERVICE_NAME,
+            "protocol": PROTOCOL_VERSION,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
         tmp = f"{path}.{os.getpid()}.tmp"
@@ -184,6 +188,8 @@ async def health():
         "status": "ok",
         "pid": os.getpid(),
         "ws_connections": event_manager.connection_count,
+        "service": SERVICE_NAME,
+        "protocol": PROTOCOL_VERSION,
     }
 
 
@@ -218,8 +224,7 @@ def _configure_stdio() -> None:
 
 
 def main():
-    if toolchain is not None:
-        toolchain.prepare_environment()
+    toolchain.prepare_environment()
     _configure_stdio()
     parser = argparse.ArgumentParser(description="OMNI Link Backend Server")
     parser.add_argument("--port", type=int, default=None,

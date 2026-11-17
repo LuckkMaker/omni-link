@@ -9,10 +9,9 @@ Usage:
 
 Output:
     dist/omni-backend/omni-backend.exe   # Backend executable (Windows)
-    dist/omni.exe                        # CLI executable (Windows)
 
-The output is placed in dist/ and is consumed by electron-builder
-when building the Electron installer.
+CLI（omni.exe）不再由本脚本构建：它来自 vendor/omni-cli 子模块的
+scripts/build-exe.ps1，由 build.ps1 调用并拷到 dist/omni.exe。
 """
 import argparse
 import os
@@ -31,10 +30,6 @@ BUILD_DIR = BACKEND_DIR / "build"
 
 ENTRY_SCRIPT = BACKEND_DIR / "server.py"
 APP_NAME = "omni-backend"
-
-# CLI 打包（单文件 omni.exe，随安装包分发，实现"装完即用命令行"）
-CLI_ENTRY_SCRIPT = BACKEND_DIR / "omni_cli_main.py"
-CLI_APP_NAME = "omni"
 
 # Required runtime packages that must be importable by the building Python.
 # 注意：pyocd 是内置源码（python/pyocd/），check_package 会把 BACKEND_DIR 加入
@@ -141,13 +136,11 @@ DATA_DIRS = [
 # 再次发版（实机报告 P1-4）。替换字符一旦出现在源码中，运行期无论怎么设置
 # stdout 编码都无法恢复原文，必须在构建前拦下。
 #
-# 排除项：pyocd/ 是内置的第三方源码；dist/、build/ 是打包产物；
-# omni_cli/build/ 是旧 setuptools 的 build/lib 副本。
+# 排除项：pyocd/ 是内置的第三方源码；dist/、build/ 是打包产物。
 ENCODING_CHECK_EXCLUDE_PREFIXES = (
     "pyocd/",
     "dist/",
     "build/",
-    "omni_cli/build/",
 )
 ENCODING_CHECK_EXCLUDE_DIR_NAMES = {"__pycache__"}
 REPLACEMENT_CHAR = "\ufffd"
@@ -204,36 +197,6 @@ def report_source_encoding(root: Path = BACKEND_DIR) -> bool:
             log(f"  ... 其余 {len(problems) - 20} 处省略")
         return False
     log("源码编码检查通过（UTF-8，无 U+FFFD）")
-    return True
-
-
-def verify_cli_help_encoding(exe_path: Path) -> bool:
-    """构建后检查：CLI 帮助输出必须可严格按 UTF-8 解码且不含 U+FFFD。"""
-    if not exe_path.exists():
-        log(f"WARNING: 未找到 CLI 产物 {exe_path}，跳过帮助编码检查")
-        return True
-    try:
-        proc = subprocess.run(
-            [str(exe_path), "backend", "-h"],
-            capture_output=True,
-            timeout=120,
-        )
-    except Exception as e:
-        log(f"WARNING: 运行 {exe_path.name} 失败，跳过帮助编码检查: {e}")
-        return True
-    output = proc.stdout + proc.stderr
-    try:
-        text = output.decode("utf-8")
-    except UnicodeDecodeError as e:
-        log(f"ERROR: CLI 帮助输出不是合法 UTF-8: {e}")
-        return False
-    if REPLACEMENT_CHAR in text:
-        log("ERROR: CLI 帮助输出含 U+FFFD（stdout 未固定为 UTF-8）")
-        return False
-    if "后端" not in text:
-        log("ERROR: CLI 帮助输出缺少预期中文（输出为空或编码异常）")
-        return False
-    log("CLI 帮助编码检查通过（UTF-8，无 U+FFFD）")
     return True
 
 
@@ -296,7 +259,7 @@ def ensure_python(python_exe: str | None, require_packages: bool = True) -> str:
         log(f"ERROR: Python not found at '{py}'")
         sys.exit(1)
 
-    # Check required packages（CLI 只依赖标准库，--cli-only 时跳过）
+    # Check required packages
     if require_packages:
         missing = [pkg for pkg in REQUIRED_PACKAGES if not check_package(py, pkg)]
         if missing:
@@ -327,9 +290,6 @@ def clean():
     spec_file = BACKEND_DIR / f"{APP_NAME}.spec"
     if spec_file.exists():
         spec_file.unlink()
-    cli_spec = BACKEND_DIR / f"{CLI_APP_NAME}.spec"
-    if cli_spec.exists():
-        cli_spec.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -399,44 +359,6 @@ def build(python_exe: str):
         sys.exit(1)
 
 
-def build_cli(python_exe: str):
-    """把 CLI 打成单文件 omni.exe（输出到 dist/omni.exe）。
-
-    单文件便于随安装包分发并直接放进 PATH。调试/烧录命令只依赖标准库；
-    ``omni config`` 额外依赖 kconfiglib，PyInstaller 需要显式收集。
-    """
-    ensure_pyinstaller(python_exe)
-
-    cmd = [
-        python_exe, "-m", "PyInstaller",
-        "--name", CLI_APP_NAME,
-        "--noconfirm",
-        "--console",
-        "--onefile",
-        f"--distpath={DIST_DIR}",
-        f"--workpath={BUILD_DIR}",
-        f"--specpath={BACKEND_DIR}",
-        "--collect-submodules", "omni_cli",
-        "--hidden-import", "kconfiglib",
-        "--paths", str(BACKEND_DIR),
-        str(CLI_ENTRY_SCRIPT),
-    ]
-
-    log("Running PyInstaller (CLI)...")
-    log(f"Command: {' '.join(cmd)}")
-    subprocess.check_call(cmd, cwd=str(BACKEND_DIR))
-
-    exe_path = DIST_DIR / (f"{CLI_APP_NAME}.exe" if sys.platform == "win32" else CLI_APP_NAME)
-    if exe_path.exists():
-        size_mb = exe_path.stat().st_size / (1024 * 1024)
-        log("CLI build successful!")
-        log(f"Executable: {exe_path}")
-        log(f"Size: {size_mb:.1f} MB")
-    else:
-        log(f"ERROR: Expected CLI output not found at {exe_path}")
-        sys.exit(1)
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -450,10 +372,6 @@ def main():
     parser.add_argument(
         "--python", default=None,
         help="Path to Python executable to use (default: current interpreter)",
-    )
-    parser.add_argument(
-        "--cli-only", action="store_true",
-        help="Only build the CLI (dist/omni.exe); skip the omni-backend bundle",
     )
     parser.add_argument(
         "--check-sources", action="store_true",
@@ -470,14 +388,8 @@ def main():
     if args.check_sources:
         return
 
-    py = ensure_python(args.python, require_packages=not args.cli_only)
-    if not args.cli_only:
-        build(py)
-    build_cli(py)
-
-    cli_exe = DIST_DIR / (f"{CLI_APP_NAME}.exe" if sys.platform == "win32" else CLI_APP_NAME)
-    if not verify_cli_help_encoding(cli_exe):
-        sys.exit(1)
+    py = ensure_python(args.python)
+    build(py)
 
 
 if __name__ == "__main__":

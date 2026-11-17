@@ -23,7 +23,6 @@
 !endif
 
 !define OMNI_CLI_DIR "$INSTDIR\resources\python"
-!define OMNI_TOOLCHAIN_EXE "$INSTDIR\resources\toolchain\omni-toolchain.exe"
 
 !macro customInstall
   ReadRegStr $0 HKCU "Environment" "Path"
@@ -38,35 +37,6 @@
     SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
   ${EndIf}
 
-  ; 可选：安装器旁边有离线工具链包时联动安装到共享目录。
-  ; 支持 <setup 目录>\toolchains-offline\、\omni-toolchain-offline\ 或 .zip。
-  StrCpy $2 ""
-  IfFileExists "$EXEDIR\toolchains-offline\tools.json" 0 +2
-    StrCpy $2 "$EXEDIR\toolchains-offline"
-  StrCmp $2 "" 0 omni_toolchain_found
-  IfFileExists "$EXEDIR\toolchain-offline\tools.json" 0 +2
-    StrCpy $2 "$EXEDIR\toolchain-offline"
-  StrCmp $2 "" 0 omni_toolchain_found
-  IfFileExists "$EXEDIR\omni-toolchain-offline\tools.json" 0 +2
-    StrCpy $2 "$EXEDIR\omni-toolchain-offline"
-  StrCmp $2 "" 0 omni_toolchain_found
-  IfFileExists "$EXEDIR\toolchain-offline.zip" 0 +2
-    StrCpy $2 "$EXEDIR\toolchain-offline.zip"
-  StrCmp $2 "" 0 omni_toolchain_found
-  IfFileExists "$EXEDIR\omni-toolchain-offline.zip" 0 +2
-    StrCpy $2 "$EXEDIR\omni-toolchain-offline.zip"
-
-  omni_toolchain_found:
-  IfFileExists "${OMNI_TOOLCHAIN_EXE}" 0 omni_toolchain_skip
-  StrCmp $2 "" omni_toolchain_skip
-    DetailPrint "Installing toolchains from $2 ..."
-    ExecWait '"${OMNI_TOOLCHAIN_EXE}" --offline "$2" --silent --install-dir "$LOCALAPPDATA\OMNI\toolchains"' $3
-    ${If} $3 != 0
-      DetailPrint "Toolchain installer exited with $3"
-      IfSilent omni_toolchain_skip
-      MessageBox MB_ICONEXCLAMATION "工具链安装失败（exit $3）。$\r$\n可稍后手动运行：$\r$\n${OMNI_TOOLCHAIN_EXE} --offline $\"$2$\""
-    ${EndIf}
-  omni_toolchain_skip:
 !macroend
 
 !macro customUnInstall

@@ -34,7 +34,7 @@ src/styles/globals.css 语义色 CSS 变量
 python/server.py       FastAPI 入口
 python/api/            REST / WebSocket 路由
 python/core/           后端抽象层（BackendInterface + pyocd_backend 等）
-python/omni_cli/       omni 命令行工具（commands/ 下按功能拆分）
+vendor/omni-cli/       OMNI CLI 独立仓库（git submodule；包在 omni_cli/，测试在 tests/，脚本在 scripts/）
 python/data/           设备信息与数据库
 python/flm/            Flash 算法文件
 ```
@@ -80,7 +80,11 @@ npm run package:clean       # 清理后重新打包
 - 新增接口：在 `python/api/` 下按模块加路由，并在 `python/server.py` 注册。
 - 硬件能力通过 `core/interface.py` 的抽象层扩展，实现放 `core/`，不要在路由里直接操作 pyOCD 对象。
 - `python/pyocd/` 为内置源码，修改需谨慎，避免破坏与上游版本的兼容性。
-- CLI 子命令放 `python/omni_cli/commands/`，并在 `cli.py` 注册；CLI 与 GUI 共享同一后端进程（通过用户级 `backend.json` 注册表发现端口）。
+- CLI 是独立仓库（`vendor/omni-cli` 子模块）：命令加到该仓库的 `omni_cli/commands/` 并在 `cli.py` 注册，
+  在子模块仓库里提交后再回主仓 bump 子模块指针；不要在本仓库里直接改子模块文件后忘记提交。
+- CLI 与 GUI 共享同一后端进程（用户级 `backend.json` 注册表发现端口）；后端接口新增/变更字段时同步
+  `PROTOCOL_VERSION`（`server.py`）并更新 `vendor/omni-cli/docs/backend-protocol.md`。
+- `python/core/toolchain.py` 与 CLI 仓库的 `omni_cli/toolchain.py` 是同源副本（PATH 注入），改动需两边同步。
 - 后端版本号 `BACKEND_VERSION`（`server.py`）与前端 `package.json` 版本保持同步。
 
 ## UI 设计规则
@@ -113,7 +117,8 @@ npm run package:clean       # 清理后重新打包
 | `docs/tech/api.md` | 后端 REST / WebSocket API |
 | `docs/rule/ui-rules.md` | UI 设计规则（颜色、排版、布局、组件） |
 | `docs/tech/pyocd-reference.md` | pyOCD 命令参考 |
-| `docs/tech/cli-coverage.md` | CLI 命令覆盖情况 |
+| `vendor/omni-cli/docs/cli-coverage.md` | CLI 命令覆盖情况（独立仓库） |
+| `vendor/omni-cli/docs/backend-protocol.md` | CLI ↔ 后端协议（服务发现 / 版本 / 流式游标） |
 | `docs/tech/code-signing.md` | 代码签名流程 |
 | `README.md` | 功能概览与内置芯片支持列表 |
 

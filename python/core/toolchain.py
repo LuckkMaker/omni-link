@@ -1,4 +1,9 @@
-"""工具链发现与 PATH 注入。
+"""工具链发现与 PATH 注入（应用后端侧）。
+
+与 OMNI CLI 仓库 `omni_cli/toolchain.py` 同源：应用后端在启动时也要把
+`tools/` 里的 cmake/ninja/编译器前插到 PATH，供 spawn 出去的构建/转换子进程
+使用。CLI 已拆到独立仓库（vendor/omni-cli 子模块），因此这里保留一份副本，
+两边改动时请同步（逻辑只涉及环境变量与目录探测，漂移成本可控）。
 
 安装包不再自带工具链：cmake / ninja / 编译器都由用户环境提供。
 
@@ -22,6 +27,11 @@ import re
 import shutil
 import sys
 from typing import Optional
+
+# 本文件位于 python/core/，应用仓库根在上一级。
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+PYTHON_DIR = os.path.dirname(_PACKAGE_DIR)
+REPO_ROOT = os.path.dirname(PYTHON_DIR)
 
 TOOLS_ENV = "OMNI_TOOLS_DIR"
 HOME_ENV = "OMNI_TOOLCHAIN_HOME"
@@ -63,9 +73,7 @@ def _install_root() -> str:
         return os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
         )
-    from .settings import PROJECT_ROOT
-
-    return PROJECT_ROOT
+    return os.environ.get("OMNI_APP_DIR") or REPO_ROOT
 
 
 def shared_root() -> str:

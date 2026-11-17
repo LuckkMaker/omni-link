@@ -42,6 +42,9 @@ SmartScreen 看两个信号（[微软文档](https://learn.microsoft.com/zh-cn/w
 - 安装包 `release/OMNI Link-x.y.z-x64-setup.exe`；
 - 应用主程序 `win-unpacked/OMNI Link.exe`；
 - `resources/python/` 下的 `omni.exe` 与 `omni-backend.exe`（`extraResources` 中的 `.exe`）。
+  其中 `omni.exe` 由 `vendor/omni-cli` 子模块（独立仓库）构建，`build.ps1` 在 Step 1b 调用
+  `vendor/omni-cli/scripts/build-exe.ps1` 产出后拷到 `python/dist/omni.exe`；签名仍由 electron-builder
+  按 `extraResources` 统一完成。
 
 ### 方式 A：`.pfx` 证书文件
 

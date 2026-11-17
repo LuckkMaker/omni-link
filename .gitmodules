@@ -1,0 +1,3 @@
+[submodule "vendor/omni-cli"]
+	path = vendor/omni-cli
+	url = ../omni-cli.git
