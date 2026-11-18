@@ -128,14 +128,13 @@ omni-link/
 │   ├── shared/                  # 共享类型定义
 │   └── styles/                  # 全局样式（globals.css）
 │
-├── vendor/                      # git submodule（后端与 CLI 都是独立仓库）
-│   ├── omni-backend/            # 后端仓库
-│   │   ├── common/              # 共享：登记表 / health / 优雅关停
-│   │   ├── link/                # 本应用使用的服务（server.py / api/ / core/ / pyocd/ / data/ / flm/）
-│   │   └── bus/                 # 串口/网络/Modbus/USB 服务（OMNI Bus 用）
-│   └── omni-cli/                # OMNI CLI 仓库
+├── vendor/                      # git submodule（后端是独立仓库）
+│   └── omni-backend/            # 后端仓库
+│       ├── common/              # 共享：登记表 / health / 优雅关停
+│       ├── link/                # 本应用使用的服务（server.py / api/ / core/ / pyocd/ / data/ / flm/）
+│       └── bus/                 # 串口/网络/Modbus/USB 服务（OMNI Bus 用）
 │
-├── python/dist/                 # 后端/CLI 打包产物输出目录（构建生成，不入库）
+├── python/dist/                 # 后端打包产物输出目录（构建生成，不入库）
 │
 ├── samples/                     # 测试固件
 │   ├── GPIO_Toggle.bin

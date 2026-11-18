@@ -37,10 +37,6 @@
         "filter": [
           "**/*"
         ]
-      },
-      {
-        "from": "python/dist/omni.exe",
-        "to": "python/omni.exe"
       }
     ],
     "win": {
@@ -61,8 +57,7 @@
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "OMNI Link",
-      "include": "build/installer.nsh"
+      "shortcutName": "OMNI Link"
     }
   },
   "dependencies": {

@@ -1,13 +1,13 @@
 ---
 name: "omni-cli"
-description: "用 omni CLI（Python 包名 omni_cli）在真实硬件上联调：经本地 HTTP 后端连接探针、烧录/校验/对比/擦除 Flash、抓取 SEGGER RTT 日志、执行 pyOCD Commander 命令、采集 Monitor 变量波形，以及基于 ELF 的源码级调试（断点、寄存器、内存、外设、调用栈）。同时覆盖同一 CLI 的本地工程命令（config/build/boards/modules/toolchain）。适用于实机冒烟测试、RTT 日志断言、运行中目标的寄存器级排查，以及 flash→verify→RTT→断言 的可脚本化 CI 循环。"
+description: "用 omni CLI（omni-cli 0.28.0+）在真实硬件上联调：经本地 HTTP 后端连接探针、烧录/校验/对比/擦除 Flash、抓取 SEGGER RTT 日志、执行 pyOCD Commander 命令、采集 Monitor 变量波形，以及基于 ELF 的源码级调试（断点、寄存器、内存、外设、调用栈）。同时覆盖串口调试（收发/游标续读/后端录制/定时发送）、网络调试（TCP 服务器与客户端、UDP、ICMP ping、TFTP 传文件）和 USB 调试（USBPcap 抓包、描述符解析/校验/生成、CDC/HID/WinUSB 请求、离线 pcap 与真机回归用例），以及本地工程命令（config/build/boards/modules/toolchain）。适用于实机冒烟测试、串口/网络协议对读、RTT 日志断言、USB 枚举/描述符/请求排查、运行中目标的寄存器级排查，以及 flash→verify→RTT→断言 的可脚本化 CI 循环。"
 ---
 
 # OMNI CLI 实机联调
 
 `omni` 把探针、烧录、RTT、Commander、源码级调试和 Monitor 采样统一成命令行，每条命令都带 `--json` 和明确的退出码，因此**实机验证可以写成脚本、放进 CI**。同一二进制还提供 `config` / `build` / `boards` / `modules` / `toolchain` 等本地命令，它们**不需要后端和探针**。
 
-如果你的环境同时装了 `jlink-live-debug` 技能，分工如下：
+和 `.agents/skills/jlink-live-debug/` 的分工：
 
 | 需求 | 用哪个 |
 |------|--------|
@@ -21,47 +21,50 @@ description: "用 omni CLI（Python 包名 omni_cli）在真实硬件上联调�
 
 ## 环境与自检
 
-| 项 | 说明 |
-|----|------|
-| CLI | `omni`（Python 包名 `omni_cli`），版本与 OMNI Link 桌面端/后端同源，以 `omni --version` 为准 |
-| 安装 | 便携版：发布包里的 `install.ps1`（装到 `%LOCALAPPDATA%\Programs\OMNI CLI\bin` 并写入用户 PATH）；wheel：`pip install omni_cli-*.whl`；源码态：在仓库根用 `python -m omni_cli` |
-| Python | 3.9+；本技能的脚本只用标准库，`python` 在 PATH 即可 |
-| 后端 | OMNI Link 桌面端自带的后端，或仓库里的 `python/server.py`；常驻 / `--managed` / `--backend-port` 三种接法 |
-| 探针 | DAPLink 或 SEGGER J-Link；UID 用 `omni probe list` 查 |
-| 目标 | `--target <part>`（如 `stm32f407xg`）；J-Link 还需 `--jlink-device <SEGGER 设备名>` |
-| 固件 | hex / bin / elf 均可；bin 需 `--base-address` |
+| 项 | 本机实测值 |
+|----|-----------|
+| CLI | `omni 0.28.0`（Python 包名 `omni_cli`，独立仓库 `D:\workspace\embedded\omni-cli`） |
+| 安装位置 | wheel：`powershell -File scripts\cli-package.ps1`（在 omni-cli 仓）；源码态用 `python -m omni_cli`（`PYTHONPATH` 指向 omni-cli 仓） |
+| 后端 | 独立仓库 `D:\workspace\embedded\omni-backend`，两个服务：`link`（探针/烧录/RTT/调试）与 `bus`（串口/网络/USB）；源码态 `link/server.py`、`bus/server.py` |
+| 后端接入 | 常驻 `omni backend start [link\|bus]` / `--managed`（临时拉起）/ `--backend-port`（接管已有） |
+| Python | 3.11（技能脚本只用标准库，`python` 在 PATH 即可） |
+| 探针 | SEGGER J-Link Compact PLUS（UID `852001270`）；Geehy CMSIS-DAP（DAPLink，`VID_314B&PID_0101`） |
+| 目标 | STM32F407IG → `--target stm32f407xg`，`--jlink-device STM32F407IG`；APM32F407 → `--target apm32f407xg` |
+| 固件 | `Objects\stm32f407\omni.hex` / `omni.axf`（Keil）或 `build\stm32f407ig\AC6\Debug\`（CMake） |
+| USB 抓包 | USBPcap 1.5.4+（默认 `D:\Program Files\USBPcap`）；`capture start` 需要**管理员终端** |
+| USB 设备 | `examples/usb/usbd_winusb`（C251:0002）、`usbd_hid_custom`（C251:0001）、`usbd_cdc_acm`（C251:0001→COMx） |
 
 ```powershell
 omni --version
 omni backend status     # exit 0=运行中，1=未运行
 omni system info        # 后端/数据库/Python/pyOCD 版本
-omni probe list         # 取探针 UID
-omni probe jlink-devices --search STM32F407    # 示例：按前缀查 SEGGER 设备名
+omni probe list
+omni probe jlink-devices --search STM32F407    # 查 SEGGER 设备名
 omni target info stm32f407xg
 omni toolchain          # cmake/ninja/编译器最终解析来源
 ```
 
 > [!IMPORTANT]
-> `--jlink-device` 是 **SEGGER 数据库里的设备名**，和 CMSIS-Pack 的型号字符串不一定相同（有的芯片恰好同名，换芯片时用 `omni probe jlink-devices --search <前缀>` 查）。
+> `--jlink-device` 是 **SEGGER 数据库里的设备名**，和 CMSIS-Pack 的型号字符串不一定相同（本机 STM32F407 恰好同名，换芯片时用 `omni probe jlink-devices --search <前缀>` 查）。
 > `probe connect` 的 `--target` 是必填项（调试/烧录的芯片型号），与本地命令 `-b/--board`（构建目标板）不是一回事。
 
 ## 最小闭环
 
 ```powershell
-omni backend start
-omni probe connect <probe-uid> --target stm32f407xg --jlink-device STM32F407IG --speed 4000000   # 型号按实际替换
-omni flash program .\app.hex --json
+omni backend start                    # 默认 link 服务
+omni probe connect 852001270 --target stm32f407xg --jlink-device STM32F407IG --speed 4000000
+omni flash program .\Objects\stm32f407\omni.hex --json
 omni rtt start
 omni rtt read --follow --duration 5 --json
 omni rtt stop
-omni probe disconnect <probe-uid>
+omni probe disconnect 852001270
 omni backend stop
 ```
 
-构建后直接烧录（runner 会调用 `omni flash program`，仍需后端；在 omni-emb 工程里执行）：
+构建后直接烧录（runner 会调用 `omni flash program`，仍需后端）：
 
 ```powershell
-omni build -b <board> --project-dir <project> -t flash
+omni build -b stm32f407ig --project-dir examples\basic\template -t flash
 ```
 
 > [!NOTE]
@@ -74,7 +77,7 @@ omni build -b <board> --project-dir <project> -t flash
 
 | 区域 | 常用命令 |
 |------|---------|
-| 后端 | `backend start\|stop\|status`、`system info` |
+| 后端 | `backend start\|stop\|status [link\|bus]`、`backend list`、`system info` |
 | 探针 | `probe list\|status\|connect\|disconnect\|target\|jlink-devices` |
 | 芯片 | `target list --search stm32f4`、`target info <part>` |
 | Pack/设备库 | `pack list\|preview\|import\|remove`、`device list\|info\|summary\|custom\|flm-info` |
@@ -83,6 +86,9 @@ omni build -b <board> --project-dir <project> -t flash
 | Commander | `commander exec <cmd...>`、`commander shell --command "a; b"`、`commander reset\|cancel` |
 | 调试 | `debug status\|halt\|run\|step\|reset\|run-to-cursor`、`elf load\|info`、`src files\|line\|content\|search\|symbol`、`bp add\|list\|del\|enable\|disable\|clear`、`regs`、`mem read\|resolve\|usage`、`stack\|locals`、`disasm`、`functions`、`callgraph`、`hover`、`watch eval\|set`、`periph list\|regs\|nvic\|scb\|systick`、`session list\|save\|load\|del` |
 | Monitor | `monitor status\|elf load\|symbols\|var add\|start\|read\|export` |
+| 串口（bus） | `serial ports\|open\|close\|status\|send\|read\|update`、`serial record start\|stop\|status`、`serial auto-send start\|stop\|update` |
+| 网络（bus） | `net interfaces\|ping`、`net tcp-server start\|stop\|status\|send\|kick\|echo\|auto-send`、`net tcp-client connect\|disconnect\|status\|send\|auto-send`、`net udp start\|stop\|status\|send\|echo\|auto-send`、`net read`、`net tftp server-start\|server-stop\|server-status\|server-files\|get\|put` |
+| USB（bus） | `usb doctor`、`usb capture start\|stop\|status\|transfers\|detail\|devices\|open\|save`、`usb desc parse\|validate\|build\|emit\|template\|from-capture`、`usb winusb list\|info\|open\|control\|read\|write\|pipe\|echo\|close`、`usb hid list\|open\|read\|write\|feature\|close`、`usb cdc list\|open\|send\|read\|break\|close`、`usb test run\|list` |
 | 文件（后端解析） | `file info <bin/hex/elf>` |
 
 **本地类（不需要后端、不需要探针）**：
@@ -96,7 +102,206 @@ omni build -b <board> --project-dir <project> -t flash
 | 工具链 | `toolchain [--json]` |
 | 文件 | `file checksum <file>`（纯本地）、`tool map <file.map>` |
 
-完整参数见仓库内 `python/omni_cli/README.md`，或 `omni <cmd> -h`。
+**服务路由**：命令组自动决定连哪个后端——`serial` / `net` 走 `bus`，其余走 `link`；
+任何叶子命令都能用 `--service link|bus` 覆盖。两个服务是**独立进程、独立登记表**
+（`%LOCALAPPDATA%\omni-link\backend.json` 与 `\omni-bus\backend.json`），互不影响。
+
+完整参数见 `D:\workspace\embedded\omni-cli\README.md`，或 `omni <cmd> -h`。
+
+## 串口与网络（bus 服务）
+
+两类命令都走 `bus` 后端，与 GUI 的串口页/网络页**共用同一个后端实例和同一份接收
+环形缓存**——GUI 抓着的日志，CLI 也能按游标读到；反之亦然。
+
+### 串口
+
+```powershell
+omni serial ports                                    # 枚举（含 VID:PID、厂商）
+omni serial open --port COM73 --baud 460800 --id cdc # 多口并行时各给一个 --id
+omni serial open --port COM14 --baud 460800 --id ch340
+omni serial send --id cdc --text "AT+GMR"            # 文本（默认补 
+，--no-newline 关闭）
+omni serial send --id cdc --hex "DE AD BE EF"        # 十六进制
+omni serial send --id cdc --file .\payload.bin       # 二进制文件
+omni serial read --id ch340 --wait 500 --hex         # 等 500ms 内的新数据
+omni serial read --id ch340 --follow --out rx.bin    # 持续接收并落盘
+omni serial close --id cdc                           # 缓存保留，仍可 read 回看
+```
+
+**三种接收模式的区别**（选错了会白等）：
+
+| 模式 | 语义 | 典型用途 |
+|------|------|---------|
+| `read`（无参） | 读缓冲区里**已有**的数据 | 抓完再看 |
+| `read --wait MS` | 最多等 MS 毫秒**新**数据，首批到达即返回 | 「发一条、收一条」的 AT 命令式交互 |
+| `read --follow` | 轮询直到 `--duration` 或 Ctrl+C | 长时间跟踪日志 |
+
+**游标记忆**：`read` 默认续读上次位置（记录在 `%LOCALAPPDATA%\omni-<svc>\.read_cursor.json`），
+所以「send 后 read」不会重放历史；首次读从最旧数据开始；`--since 0` 强制从头，
+`--since N` 覆盖记录。`rtt` / `serial` / `net` 三个流式命令共用这一行为。
+
+**后端录制 vs 客户端落盘**：
+
+| | `read --out FILE` | `record start --out FILE` |
+|---|---|---|
+| 落盘方 | CLI 进程 | 后端读取线程 |
+| 关掉终端 | 停止 | **继续** |
+| 客户端卡顿 | 可能丢 | 不受影响（与显示解耦） |
+| GUI 可见 | 否 | 是 |
+
+长时间抓包（挂着抓一夜、抓偶发问题）用 `record`；临时抓一段用 `--out` 更省事。
+
+```powershell
+omni serial record start --id cdc --out D:\log\rx.dat
+omni serial record status --id cdc      # 路径 + 已写字节
+omni serial record stop --id cdc        # 本次字节数
+```
+
+### 网络
+
+```powershell
+omni net interfaces                                    # 本机 IPv4
+omni net ping 192.168.1.100 -n 4                       # 时延 min/avg/max + 丢包率
+omni net ping --last                                   # 查最近一次结果（不重新 ping）
+
+# 本机当服务器，等设备连进来
+omni net tcp-server start --port 6000
+omni net tcp-server status                             # 客户端 id / 对端地址 / 收发字节
+omni net tcp-server send --text "hello"                # 广播；--target c1 指定单个
+omni net read --kind tcp-server --peer 192.168.1.101:52036 --hex
+
+# 连设备上的服务器
+omni net tcp-client connect --host 192.168.1.100 --port 6000
+omni net tcp-client send --text "AT" && omni net read --kind tcp-client --wait 500
+
+# UDP（支持广播）
+omni net udp start --port 5000
+omni net udp send --to 192.168.1.255 --port 5000 --hex "FF"
+
+# TFTP：给板子传固件/配置，或从板子取文件
+omni net tftp server-start --root D:\share             # 本机当服务器（板子来取）
+omni net tftp server-files
+omni net tftp get --host 192.168.1.100 --remote fw.bin --local D:\tmp\fw.bin
+omni net tftp put --host 192.168.1.100 --local D:\tmp\cfg.ini --remote cfg.ini
+```
+
+**`net read` 的 `--kind` 必填**（默认 `tcp-client`）：`tcp-server` / `tcp-client` / `udp`
+三者各有独立缓存与游标；TCP Server 多客户端时用 `--peer host:port` 只看其中一个。
+
+**定时循环发送放在后端**（`auto-send`），不是 CLI 前台循环：
+
+```powershell
+omni net tcp-client auto-send start --hex A1B2 --interval 100
+omni net tcp-client auto-send stop     # 返回发送/失败计数
+omni serial auto-send start --id cdc --hex 55AA --interval 100
+omni serial auto-send stop --id cdc
+```
+
+关掉终端仍继续、间隔精度不受客户端调度影响、GUI 同步可见——做心跳/压力测试时
+比 `while` 循环可靠。
+
+## USB（bus 服务）
+
+抓包、描述符、请求、回归测试都在 `omni usb` 下。**发请求有三条通道，能力不同**：
+
+| 通道 | 设备条件 | 能做什么 | 不能做什么 |
+|---|---|---|---|
+| `winusb` | 接口绑定 WinUSB（固件 MS OS 2.0 或 INF） | 任意控制传输、批量/中断收发、pipe 控制、echo | 等时传输；被其它驱动占用时打不开 |
+| `hid` | 系统 HID 驱动（免驱） | Input/Output/Feature 报告 | 任意 SETUP |
+| `cdc` | 系统 `usbser`（免驱） | 数据收发、BREAK、打开时设置 line coding | 任意 SETUP |
+
+### 抓包（USBPcap）
+
+```powershell
+omni usb doctor                                  # 安装/权限/可抓 root hub
+omni usb capture start --devices 1,2             # 管理员；建议先 start 再插拔设备
+omni usb capture transfers --follow              # 实时看 URB（Ctrl+C 结束）
+omni usb capture detail 37                       # SETUP / hex / 解码树
+omni usb capture devices                         # 从描述符重建的设备树
+omni usb capture open --pcap customer.pcap       # 离线分析，不需要 USBPcap/管理员
+omni usb capture save --out session.pcap
+```
+
+### 描述符
+
+```powershell
+omni usb desc parse --hex "80 06 00 01 00 00 12 00"      # Setup 包
+omni usb desc parse --hex "12 01 00 02 00 00 00 40 ..."  # 自动识别设备/配置/字符串/BOS
+omni usb desc template list
+omni usb desc template show cdc-acm --json > cdc.json
+omni usb desc validate --file cdc.json                   # 规则校验，退出码即结果
+omni usb desc build --file cdc.json                      # 生成分节 hex
+omni usb desc emit --file cdc.json --format hex
+omni usb desc from-capture --pcap enum.pcap              # 抓包 → 可编辑文档
+```
+
+### 请求
+
+```powershell
+# WinUSB：枚举 → 打开 → 控制/批量 → echo
+omni usb winusb list                         # 只看绑定 WinUSB 的接口
+omni usb winusb list --all                   # 全部 USB 设备 + 驱动服务（分诊用）
+omni usb winusb open --vid 0xC251 --pid 0x0002
+omni usb winusb control --request 0x06 --value 0x0100 --length 18
+omni usb winusb write --pipe 0x01 --data "01 02 03 04"
+omni usb winusb read  --pipe 0x81 --length 4
+omni usb winusb echo  --out-pipe 0x01 --in-pipe 0x81 --size 64 --count 100
+omni usb winusb echo  --out-pipe 0x01 --in-pipe 0x81 --size 512 --count 5 --pipeline 32
+omni usb winusb pipe  --pipe 0x81 --reset
+
+# HID：报告级
+omni usb hid list --vid 0xC251
+omni usb hid open --vid 0xC251 --pid 0x0001
+omni usb hid write --report-id 1 --data "01 02 03"
+omni usb hid read  --length 64 --count 1 --timeout-ms 500
+omni usb hid feature --get --report-id 2
+
+# CDC：复用串口后端
+omni usb cdc list
+omni usb cdc open --port COM73
+omni usb cdc send --text "hello omni"
+omni usb cdc read --hex --wait 500
+omni usb cdc break --duration-ms 100
+```
+
+`--capture` 可在 `winusb control/echo` 上同时启停 USBPcap，并核对本次请求产生的 URB
+（需要管理员终端）。
+
+### 回归用例
+
+一条用例可以是「离线 pcap 断言」，也可以是「真机动作」，或两者组合：
+
+```json
+{
+  "name": "winusb-echo-smoke",
+  "device": { "channel": "winusb", "vid": "0xC251", "pid": "0x0002", "timeoutMs": 1000 },
+  "steps": [
+    { "open": {} },
+    { "control": { "requestType": "0x80", "request": "0x06", "value": "0x0100", "length": 18 },
+      "expect": { "ok": true, "hexStartsWith": "12 01" } },
+    { "write": { "pipe": "0x01", "data": "01 02 03 04" } },
+    { "read":  { "pipe": "0x81", "length": 4 }, "expect": { "hex": "01 02 03 04" } },
+    { "echo":  { "outPipe": "0x01", "inPipe": "0x81", "size": 64, "count": 20 },
+      "expect": { "mismatches": 0 } },
+    { "close": {} }
+  ]
+}
+```
+
+```powershell
+omni usb test list
+omni usb test run --file winusb-echo-smoke.json --junit report.xml
+omni usb test run --file case.json --keep-going      # 默认失败即停
+```
+
+`device.channel` 取 `winusb` / `hid` / `cdc`；动作支持
+`open/control/write/read/echo/close`，返回值断言支持
+`ok/length/minLength/hex/hexStartsWith/mismatches/bytesWritten`。
+样例在 `omni-backend/docs/examples/usb/`。
+
+> 实测（STM32F407IG）：`usbd_winusb` 的 echo 64B×100 约 100–235 KiB/s；
+> `--pipeline 32` 在 `usbd_winusb` 上会超时（单缓冲缺陷，**这是预期信号**）；
+> `usbd_hid_custom` 可写 64B 报告并读到周期报告；`usbd_cdc_acm` 枚举为 COMx 并回显。
 
 ## 核心技巧
 
@@ -135,12 +340,12 @@ omni build -b <board> --project-dir <project> -t flash
 - 控制块**默认自动检测**；想更快更稳就用 ELF 里的符号直接给地址：
 
   ```powershell
-  omni debug elf load .\app.axf
+  omni debug elf load .\Objects\stm32f407\omni.axf
   omni debug mem resolve "_SEGGER_RTT" --json     # {address, size}
-  omni rtt start --address 0x20010020             # 示例地址，按实际解析结果替换
+  omni rtt start --address 0x20010020
   ```
 
-- **地址会随链接布局变化**。例如把 RAM 盘改成 `.bss.noinit` 后，`_SEGGER_RTT` 从
+- **地址会随链接布局变化**。fatfs 例程把 RAM 盘改成 `.bss.noinit` 后，`_SEGGER_RTT` 从
   `0x20000020` 移到 `0x20010020`；写死地址就会读到旧内容或找不到控制块。
 - 后端维护 64 KiB 上行环形缓存，REST / CLI / WebSocket 共用；`lost` / `truncated` 说明被覆盖。
 - `rtt start` 会清空抓取缓存，但**同一后端进程内 `seq` 单调递增**：`stop` → `start` 后直接 `read` 就是本轮日志，旧会话的 `next_seq` 也能继续当 `--since` 游标。
@@ -170,23 +375,25 @@ omni build -b <board> --project-dir <project> -t flash
 | `reset` | 30 s | `--type hw|sw`，默认复位并运行；`--no-run` 暂停 |
 | `cancel` | 30 s | 取消正在进行的 Flash 操作（长擦除/僵死时的出口） |
 
-- 1 MiB 全片擦除实测 **约 15–16 s**，`program` 约 0.4–2 s（芯片/算法不同差异较大）。
+- 1 MiB 全片擦除实测 **约 15–16 s**，`program` 约 0.4–2 s。
 - 超时只是**客户端等待**，后端线程会继续执行；但同一探针的 Flash 操作是串行的，重复请求立即 409，不会排队。
 - 想“真正冷启动”不能只靠复位：复位保留 RAM（`.bss.noinit`、未初始化变量都还在），要清 RAM 需断电或重新烧录（Flash 算法会占用低端 RAM）。
-- 0.23.x 已包含此前的 Flash 修复（校验前复位、`fill` 导入路径、`erase` 用 `bytes_erased`），不再需要 `--no-verify` 降级兜底。
+- 0.23.0 起已包含此前的 Flash 修复（校验前复位、`fill` 导入路径、`erase` 用 `bytes_erased`），不再需要 `--no-verify` 降级兜底。
+- 0.25.0 起 `rtt read` 默认改为**原始字节直写 stdout**（与 `serial read` 一致）；要文本解码显示用 `--encoding utf-8`。
+- 0.26.0 起流式读取有**游标记忆**；0.27.0 起有 `net tftp` 与各角色 `auto-send`、`serial record`。
 
 > [!IMPORTANT]
 > 除 `program`（默认复位运行）和 `flash reset`（默认运行）外，**所有 Flash 操作结束时目标都停在 paused**：
 > `verify` / `compare` / `blank-check` / `read` / `erase` / `fill`。紧接着抓 RTT 前要 `omni debug run`。
-> `fill` 会擦除涉及的扇区，先确认目标区域不在固件占用范围内（`omni debug mem usage --json` 或 map 文件）。
+> `fill` 会擦除涉及的扇区，别填到固件所在的扇区（本机固件占 `0x08000000–0x08007127`）。
 
 ### 4. 符号与地址：不用再解析 `.map`
 
 ```powershell
-omni debug elf load .\app.axf                           # 后端按 uid 保存会话
-omni debug mem resolve "&g_buf" --json                  # {address: ..., size: ...}
+omni debug elf load .\Objects\stm32f407\omni.axf        # 后端按 uid 保存会话
+omni debug mem resolve "&disk_ram1_storage" --json      # {address: 536870912, size: 65536}
 omni debug hover main --json                            # 函数地址/大小
-omni debug watch eval "obj.field" --json                # 变量值（需目标暂停才可靠）
+omni debug watch eval "fat_fs.fs_type" --json           # 变量值（需目标暂停才可靠）
 omni debug src line --addr 0x0800638E --json            # 地址 → 源文件/行/函数
 omni debug src files --filter app --json
 omni debug src content main.c --start 60 --end 90       # 直接读源码上下文
@@ -240,17 +447,13 @@ Commander 能做的事更多，但有几条硬规则（都是实测踩出来的�
 | `read16 0x20000524+510 2` | ❌ 不支持地址算术，先自己算成 `0x20000722` |
 | `commander exec list` | ⚠️ 这是 pyOCD 的**探针/目标列表**；列命令用 `commander exec help` |
 
-> [!NOTE]
-> 自定义 Flash 算法时注意：FLM 的 `page_size` 会被 pyOCD 当成**最小写入粒度**（STM32H7 常见 1024 字节）。
-> 因此 `write32` 这类单字写入会报 `phrase length is unaligned or too small`，验证算法请用一个整页大小的 bin 走 `load`。
-
 ### 7. Monitor：比逐条读内存快得多的采样
 
 `debug mem read` 每条约 0.7–1.1 s（约 1 Hz），看波形、找跳变经常不够。`monitor` 在后端进程内采样，
 支持 SWD（HSS 非侵入）与 RTT（侵入高速）两种传输，最高默认 1 kHz。
 
 ```powershell
-omni monitor elf load .\app.axf
+omni monitor elf load .\Objects\stm32f407\omni.axf
 omni monitor symbols --filter counter --type object
 omni monitor var add --symbol g_counter
 omni monitor var add --symbol g_buf --index 3          # 数组必须给索引
@@ -271,7 +474,7 @@ omni monitor device run|halt|reset|state
 
 ```powershell
 # 临时挂包：只注册到当前后端进程，不写设备库；backend 重启后失效
-omni probe connect <probe-uid> -t g32f020k8 --pack .\Geehy.G32F020_DFP.0.0.11.pack
+omni probe connect 852001270 -t g32f020k8 --pack .\Geehy.G32F020_DFP.0.0.11.pack
 
 # 持久导入/卸载（与 GUI「设置 → 芯片管理」共用设备库）
 omni pack preview .\Geehy.G32F020_DFP.0.0.11.pack --search g32f020
@@ -347,24 +550,46 @@ try { ... } finally {
 | `--managed` 下挂的临时 Pack 下一步就没了 | 命令结束即关停后端 | 多步操作先 `omni backend start` |
 | `omni config` 报“工程包含多个目标板” | 工程有多个 `boards/<target>` | 加 `-b/--board` |
 | PowerShell 终端里中文乱码 | CLI 管道输出已是 UTF-8，但控制台按 cp936 解码 | 先 `chcp 65001`（或 `[Console]::OutputEncoding=[Text.Encoding]::UTF8`）；脚本用 `subprocess(encoding="utf-8")` |
+| `serial read` 每次都把历史重放一遍 | `--since` 默认 0 = 从最旧数据开始 | 已改为**游标记忆**（默认续读上次位置）；要历史用 `--since 0` |
+| `serial read --wait` 等不到刚发的响应 | 改成「从当前末尾等新数据」后，响应可能比命令启动更快 | 已改为游标记忆，两者兼顾；若仍空，确认 `status` 里 `buffered_bytes` 在涨 |
+| `net read` 报 `session_reset` 警告 | 后端重启后 seq 从 1 重新编号 | 正常；会从最旧数据重读，游标自动纠正 |
+| `net tcp-client connect` 报「已连接」但发不出去 | 旧连接还占着（连的是上一个目标） | 先 `net tcp-client disconnect` 再 connect |
+| 重启后端后串口/网络状态全丢 | 后端进程内的连接/监听不持久化 | 重开后要重新 `serial open` / `net tcp-server start` |
+| TFTP 传输显示成功但文件不对 | 后端把传输做成后台任务，POST 立即返回 | CLI 已改为轮询 `/tftp/client/status` 直到完成再报字节数 |
+| 中文 Windows 下 `ping` 时延恒为空 | 系统 ping 输出是 GBK，后端按 utf-8 解码会吞掉「时间」 | 已修（按系统首选编码解码）；GUI 网络页同样受益 |
+| `omni.exe` 在仓库目录里报 `Could not create temporary directory!` | PyInstaller onefile 在工作区内的解包限制 | 拷到 `%TEMP%` 再运行；打包脚本已改为在 TEMP 里自检 |
+| `npm run package` 在中文系统解析 `.ps1` 失败 | PowerShell 5.1 读无 BOM 的 UTF-8 中文脚本 | 脚本已存为 UTF-8 with BOM |
+| 在技能 `scripts/` 目录里跑 `python -m omni_cli` 静默无输出 | 该目录曾有同名 `omni_cli.py`，遮蔽了真正的 CLI 包 | 辅助模块已改名 `omni_runner.py`；仍建议在别的目录执行 `-m omni_cli` |
+| `usb capture start` 报 `not_elevated` | 抓包驱动要求管理员 | 管理员终端重开；GUI 用“管理员重启” |
+| `usb capture start` 报 `device_busy` | 上次异常退出留下 USBPcapCMD 占用 root hub | 管理员任务管理器结束 `USBPcapCMD.exe`，或重启 |
+| 非管理员直接跑 `USBPcapCMD.exe` | 会启动提权 worker 并锁住 pcap，普通权限杀不掉 | 只通过 `omni usb capture`（管理员终端）调用 |
+| `usb winusb list` 为空但设备管理器里有 | 接口未绑定 WinUSB，或固件 GUID 与命令不一致 | `usb winusb list --all` 看驱动服务；固件补 MS OS 2.0 描述符或用 INF |
+| `usb winusb open` 拒绝访问 | WinUSB 接口独占，被 Keil/厂商工具占着 | 关闭占用进程后重试 |
+| `winusb echo --pipeline 32` 超时 | `usbd_winusb` 单缓冲，发送端等不到 IN 完成 | 预期缺陷（正是回归信号）；换环形缓冲固件或修固件 |
+| HID 打不开 / 读不到报告 | 被系统 HID 驱动独占；或设备本来就没有 IN 报告 | 关闭占用程序；IN 报告需要设备主动上报 |
+| CDC 打开失败 | COM 口被串口助手等工具占用 | 先关闭占用程序 |
+| 想发 WinUSB 等时传输 | WinUSB 不支持等时端点 | 只能抓包观察，或上硬件分析仪 |
 
 ## 打包脚本
 
 | 脚本 | 用途 |
 |------|------|
+| `omni_runner.py`（本技能内） | 三个脚本共用的 CLI 包装：调用子命令、解析 `--json`、剥 ANSI；支持 `OMNI_CLI` / `OMNI_CLI_REPO`（源码态）/ PATH 三种调用方式 |
+| `omni-cli\scripts\cli-package.ps1` | 构建 wheel → 装进 venv → 记录后端目录（装完即用） |
+| `omni-cli\scripts\cli-smoke.ps1` | 全硬件冒烟（connect/read32/blank-check/RTT 一整串） |
+| `omni-backend\scripts\selfcheck.py` | 后端契约自检（起服务 → health → 登记表 → 优雅关停），`--service link\|bus` |
+| `omni-backend\scripts\build.py` | 按服务打 PyInstaller 产物 + `<exe> --help` 自检 |
 | `scripts/omni_hw_smoke.py` | 一条命令跑完：后端→探针→（可选擦除）→烧录→校验→恢复运行→（可选 ELF）→RTT 抓取→正则断言→清理；失败返回非 0 |
 | `scripts/omni_rtt_assert.py` | 只做 RTT：stop→start 开新会话→采样→断言→可选落盘；适合反复验证运行中的固件 |
 | `scripts/omni_reg_watch.py` | 轮询一个寄存器/符号并按变化打印（`--symbol` 可自动解析 ELF 符号） |
 | `scripts/omni_cli.py` | 三个脚本共用的薄封装：调 `omni`、解析 `--json`、剥 ANSI、兼容旧版警告 |
 
-在仓库根执行（路径按你的 skill 位置调整）：
-
 ```powershell
 # 完整冒烟 + 两条日志断言（--expect 可重复）
 python .agents\skills\omni-cli\scripts\omni_hw_smoke.py `
-    --firmware .\app.hex `
+    --firmware .\examples\fatfs\fatfs_ram_disk\Objects\stm32f407\omni.hex `
     --jlink-device STM32F407IG `
-    --elf .\app.axf `
+    --elf .\examples\fatfs\fatfs_ram_disk\Objects\stm32f407\omni.axf `
     --expect "read from 6" --expect "free: \d+ clusters"
 
 # 正则写进文件维护
@@ -382,7 +607,7 @@ python .agents\skills\omni-cli\scripts\omni_reg_watch.py --addr 0x40021014 --sec
 环境变量 `OMNI_CLI` 指定路径。`omni_hw_smoke.py` 在 `verify` 之后会自动 `debug run`，
 因为校验结束会暂停目标（否则后续 RTT 采样拿不到新日志）。
 
-## 实战配方：FatFS RAM 盘（以 omni-emb 例程为例）
+## 实战配方：fatfs RAM 盘（2026-10-20 实机）
 
 ```powershell
 # 1) 烧录并抓首启日志
@@ -406,15 +631,20 @@ omni debug periph regs GPIOE --filter ODR --json   # bit6 在 0x40/0x00 间跳�
 ```
 
 预期：首次 `mkfs: 0` / `mkdir: 0`；复位后无 `mkfs`、`mkdir: 8`（`FR_EXIST`）；
-`find` 命中 `hello fatfs\n`；`GPIOE->ODR` 的 bit6 在 `0x40`/`0x00` 之间跳变（LED 在跑）。
+`find` 在 `0x20001324` 命中 `hello fatfs\n`；`GPIOE->ODR` 的 bit6 在 `0x40`/`0x00` 之间跳变（LED 在跑）。
 
 ## 相关
 
-- `python/omni_cli/README.md` — CLI 完整命令参考与版本记录（本仓库）
-- `docs/tech/cli-coverage.md` — CLI 命令覆盖情况（本仓库）
-- `docs/tech/api.md` — 后端 REST / WebSocket API（本仓库）
-- `README.md` — OMNI Link 桌面端功能与安装
-- `jlink-live-debug` 技能 — 需要 µs 级采样/寄存器级 A/B 时的 pylink 直连方案
-- omni-emb 仓库 — 例程与板级工程（`omni config` / `omni build` 的数据来源）
+- `D:\workspace\embedded\omni-cli\README.md` — CLI 完整命令参考与版本记录
+- `D:\workspace\embedded\omni-backend\docs\protocol.md` — CLI ↔ 后端协议（服务发现 / 版本 / 流式游标）
+- `D:\workspace\embedded\omni-backend\docs\usb-plan.md` — USB 能力里程碑、真机验证记录与用例格式
+- `D:\workspace\embedded\omni-backend\docs\usb-raw-access.md` — 任意设备原始访问（UsbDk/自研驱动）的论证
+- `D:\workspace\embedded\omni-backend\docs\examples\usb\` — 可直接运行的 USB 回归用例
+- `D:\workspace\embedded\omni-backend\docs\migration.md` — 后端独立化过程与取舍
+- `D:\workspace\embedded\omni-link\README.md` — OMNI Link 桌面端功能与安装
+- `D:\workspace\embedded\omni-bus\README.md` — OMNI Bus 桌面端（串口/网络/USB 页面）
+- `.agents/skills/jlink-live-debug/SKILL.md` — 需要 µs 级采样/寄存器级 A/B 时的直连方案
+- `examples/fatfs/fatfs_ram_disk/` — 本技能实测所用的例程（RTT + RAM 盘 + `.bss.noinit`）
 
-技能脚本只用 Python 标准库做 `subprocess` + `json` 的薄封装（零第三方依赖）；需要跨平台或写 CI 时优先走 Python 版本。
+两个技能都用 Python 3.11：omni 侧只做 `subprocess` + `json` 的薄封装（零第三方依赖），
+jlink 侧直接操作 `pylink-square`；需要跨平台或写 CI 时优先走 Python 版本。

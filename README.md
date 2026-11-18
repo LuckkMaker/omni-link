@@ -184,13 +184,14 @@ Number Converter 支持十进制、十六进制、二进制实时联动转换，
 - **DAPLink 仿真器**（CMSIS-DAP v1 或 v2）
 - **目标 MCU 开发板**（建议 STM32 系列用于测试）
 - Windows 10 或更高版本
+- **OMNI CLI（可选）**：终端/脚本/CI 使用 `omni` 时需要，安装包**不再内置**，请单独安装
 
 ## 快速开始
 
 ### 安装
 
 ```bash
-# 克隆后先初始化子模块（后端在 vendor/omni-backend，CLI 在 vendor/omni-cli）
+# 克隆后先初始化子模块（后端在 vendor/omni-backend）
 git submodule update --init --recursive
 
 # 安装前端依赖
