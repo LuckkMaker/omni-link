@@ -1,5 +1,8 @@
-import { useCallback, useState } from 'react'
-import { Eraser, Trash2, Download, Keyboard, MessageSquare, FileDown, ListChecks, FileText, Play, Pause, RotateCcw } from 'lucide-react'
+import { useCallback, useRef, useState } from 'react'
+import {
+  Eraser, Trash2, Download, Keyboard, MessageSquare, FileDown, ListChecks,
+  Play, Pause, RotateCcw, Square, Loader2, ScanSearch, MoreHorizontal,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -10,11 +13,21 @@ import {
   SelectContent,
   SelectItem,
 } from '@/components/ui/select'
-import { useRttStore } from '@/stores/rtt.store'
+import { useRttStore, type RttScanMode } from '@/stores/rtt.store'
+import { useNotificationStore } from '@/stores/notification.store'
+import { rttService } from '@/services/rtt.service'
 import { CHECKSUM_OPTIONS, type ChecksumType } from '@/utils/checksum'
 import { cn } from '@/lib/utils'
 import { SaveFormatDialog } from './SaveFormatDialog'
 import { SendFileButton } from './SendFileButton'
+import { ScanSettingsDialog } from './ScanSettingsDialog'
+
+/** 扫描模式在会话控制行的简短标签 */
+const SCAN_MODE_LABEL: Record<RttScanMode, string> = {
+  auto: '自动检测',
+  address: '指定地址',
+  range: '地址范围',
+}
 
 /** 校验起始字节选项（UI 为 1-based 显示，值为 0-based 内部索引） */
 const CHECKSUM_START_OPTIONS = Array.from({ length: 8 }, (_, i) => ({
@@ -104,9 +117,12 @@ function ConfigSubRow({
 
 export function ConfigPanel({ uid, connected, terminalRef, onOpenMultiString, onToggleDevice, onReset, coreState }: ConfigPanelProps) {
   const [showSaveDialog, setShowSaveDialog] = useState(false)
+  const [showScanDialog, setShowScanDialog] = useState(false)
 
   const {
     running,
+    starting,
+    scanMode,
     displayMode,
     inputMode,
     localEcho,
@@ -205,11 +221,176 @@ export function ConfigPanel({ uid, connected, terminalRef, onOpenMultiString, on
     return useRttStore.getState().selectedDownChannel
   }, [activeTabId])
 
+  // 启停操作序号：启动请求可能在 Stop 之后才返回（后端扫描较慢时尤其明显）。
+  // 用序号把"迟到的结果"丢掉，避免已停止后又弹"启动成功"、或把 running 置回 true。
+  const opSeqRef = useRef(0)
+
+  const handleStart = useCallback(async () => {
+    if (!uid) return
+    const seq = ++opSeqRef.current
+    const {
+      setStarting,
+      setError,
+      setChannels,
+      setRunning,
+      setSelectedUpChannel,
+      setSelectedDownChannel,
+      selectedUpChannel,
+      selectedDownChannel,
+      scanMode: mode,
+      scanAddress,
+      scanSize,
+    } = useRttStore.getState()
+    setStarting(true)
+    setError(null)
+    // 整合"启动中"与"已完成"为同一条通知：先以 progress 显示，完成后 update 为 success/error
+    const notifId = useNotificationStore.getState().push({
+      type: 'progress',
+      title: 'RTT 会话启动中',
+      message: '正在与下位机建立 RTT 连接...',
+    })
+    try {
+      const result = await rttService.start(uid, {
+        up_channel: selectedUpChannel,
+        down_channel: selectedDownChannel,
+        // 自动检测不传 address/size；指定地址只传 address；地址范围两者都传
+        ...(mode === 'auto' ? {} : { address: scanAddress }),
+        ...(mode === 'range' ? { size: scanSize } : {}),
+      })
+      // 期间用户点了停止/又发起新的启动：这次结果已过期，不能改 UI 状态，
+      // 也要把这条 progress 通知收掉（否则会永远转圈）。
+      if (seq !== opSeqRef.current) {
+        useNotificationStore.getState().update(notifId, {
+          type: 'info',
+          title: 'RTT 启动结果已忽略',
+          message: '启动期间会话状态已变化',
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
+        return
+      }
+      if (result.success) {
+        setChannels(result.up_channels, result.down_channels)
+        setRunning(true)
+        setSelectedUpChannel(result.up_channel)
+        setSelectedDownChannel(result.down_channel)
+        useRttStore.getState().resetTabs()
+        useNotificationStore.getState().update(notifId, {
+          type: 'success',
+          title: 'RTT 会话已启动',
+          message: `Up: Channel ${result.up_channel}, Down: Channel ${result.down_channel}`,
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
+      } else {
+        setError(result.error || '启动失败')
+        useNotificationStore.getState().update(notifId, {
+          type: 'error',
+          title: 'RTT 启动失败',
+          message: result.error || '未知错误',
+          autoClose: true,
+          autoCloseDelay: 5000,
+        })
+      }
+    } catch (e) {
+      if (seq !== opSeqRef.current) {
+        useNotificationStore.getState().update(notifId, {
+          type: 'info',
+          title: 'RTT 启动结果已忽略',
+          message: '启动期间会话状态已变化',
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
+        return
+      }
+      // 从 axios 错误响应中提取后端 HTTPException 的 detail 字段
+      const axiosErr = e as { response?: { data?: { detail?: string } }; message?: string }
+      const msg = axiosErr.response?.data?.detail ?? (e instanceof Error ? e.message : String(e))
+      setError(msg)
+      useNotificationStore.getState().update(notifId, {
+        type: 'error',
+        title: 'RTT 启动失败',
+        message: msg,
+        autoClose: true,
+        autoCloseDelay: 8000,
+      })
+    } finally {
+      if (seq === opSeqRef.current) setStarting(false)
+    }
+  }, [uid])
+
+  const handleStop = useCallback(async () => {
+    if (!uid) return
+    // 让仍在返回途中的启动结果失效（后端也会取消后台启动流程）
+    opSeqRef.current += 1
+    const { setRunning, setStarting, reset } = useRttStore.getState()
+    setStarting(false)
+    try { await rttService.stop(uid) } catch { /* 忽略 */ }
+    setRunning(false)
+    reset()
+    useNotificationStore.getState().push({
+      type: 'info',
+      title: 'RTT 会话已停止',
+    })
+  }, [uid])
+
+  const canStart = !!uid && connected && !running && !starting
+
   const dataSize = activeTab?.bufferSize ?? 0
 
   return (
     <div className="flex flex-col overflow-y-auto text-xs">
-      {/* ① 目标设备控制 */}
+      {/* ① 会话控制：左侧启停按钮，右侧控制块扫描模式（"更多"展开设置） */}
+      <div className="border-b border-border last:border-b-0">
+        <div className="px-2 py-1.5">
+          <span className="text-xs font-medium text-muted-foreground">会话控制</span>
+        </div>
+        <div className="p-2 pt-0">
+          {/* 与下方"目标设备控制"、"清屏/清空"保持同一列宽（50/50），跨区域对齐 */}
+          <div className="grid grid-cols-2 gap-1.5">
+            {running ? (
+              <Button
+                onClick={handleStop}
+                variant="destructive"
+                size="sm"
+                className="h-7 gap-1 text-[11px]"
+                title="停止 RTT 会话"
+              >
+                <Square className="size-3" />
+                停止
+              </Button>
+            ) : (
+              <Button
+                onClick={handleStart}
+                disabled={!canStart}
+                size="sm"
+                className="h-7 gap-1 text-[11px]"
+                title={connected ? '启动 RTT 会话' : '请先连接仿真器'}
+              >
+                {starting ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Play className="size-3" />
+                )}
+                {starting ? '启动中...' : '启动'}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowScanDialog(true)}
+              className="h-7 gap-1 px-2 text-[11px] text-muted-foreground"
+              title="RTT 控制块扫描设置（自动检测 / 指定地址 / 地址范围）"
+            >
+              <ScanSearch className="size-3.5" />
+              <span>{SCAN_MODE_LABEL[scanMode]}</span>
+              <MoreHorizontal className="size-3.5 opacity-60" />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* ② 目标设备控制 */}
       <div className="border-b border-border last:border-b-0">
         <div className="px-2 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">目标设备控制</span>
@@ -217,37 +398,36 @@ export function ConfigPanel({ uid, connected, terminalRef, onOpenMultiString, on
         <div className="space-y-1.5 p-2 pt-0">
           {/* [Run/Halt] [Reset]：直接操作 CPU 内核，与 RTT 轮询独立 */}
           <div className="flex gap-1.5">
-            <button
+            <Button
+              variant="outline"
+              size="sm"
               className={cn(
-                'flex h-7 flex-1 items-center justify-center gap-1 rounded border text-[11px] font-medium transition-colors',
+                'h-7 flex-1 gap-1 text-[11px]',
                 coreState === 'running'
-                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20'
-                  : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20',
-                !connected && 'opacity-40 cursor-not-allowed',
+                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 hover:text-amber-600'
+                  : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 hover:text-emerald-600',
               )}
               onClick={onToggleDevice}
               disabled={!connected}
               title="Run/Halt 目标内核（不影响 RTT 轮询）"
             >
               {coreState === 'running' ? <><Pause className="size-3" /> Halt</> : <><Play className="size-3" /> Run</>}
-            </button>
-            <button
-              className={cn(
-                'flex h-7 flex-1 items-center justify-center gap-1 rounded border border-border text-[11px] font-medium transition-colors',
-                'text-muted-foreground hover:bg-muted/30 hover:text-foreground',
-                !connected && 'opacity-40 cursor-not-allowed',
-              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 flex-1 gap-1 text-[11px] text-muted-foreground"
               onClick={onReset}
               disabled={!connected}
               title="复位目标芯片并重新初始化 RTT 控制块"
             >
               <RotateCcw className="size-3" /> Reset
-            </button>
+            </Button>
           </div>
         </div>
       </div>
 
-      {/* ② 接收配置 */}
+      {/* ③ 接收配置 */}
       <div className="border-b border-border last:border-b-0">
         <div className="px-2 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">接收配置</span>
@@ -321,7 +501,7 @@ export function ConfigPanel({ uid, connected, terminalRef, onOpenMultiString, on
         </div>
       </div>
 
-      {/* ③ 发送配置 */}
+      {/* ④ 发送配置 */}
       <div className="border-b border-border last:border-b-0">
         <div className="px-2 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">发送配置</span>
@@ -442,6 +622,7 @@ export function ConfigPanel({ uid, connected, terminalRef, onOpenMultiString, on
       </div>
 
       <SaveFormatDialog open={showSaveDialog} onOpenChange={setShowSaveDialog} onConfirm={handleSave} dataSize={dataSize} />
+      <ScanSettingsDialog open={showScanDialog} onOpenChange={setShowScanDialog} />
     </div>
   )
 }

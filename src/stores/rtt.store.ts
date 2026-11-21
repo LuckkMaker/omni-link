@@ -8,6 +8,9 @@ export type DisplayMode = 'text' | 'hex'
 /** RTT 输入模式：bar=InputBar 发送，terminal=终端直接输入（支持 Tab/方向键/Ctrl 组合键等） */
 export type InputMode = 'bar' | 'terminal'
 
+/** RTT 控制块扫描模式：auto=自动检测，address=指定控制块地址，range=指定地址范围 */
+export type RttScanMode = 'auto' | 'address' | 'range'
+
 /** Tab 模式 */
 export type TabMode = 'all' | 'single'
 
@@ -70,6 +73,19 @@ const SEND_CHECKSUM_TYPE_KEY = 'rtt:sendChecksumType'
 const SEND_CHECKSUM_START_KEY = 'rtt:sendChecksumStart'
 const SEND_CHECKSUM_END_KEY = 'rtt:sendChecksumEnd'
 const MULTI_STRINGS_KEY = 'rtt:multiStrings'
+
+// ── 控制块扫描模式持久化 ──────────────────────────
+const SCAN_MODE_KEY = 'rtt:scanMode'
+const SCAN_ADDRESS_KEY = 'rtt:scanAddress'
+const SCAN_SIZE_KEY = 'rtt:scanSize'
+
+function loadScanMode(): RttScanMode {
+  try {
+    const v = localStorage.getItem(SCAN_MODE_KEY)
+    if (v === 'auto' || v === 'address' || v === 'range') return v
+  } catch { /* ignore */ }
+  return 'auto'
+}
 
 function loadInputMode(): InputMode {
   try {
@@ -160,6 +176,14 @@ interface RttState {
   /** 是否自动换行 */
   autoWrap: boolean
 
+  // ── 控制块扫描 ──────────────────────────
+  /** 控制块扫描模式 */
+  scanMode: RttScanMode
+  /** 指定地址（address/range 模式生效） */
+  scanAddress: number
+  /** 扫描范围大小（range 模式生效） */
+  scanSize: number
+
   // ── 发送配置 ──────────────────────────
   /** hex 发送模式 */
   sendHex: boolean
@@ -212,6 +236,12 @@ interface RttState {
   setInputMode: (mode: InputMode) => void
   setLocalEcho: (on: boolean) => void
   setAutoWrap: (autoWrap: boolean) => void
+
+  // 控制块扫描 setter
+  setScanMode: (mode: RttScanMode) => void
+  setScanAddress: (address: number) => void
+  setScanSize: (size: number) => void
+
   addLog: (log: LogEvent) => void
   clearLogs: () => void
   reset: () => void
@@ -279,6 +309,11 @@ export const useRttStore = create<RttState>((set, get) => ({
   localEcho: loadLocalEcho(),
   autoWrap: true,
 
+  // 控制块扫描（持久化）
+  scanMode: loadScanMode(),
+  scanAddress: loadNum(SCAN_ADDRESS_KEY, 0x20000000),
+  scanSize: loadNum(SCAN_SIZE_KEY, 0x4000),
+
   // 发送配置初始值（持久化）
   sendHex: loadBool(SEND_HEX_KEY, false),
   sendNewline: loadBool(SEND_NEWLINE_KEY, true),
@@ -320,6 +355,22 @@ export const useRttStore = create<RttState>((set, get) => ({
     set({ localEcho: on })
   },
   setAutoWrap: (autoWrap) => set({ autoWrap }),
+
+  // 控制块扫描 setter（带持久化）
+  setScanMode: (mode) => {
+    try { localStorage.setItem(SCAN_MODE_KEY, mode) } catch { /* ignore */ }
+    set({ scanMode: mode })
+  },
+  setScanAddress: (address) => {
+    const v = Math.max(0, Math.floor(address))
+    try { localStorage.setItem(SCAN_ADDRESS_KEY, String(v)) } catch { /* ignore */ }
+    set({ scanAddress: v })
+  },
+  setScanSize: (size) => {
+    const v = Math.max(1, Math.floor(size))
+    try { localStorage.setItem(SCAN_SIZE_KEY, String(v)) } catch { /* ignore */ }
+    set({ scanSize: v })
+  },
 
   // 发送配置 setter（带持久化）
   setSendHex: (on) => {
