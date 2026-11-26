@@ -1,5 +1,5 @@
 import { api } from './api'
-import type { FlashResult } from '@shared/types'
+import type { FlashEraseMode, FlashResult } from '@shared/types'
 
 /** 擦除 Flash */
 export async function eraseFlash(
@@ -24,7 +24,8 @@ export async function programFlash(
   verify = true,
   reset = true,
   baseAddress?: number,
-  data?: string
+  data?: string,
+  erase: FlashEraseMode = 'sector'
 ): Promise<FlashResult> {
   const client = await api()
   const { data: result } = await client.post(`/api/probes/${uid}/flash/program`, {
@@ -33,6 +34,7 @@ export async function programFlash(
     verify,
     reset,
     base_address: baseAddress,
+    erase,
   }, { timeout: 0 })
   return result as FlashResult
 }

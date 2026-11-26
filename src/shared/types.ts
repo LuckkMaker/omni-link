@@ -135,6 +135,9 @@ export interface DeviceRamRegion {
   is_default: boolean
 }
 
+/** 烧录时的 Flash 擦除模式：sector 只擦镜像覆盖的扇区，chip 整片擦除 */
+export type FlashEraseMode = 'sector' | 'chip'
+
 /** Flash 操作结果 */
 export interface FlashResult {
   success: boolean
@@ -147,6 +150,12 @@ export interface FlashResult {
   /** 本次操作前是否自动停止了 RTT 会话 */
   rtt_stopped?: boolean
   duration_ms: number
+  /** program 擦除阶段耗时（毫秒，缺省表示该阶段未执行） */
+  erase_ms?: number
+  /** program 写入阶段耗时（毫秒） */
+  program_ms?: number
+  /** program 校验阶段耗时（毫秒，未校验时缺省） */
+  verify_ms?: number
   error?: string | null
 }
 

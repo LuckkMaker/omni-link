@@ -6,6 +6,7 @@ import { CompareView } from './CompareView'
 import { TabBar } from './TabBar'
 import { useFlashStore } from '@/stores/flash.store'
 import { useProbeStore } from '@/stores/probe.store'
+import type { FlashEraseMode } from '@shared/types'
 
 function formatSize(bytes: number): string {
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -83,9 +84,17 @@ export function FilePanel() {
 
             {/* 烧录选项 */}
             <div className="flex items-center gap-2 text-xs">
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input type="checkbox" checked={activeTab.eraseBefore} onChange={(e) => setTabOption(activeTab.id, 'eraseBefore', e.target.checked)} className="size-3 rounded border-border accent-primary" />
+              <label className="flex items-center gap-1">
                 <span>擦除</span>
+                <select
+                  value={activeTab.eraseMode}
+                  onChange={(e) => setTabOption(activeTab.id, 'eraseMode', e.target.value as FlashEraseMode)}
+                  className="h-5 rounded border border-border bg-background px-1 text-xs"
+                  title="扇区：只擦除镜像覆盖的扇区；整片：烧录前擦除整片 Flash"
+                >
+                  <option value="sector">扇区</option>
+                  <option value="chip">整片</option>
+                </select>
               </label>
               <label className="flex items-center gap-1 cursor-pointer">
                 <input type="checkbox" checked={activeTab.verifyAfter} onChange={(e) => setTabOption(activeTab.id, 'verifyAfter', e.target.checked)} className="size-3 rounded border-border accent-primary" />

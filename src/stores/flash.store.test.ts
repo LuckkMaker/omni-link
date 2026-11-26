@@ -25,7 +25,7 @@ function fileTab(baseAddress: number, values: number[]): FlashTab {
     data: base64(values),
     size: values.length,
     loading: false,
-    eraseBefore: true,
+    eraseMode: 'sector',
     verifyAfter: true,
     resetAfter: false,
   }

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { FirmwareFileInfo, FlashProgressEvent, LogEvent, FlashResult } from '@shared/types'
+import type { FirmwareFileInfo, FlashEraseMode, FlashProgressEvent, LogEvent, FlashResult } from '@shared/types'
 import * as flashService from '@/services/flash.service'
 import { parseFile, readFile, statFile } from '@/services/file.service'
 import { useProbeStore } from './probe.store'
@@ -25,7 +25,7 @@ export interface FlashTab {
   format?: string
   loading: boolean
   // 烧录选项（每个 tab 独立保存，删除 tab 时自动移除）
-  eraseBefore: boolean
+  eraseMode: FlashEraseMode
   verifyAfter: boolean
   resetAfter: boolean
   // HexViewer 状态（按 tab 持久化，切换 tab 后保留）
@@ -68,6 +68,15 @@ function formatHex(addr: number): string {
 function getFileName(path: string): string {
   const parts = path.replace(/\\/g, '/').split('/')
   return parts[parts.length - 1] || path
+}
+
+/** program 阶段耗时（后端只返回实际执行的阶段） */
+function describeStages(r: FlashResult): string {
+  const parts: string[] = []
+  if (r.erase_ms) parts.push(`擦除 ${(r.erase_ms / 1000).toFixed(2)}s`)
+  if (r.program_ms) parts.push(`编程 ${(r.program_ms / 1000).toFixed(2)}s`)
+  if (r.verify_ms) parts.push(`校验 ${(r.verify_ms / 1000).toFixed(2)}s`)
+  return parts.join(' / ')
 }
 
 /** 将二进制数据转换为 Intel HEX 格式字符串 */
@@ -185,7 +194,11 @@ interface FlashStore {
   /** 与参考文件比较；startAddress 为比较起始地址（.bin 按该地址加载），size 限定比较长度 */
   doCompare: (filePath: string, options?: { startAddress?: number; size?: number }) => Promise<void>
 
-  setTabOption: (tabId: string, key: 'eraseBefore' | 'verifyAfter' | 'resetAfter', value: boolean) => void
+  setTabOption: <K extends 'eraseMode' | 'verifyAfter' | 'resetAfter'>(
+    tabId: string,
+    key: K,
+    value: FlashTab[K]
+  ) => void
 
   // ── WebSocket 事件 ────────────────────
   onProgress: (data: FlashProgressEvent) => void
@@ -198,7 +211,7 @@ interface FlashStore {
 export const useFlashStore = create<FlashStore>((set, get) => ({
   // ── 初始状态 ──────────────────────────
   tabs: [
-    { id: genId(), type: 'device', title: 'Device Memory', baseAddress: 0x08000000, data: null, size: 0, loading: false, eraseBefore: true, verifyAfter: true, resetAfter: false },
+    { id: genId(), type: 'device', title: 'Device Memory', baseAddress: 0x08000000, data: null, size: 0, loading: false, eraseMode: 'sector', verifyAfter: true, resetAfter: false },
   ],
   activeTabId: null,
 
@@ -237,7 +250,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     const id = genId()
     const fileName = getFileName(path)
     set((state) => ({
-      tabs: [...state.tabs, { id, type: 'file', title: fileName, filePath: path, baseAddress: 0, data: null, size: 0, loading: true, eraseBefore: true, verifyAfter: true, resetAfter: false }],
+      tabs: [...state.tabs, { id, type: 'file', title: fileName, filePath: path, baseAddress: 0, data: null, size: 0, loading: true, eraseMode: 'sector', verifyAfter: true, resetAfter: false }],
       activeTabId: id,
     }))
 
@@ -254,7 +267,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     const id = genId()
     const deviceTabs = get().tabs.filter((t) => t.type === 'device').length
     set((state) => ({
-      tabs: [...state.tabs, { id, type: 'device', title: `Device Memory ${deviceTabs > 0 ? deviceTabs + 1 : ''}`.trim(), baseAddress: 0x08000000, data: null, size: 0, loading: false, eraseBefore: true, verifyAfter: true, resetAfter: false }],
+      tabs: [...state.tabs, { id, type: 'device', title: `Device Memory ${deviceTabs > 0 ? deviceTabs + 1 : ''}`.trim(), baseAddress: 0x08000000, data: null, size: 0, loading: false, eraseMode: 'sector', verifyAfter: true, resetAfter: false }],
       activeTabId: id,
     }))
   },
@@ -384,7 +397,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     const id = genId()
     const fileName = getFileName(path)
     set((state) => ({
-      tabs: [...state.tabs, { id, type: 'file', title: fileName, filePath: path, baseAddress: address, data: null, size: 0, loading: true, eraseBefore: true, verifyAfter: true, resetAfter: false }],
+      tabs: [...state.tabs, { id, type: 'file', title: fileName, filePath: path, baseAddress: address, data: null, size: 0, loading: true, eraseMode: 'sector', verifyAfter: true, resetAfter: false }],
       activeTabId: id,
     }))
 
@@ -480,18 +493,19 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     if (tab.type === 'file' && !tab.filePath) return
     if (tab.type === 'device' && !tab.data) return
     const shouldVerify = verify ?? tab.verifyAfter
-    const { eraseBefore, resetAfter } = tab
+    const { eraseMode, resetAfter } = tab
     const title = shouldVerify ? '编程并校验' : '编程'
-    await wrapOperation(set, get, title, eraseBefore ? '擦除中...' : '编程中...', async () => {
+    await wrapOperation(set, get, title, eraseMode === 'chip' ? '整片擦除中...' : '擦除目标扇区中...', async () => {
       if (tab.type === 'device' && tab.data) {
         // Device Memory tab：使用 base64 数据编程
-        return await flashService.programFlash(uid, '', shouldVerify, resetAfter, tab.baseAddress, tab.data)
+        return await flashService.programFlash(uid, '', shouldVerify, resetAfter, tab.baseAddress, tab.data, eraseMode)
       }
       // File tab：使用文件路径
-      return await flashService.programFlash(uid, tab.filePath!, shouldVerify, resetAfter, tab.baseAddress)
+      return await flashService.programFlash(uid, tab.filePath!, shouldVerify, resetAfter, tab.baseAddress, undefined, eraseMode)
     }, (r) => {
       const speed = r.bytes_written > 0 && r.duration_ms > 0 ? ` · ${(r.bytes_written / 1024 / (r.duration_ms / 1000)).toFixed(1)} KB/s` : ''
-      return `写入 ${formatSize(r.bytes_written)} · 耗时 ${(r.duration_ms / 1000).toFixed(2)}s${speed}`
+      const stages = describeStages(r as FlashResult)
+      return `写入 ${formatSize(r.bytes_written)} · 耗时 ${(r.duration_ms / 1000).toFixed(2)}s${speed}${stages ? ` · ${stages}` : ''}`
     })
   },
 
@@ -774,7 +788,7 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
           data: tab.data,
           size: tab.size,
           loading: false,
-          eraseBefore: true,
+          eraseMode: 'sector',
           verifyAfter: true,
           resetAfter: false,
           rightData: refData,
@@ -847,7 +861,14 @@ export const useFlashStore = create<FlashStore>((set, get) => ({
     if (activeNotifId) {
       const notif = useNotificationStore.getState()
       if (data.success) {
-        notif.update(activeNotifId, { type: 'success', title: '操作完成', message: `写入 ${formatSize(data.bytes_written ?? 0)} · 耗时 ${(data.duration_ms / 1000).toFixed(2)}s`, autoClose: true, autoCloseDelay: 3000 })
+        const stages = describeStages(data)
+        notif.update(activeNotifId, {
+          type: 'success',
+          title: '操作完成',
+          message: `写入 ${formatSize(data.bytes_written ?? 0)} · 耗时 ${(data.duration_ms / 1000).toFixed(2)}s${stages ? ` · ${stages}` : ''}`,
+          autoClose: true,
+          autoCloseDelay: 3000,
+        })
       } else {
         notif.update(activeNotifId, { type: 'error', title: '操作失败', message: data.error ?? '未知错误', autoClose: true, autoCloseDelay: 5000 })
       }
